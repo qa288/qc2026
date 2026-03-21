@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ app_name }} 登录</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body class="login-body">
+    <main class="login-shell">
+      <section class="login-intro">
+        <p class="login-kicker">千川实时经营看板</p>
+        <h1>{{ app_name }}</h1>
+        <p class="login-copy">面向老板和运营主管的实时数据面板，聚焦账户、计划、提醒与历史留痕。</p>
+        <div class="login-highlights">
+          <article class="login-highlight">
+            <strong>1 分钟</strong>
+            <span>自动采集</span>
+          </article>
+          <article class="login-highlight">
+            <strong>账户 + 计划</strong>
+            <span>同屏决策</span>
+          </article>
+          <article class="login-highlight">
+            <strong>历史留存</strong>
+            <span>分钟级快照</span>
+          </article>
+        </div>
+        <ul class="login-notes">
+          <li>支持账户、计划、商品效果快速定位</li>
+          <li>支持规则告警和异常计划复核</li>
+          <li>适合桌面端持续盯盘和投流调整</li>
+        </ul>
+      </section>
+
+      <section class="login-card">
+        <div class="login-card-head">
+          <p class="login-card-kicker">安全入口</p>
+          <h2>登录看板</h2>
+          <p class="login-card-copy">输入账号和密码后进入实时数据页。</p>
+        </div>
+        <form method="post" action="/login" class="login-form">
+          <label>
+            <span>账号</span>
+            <input class="login-input" type="text" name="username" autocomplete="username" placeholder="请输入账号" autofocus required />
+          </label>
+          <label>
+            <span>密码</span>
+            <input class="login-input" type="password" name="password" autocomplete="current-password" placeholder="请输入密码" required />
+          </label>
+          <button type="submit" class="button primary full login-submit">登录</button>
+        </form>
+        <p class="login-help">公网访问默认启用登录保护，登录后可查看账户、计划、历史和告警规则。</p>
+      </section>
+    </main>
+  </body>
+</html>

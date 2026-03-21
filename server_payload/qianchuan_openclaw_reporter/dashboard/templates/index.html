@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ app_name }}</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero hero-shell top-shell">
+        <div class="top-headline">
+          <div class="top-brand-block">
+            <div class="hero-chip-row">
+              <span class="hero-chip strong">实时看板</span>
+              <span class="hero-chip">工作台 {{ customer_center_id }}</span>
+              <span class="hero-chip">1 分钟刷新</span>
+            </div>
+            <div class="top-title-row top-title-inline">
+              <h1>{{ app_name }}</h1>
+              <p class="hero-copy">账户、计划、商品、员工与素材实时看板。</p>
+            </div>
+          </div>
+
+          <div class="top-inline-meta">
+            <div class="top-meta-pill" id="heroMetaCard">
+              <span class="top-meta-pill-label">主快照</span>
+              <strong id="heroStatusText">等待数据</strong>
+              <span class="top-meta-pill-sub" id="heroStatusHint">自动同步：每 1 分钟</span>
+            </div>
+            <div class="top-meta-pill">
+              <span class="top-meta-pill-label">调度</span>
+              <strong id="lastSnapshotText">等待数据</strong>
+              <span class="top-meta-pill-sub" id="refreshHintText">自动同步：每 1 分钟</span>
+            </div>
+          </div>
+
+          <div class="hero-actions top-actions">
+            <button id="syncButton" class="button primary">刷新</button>
+            <form method="post" action="/logout">
+              <button type="submit" class="button ghost">退出登录</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="top-nav-row">
+          <div class="worktop-bar">
+            <div class="view-tabs" id="viewTabs">
+              <button type="button" class="view-tab active" data-view="overview">总览</button>
+              <button type="button" class="view-tab" data-view="accounts">账户</button>
+              <button type="button" class="view-tab" data-view="breakdown">经营拆解</button>
+              <button type="button" class="view-tab" data-view="plans">计划</button>
+              <button type="button" class="view-tab" data-view="materials">素材</button>
+              <button type="button" class="view-tab" data-view="signals">通知规则</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section class="view-section is-active" data-view="overview">
+        <section class="overview-shell">
+          <article id="overviewHeroCard" class="overview-hero-card"></article>
+          <aside class="system-rail">
+            <article class="system-card" id="systemStatusCard"></article>
+            <article class="system-card" id="detailSyncCard"></article>
+          </aside>
+        </section>
+
+        <section class="kpi-grid overview-kpi-strip" id="kpiGrid"></section>
+
+        <section class="board-grid">
+          <div class="panel alert-panel">
+            <div class="panel-head overview-alert-head">
+              <div>
+                <p class="panel-kicker">老板关注</p>
+                <h2>最新提醒</h2>
+              </div>
+              <div class="meta-block compact single-line">
+                <span>优先看最近命中、待处理数量和重点对象</span>
+              </div>
+            </div>
+            <div class="alert-focus-grid">
+              <div class="alert-summary-shell">
+                <div class="alert-section-head">
+                  <span>提醒摘要</span>
+                  <span>聚焦最近命中与待处理</span>
+                </div>
+                <div id="alertSummary" class="alert-summary"></div>
+              </div>
+              <div class="alert-stream-shell">
+                <div class="alert-section-head">
+                  <span>最近命中记录</span>
+                  <span>按时间倒序展示</span>
+                </div>
+                <div id="alertStream" class="alert-stream empty">暂无告警记录</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-section" data-view="accounts">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">运营视角</p>
+              <h2>账户表现</h2>
+            </div>
+            <div class="toolbar">
+              <div class="range-filter-group">
+                <div class="range-switch" id="accountRangeSwitch">
+                  <button type="button" class="range-button" data-range="day">日</button>
+                  <button type="button" class="range-button" data-range="week">周</button>
+                  <button type="button" class="range-button" data-range="month">月</button>
+                  <button type="button" class="range-button" data-range="custom">自定义</button>
+                </div>
+                <div class="date-range-inline">
+                  <input id="accountDateStart" class="date-input" type="date" />
+                  <span class="date-range-sep">至</span>
+                  <input id="accountDateEnd" class="date-input" type="date" />
+                  <button id="accountDateApply" class="date-apply-button" type="button">查询</button>
+                </div>
+              </div>
+              <input id="accountSearch" class="search-input" type="search" placeholder="搜索账户名" />
+            </div>
+          </div>
+          <div class="section-range-meta" id="accountRangeMeta">统计范围：加载中</div>
+          <div class="table-shell account-table-shell">
+            <table id="accountTable" class="data-table"></table>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-section" data-view="breakdown">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">经营拆解</p>
+              <h2>商品与员工排名</h2>
+            </div>
+            <div class="toolbar">
+              <div class="range-filter-group">
+                <div class="range-switch" id="breakdownRangeSwitch">
+                  <button type="button" class="range-button" data-range="day">日</button>
+                  <button type="button" class="range-button" data-range="week">周</button>
+                  <button type="button" class="range-button" data-range="month">月</button>
+                  <button type="button" class="range-button" data-range="custom">自定义</button>
+                </div>
+                <div class="date-range-inline">
+                  <input id="breakdownDateStart" class="date-input" type="date" />
+                  <span class="date-range-sep">至</span>
+                  <input id="breakdownDateEnd" class="date-input" type="date" />
+                  <button id="breakdownDateApply" class="date-apply-button" type="button">查询</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="section-range-meta" id="breakdownRangeMeta">统计范围：加载中</div>
+          <div class="rank-grid">
+            <div class="rank-panel">
+              <div class="rank-panel-head">
+                <div>
+                  <p class="panel-kicker">员工维度</p>
+                  <h3>员工排名</h3>
+                </div>
+                <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索员工 / 代表计划" />
+              </div>
+              <div class="rank-note">当前按计划里的抖音号 / 主播字段归属员工，空值统一归到未归属。</div>
+              <div class="table-shell rank-table-shell">
+                <table id="employeeTable" class="data-table compact"></table>
+              </div>
+              <div id="employeeDetail" class="detail-panel empty">点击员工行，查看该员工当前负责的计划规模和核心表现。</div>
+            </div>
+            <div class="rank-panel">
+              <div class="rank-panel-head">
+                <div>
+                  <p class="panel-kicker">商品维度</p>
+                  <h3>商品排名</h3>
+                </div>
+                <input id="productSearch" class="search-input rank-search" type="search" placeholder="搜索商品 / 代表计划" />
+              </div>
+              <div class="rank-note">商品榜由计划效果聚合生成，支持按订单、支付、ROI、消耗持续排序。</div>
+              <div class="table-shell rank-table-shell">
+                <table id="productTable" class="data-table compact"></table>
+              </div>
+              <div id="productDetail" class="detail-panel empty">点击商品行，查看该商品对应的计划规模、账户覆盖和代表计划。</div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-section" data-view="plans">
+        <section class="panel decision-panel">
+          <div class="panel-head plan-head">
+            <div>
+              <p class="panel-kicker">投流决策台</p>
+              <h2>计划效果明细</h2>
+            </div>
+            <div class="toolbar wide">
+              <div class="range-filter-group">
+                <div class="range-switch" id="planRangeSwitch">
+                  <button type="button" class="range-button" data-range="day">日</button>
+                  <button type="button" class="range-button" data-range="week">周</button>
+                  <button type="button" class="range-button" data-range="month">月</button>
+                  <button type="button" class="range-button" data-range="custom">自定义</button>
+                </div>
+                <div class="date-range-inline">
+                  <input id="planDateStart" class="date-input" type="date" />
+                  <span class="date-range-sep">至</span>
+                  <input id="planDateEnd" class="date-input" type="date" />
+                  <button id="planDateApply" class="date-apply-button" type="button">查询</button>
+                </div>
+              </div>
+              <input id="planSearch" class="search-input" type="search" placeholder="搜索计划 / 商品 / 账户 / 主播" />
+              <select id="planAccountFilter" class="select-input">
+                <option value="">全部账户</option>
+              </select>
+            </div>
+          </div>
+          <div class="section-range-meta" id="planRangeMeta">统计范围：加载中</div>
+          <div class="decision-layout">
+            <div class="decision-main">
+              <div class="table-shell tall">
+                <table id="planTable" class="data-table"></table>
+              </div>
+            </div>
+            <aside class="decision-side">
+              <div id="planDetail" class="detail-panel empty">点击计划行，查看该计划的投放字段、商品信息和当前状态。</div>
+              <div id="planAssetSummary" class="detail-panel empty">点击计划行，查看该计划最新同步到本地的商品、素材和视频摘要。</div>
+            </aside>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-section" data-view="materials">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">素材分析</p>
+              <h2>素材效果排名</h2>
+            </div>
+            <div class="toolbar wide">
+              <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材 / 素材ID / 计划 / 账户" />
+              <button id="syncExtendedButton" class="button ghost" type="button">刷新素材</button>
+            </div>
+          </div>
+          <div class="section-range-meta" id="materialSyncMeta">素材榜基于最近一次明细同步生成。</div>
+          <div class="decision-layout">
+            <div class="decision-main">
+              <div class="table-shell tall">
+                <table id="materialTable" class="data-table"></table>
+              </div>
+            </div>
+            <aside class="decision-side">
+              <div id="materialDetail" class="detail-panel empty">点击素材行，查看该素材覆盖的账户、计划和当前核心表现。</div>
+            </aside>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-section" data-view="signals">
+        <section class="panel signal-panel">
+          <div class="panel-head signal-panel-head">
+            <div>
+              <p class="panel-kicker">通知联动</p>
+              <h2>通知与阈值规则</h2>
+            </div>
+          </div>
+          <div id="signalOverview" class="signal-summary-strip"></div>
+
+          <div class="signal-console">
+            <section class="signal-config-card signal-notify-card">
+              <div class="signal-config-head">
+                <div>
+                  <p class="panel-kicker">通知设置</p>
+                  <h3>告警通知</h3>
+                </div>
+                <button type="submit" form="notificationForm" class="button primary">保存通知</button>
+              </div>
+              <div id="notificationStatus" class="notify-inline-status"></div>
+              <form id="notificationForm" class="signal-compact-form">
+                <div class="signal-form-row signal-form-row-notify">
+                  <label class="toggle-chip">
+                    <input name="enabled" type="checkbox" />
+                    <span>开启通知</span>
+                  </label>
+                  <label>
+                    <span>渠道</span>
+                    <select name="channel" required>
+                      <option value="feishu">Feishu</option>
+                      <option value="slack">Slack</option>
+                      <option value="telegram">Telegram</option>
+                      <option value="email">Email</option>
+                      <option value="dingtalk">DingTalk</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>账号</span>
+                    <input name="account" type="text" placeholder="default" />
+                  </label>
+                  <label class="wide-field">
+                    <span>目标</span>
+                    <input name="target" type="text" placeholder="open_id、chat_id 或群目标值" />
+                  </label>
+                  <label class="toggle-chip">
+                    <input name="alert_enabled" type="checkbox" />
+                    <span>阈值告警</span>
+                  </label>
+                  <label>
+                    <span>告警条数</span>
+                    <input name="alert_batch_size" type="number" step="1" min="1" max="20" value="6" />
+                  </label>
+                </div>
+              </form>
+            </section>
+
+            <section class="signal-config-card signal-rule-card">
+              <div class="signal-config-head">
+                <div>
+                  <p class="panel-kicker">阈值规则</p>
+                  <h3>快速新增</h3>
+                </div>
+                <button type="submit" form="ruleForm" class="button primary">新增规则</button>
+              </div>
+              <form id="ruleForm" class="signal-compact-form">
+                <div class="signal-form-row signal-form-row-rule">
+                  <label>
+                    <span>对象</span>
+                    <select name="entity_type" required>
+                      <option value="plan">计划</option>
+                      <option value="account">账户</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>指标</span>
+                    <select name="metric" required>
+                      <option value="roi">ROI</option>
+                      <option value="stat_cost">消耗</option>
+                      <option value="order_count">订单数</option>
+                      <option value="pay_amount">支付金额</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>比较</span>
+                    <select name="operator" required>
+                      <option value="lt">&lt;</option>
+                      <option value="lte">&lt;=</option>
+                      <option value="gt">&gt;</option>
+                      <option value="gte">&gt;=</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>阈值</span>
+                    <input name="threshold" type="number" step="0.01" required />
+                  </label>
+                  <label>
+                    <span>最低消耗</span>
+                    <input name="min_spend" type="number" step="0.01" value="0" />
+                  </label>
+                  <label>
+                    <span>冷却分钟</span>
+                    <input name="cooldown_minutes" type="number" step="1" value="60" />
+                  </label>
+                  <label class="wide-field">
+                    <span>限定 ID</span>
+                    <input name="target_id" type="text" placeholder="留空表示全部生效" />
+                  </label>
+                  <label class="wide-field">
+                    <span>备注</span>
+                    <input name="note" type="text" placeholder="例如：ROI 低于 1.2 立即复核" />
+                  </label>
+                  <label class="toggle-chip">
+                    <input name="enabled" type="checkbox" checked />
+                    <span>立即启用</span>
+                  </label>
+                </div>
+              </form>
+            </section>
+
+            <section class="signal-config-card signal-rule-list-card">
+              <div class="signal-config-head">
+                <div>
+                  <p class="panel-kicker">规则列表</p>
+                  <h3>已生效规则</h3>
+                </div>
+              </div>
+              <div class="table-shell">
+                <table id="ruleTable" class="data-table compact"></table>
+              </div>
+            </section>
+          </div>
+        </section>
+      </section>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

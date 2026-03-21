@@ -1,0 +1,19 @@
+{
+  "app_id": 1859509952872521,
+  "app_secret": "REPLACE_ME",
+  "refresh_token": "REPLACE_ME",
+  "customer_center_id": 1802375893828620,
+  "feishu_target": "ou_REPLACE_ME",
+  "timezone": "Asia/Shanghai",
+  "account_source": "QIANCHUAN",
+  "marketing_goal": "ALL",
+  "order_platform": "QIANCHUAN",
+  "max_workers": 6,
+  "plan_max_workers": 2,
+  "detail_sync_workers": 2,
+  "detail_sync_plan_limit": 0,
+  "detail_material_types": ["VIDEO", "IMAGE", "TITLE", "CAROUSEL", "LIVE_ROOM"],
+  "max_plan_rows": 30,
+  "plan_page_size": 100,
+  "plan_marketing_goals": ["VIDEO_PROM_GOODS", "LIVE_PROM_GOODS"]
+}

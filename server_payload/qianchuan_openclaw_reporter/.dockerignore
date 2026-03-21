@@ -1,0 +1,7 @@
+config.json
+.env.dashboard
+state/
+data/
+logs/
+__pycache__/
+*.pyc
