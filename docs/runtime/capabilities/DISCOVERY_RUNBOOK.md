@@ -40,26 +40,28 @@ python3 /path/to/qianchuan-reporter/tools/discover_qianchuan_capabilities.py \
 
 ## 4. 服务器运行
 
-当前线上目录：
+建议先约定两个变量：
 
-- `/root/.openclaw/workspace/qianchuan-reporter`
+- `REPO_ROOT=/path/to/repo`
+- `APP_ROOT=$REPO_ROOT/server_payload/qianchuan_openclaw_reporter`
 
 建议步骤：
 
 1. 先同步最新 `report_qianchuan.py` 和 `tools/discover_qianchuan_capabilities.py`
-2. 把 dashboard 的最新 token 缓存同步到 workspace：
+2. 准备脚本需要的 `state/token_cache.json`：
 
 ```bash
-cp /opt/qianchuan-dashboard/data/token_cache.json \
-  /root/.openclaw/workspace/qianchuan-reporter/state/token_cache.json
+mkdir -p "$APP_ROOT/state"
+cp "$APP_ROOT/data/qianchuan_latest_token.json" \
+  "$APP_ROOT/state/token_cache.json"
 ```
 
 3. 再运行发现脚本：
 
 ```bash
-python3 /root/.openclaw/workspace/qianchuan-reporter/tools/discover_qianchuan_capabilities.py \
-  --base-dir /root/.openclaw/workspace/qianchuan-reporter \
-  --output-dir /root/.openclaw/workspace/qianchuan-reporter/docs/discovery
+python3 "$APP_ROOT/tools/discover_qianchuan_capabilities.py" \
+  --base-dir "$APP_ROOT" \
+  --output-dir "$REPO_ROOT/docs/runtime/capabilities/discovery"
 ```
 
 ## 5. 怎么看结果

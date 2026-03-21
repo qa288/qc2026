@@ -1,6 +1,8 @@
 # OpenClaw 主提示词：巨量千川官方采集、定时推送与增量扩展
 
-以下内容可直接作为你给 OpenClaw 的长期主提示词使用。目标是让它先按标准架构搭系统，后续你只需要说“我要什么数据”，它就按既定规则增量扩展，而不是重写。
+> 说明：这是一份历史初始化模板，主要对应早期 `SQLite + OpenClaw cron + 日报/简报` 方案。  
+> 当前正式开发与部署基线已经改为 `FastAPI + PostgreSQL + Redis + Celery + 独立 scheduler + Docker Compose`。  
+> 后续如需继续使用提示词，应优先参考 [目标技术架构与部署基线](/Users/xy/千川/docs/standard/03_目标技术架构与部署基线.md) 和 [已确认决策基线](/Users/xy/千川/docs/standard/13_已确认决策基线.md)，不要直接按本文原样落地。
 
 ---
 

@@ -1,43 +1,42 @@
-# Qianchuan OpenClaw Reporter
+# Qianchuan Runtime Docs
 
-这是一个运行在 OpenClaw workspace 下的巨量千川报表目录。
+这是当前千川看板的试运行实现与运行口径文档。
 
 当前定位：
 
-- 用巨量官方开放平台接口采集千川数据
-- 用 `FastAPI + PostgreSQL + Redis + Celery + 独立 scheduler` 运行主系统
-- 用 Docker Compose 统一部署 Web、Worker、Scheduler、PostgreSQL、Redis
-- 现网服务器通过 `1Panel` 管理反向代理、域名、证书和 Docker 应用
-- 通知当前只保留阈值告警，通道先走 OpenClaw 已配置 channel
+- 记录当前运行中的代码架构、数据链路和页面行为
+- 记录官方能力验证结论与已踩坑点
+- 为后续重构、迁移和新增功能提供运行事实参考
+- 不替代 `docs/standard/` 的正式开发决策文档
 
 在本目录内进行任何修改前，必须先阅读：
 
 - [FUNCTIONAL_SPEC.md](./FUNCTIONAL_SPEC.md)
 - [STANDARD.md](./STANDARD.md)
 - [AGENTS.md](./AGENTS.md)
-- [docs/QIANCHUAN_OFFICIAL_API_STANDARD.md](./docs/QIANCHUAN_OFFICIAL_API_STANDARD.md)
-- [docs/QIANCHUAN_CAPABILITY_CATALOG.md](./docs/QIANCHUAN_CAPABILITY_CATALOG.md)
-- [docs/DATA_ARCHITECTURE.md](./docs/DATA_ARCHITECTURE.md)
+- [QIANCHUAN_OFFICIAL_API_STANDARD.md](./capabilities/QIANCHUAN_OFFICIAL_API_STANDARD.md)
+- [QIANCHUAN_CAPABILITY_CATALOG.md](./capabilities/QIANCHUAN_CAPABILITY_CATALOG.md)
+- [DATA_ARCHITECTURE.md](./capabilities/DATA_ARCHITECTURE.md)
 
-## 当前文件
+## 关联代码与配置
 
-- `config.json`
+- `server_payload/qianchuan_openclaw_reporter/config.json`
   - 真实运行配置
-- `config.example.json`
+- `server_payload/qianchuan_openclaw_reporter/config.example.json`
   - 配置样例
-- `report_qianchuan.py`
+- `server_payload/qianchuan_openclaw_reporter/report_qianchuan.py`
   - 固定数据采集与报表生成脚本
-- `dashboard/`
+- `server_payload/qianchuan_openclaw_reporter/dashboard/`
   - Docker 内运行的经营看板服务
-- `docker-compose.dashboard.yml`
+- `server_payload/qianchuan_openclaw_reporter/docker-compose.dashboard.yml`
   - Web 看板的容器编排文件
-- `bridge_send_alerts.py`
+- `server_payload/qianchuan_openclaw_reporter/bridge_send_alerts.py`
   - 将页面触发的待发送阈值告警推送到 OpenClaw 已配置的通知渠道
-- `tools/discover_qianchuan_capabilities.py`
+- `server_payload/qianchuan_openclaw_reporter/tools/discover_qianchuan_capabilities.py`
   - 官方能力发现脚本，用于确认主题、维度、指标和必填过滤条件
-- `docs/`
+- `capabilities/`
   - 能力目录、架构文档、发现手册与最新发现结果
-- `docs/QIANCHUAN_OFFICIAL_API_STANDARD.md`
+- `capabilities/QIANCHUAN_OFFICIAL_API_STANDARD.md`
   - 给同事直接参考的官方接口开发标准手册
 - `STANDARD.md`
   - 长期标准文档
@@ -160,7 +159,7 @@ Dashboard 页面当前包含：
 - 员工维度属于派生实现
 - 剪辑人员 / 制作人 / 编辑人 不属于千川官方直接字段
 - 部分 `SITE_PROMOTION_POST_*` / `SITE_PROMOTION_PRODUCT_*` 主题还需补业务过滤条件
-- 最新探测结果见 [docs/discovery/capability_snapshot_latest.md](./docs/discovery/capability_snapshot_latest.md)
+- 最新探测结果见 [capability_snapshot_latest.md](./capabilities/discovery/capability_snapshot_latest.md)
 
 当前员工维度口径：
 
@@ -180,13 +179,13 @@ Dashboard 页面当前包含：
 - 其它服务器只读主服务器的 token，不要各自独立刷新
 - 推荐读取方式：
   - 登录 dashboard 后请求 `GET /api/system/integrations/ocean-engine/token-latest`
-  - 或直接在主服务器读取 `/opt/qianchuan-dashboard/data/qianchuan_latest_token.json`
+  - 或直接在主服务器读取 `/opt/qianchuan/qianchuan_openclaw_reporter/data/qianchuan_latest_token.json`
 - token 刷新使用 Redis 分布式锁，避免多 worker 在过期点并发刷新
 
 ## 重要说明
 
 - 功能完整性、页面行为、通知能力、验收清单，以 `FUNCTIONAL_SPEC.md` 为第一基线。
-- 新增任何数据维度前，必须先看 `docs/QIANCHUAN_CAPABILITY_CATALOG.md`，不确定时先跑 `tools/discover_qianchuan_capabilities.py`。
-- 这是正式运行目录，不要随意重命名脚本、改动配置字段、删除 cron 对应逻辑。
+- 新增任何数据维度前，必须先看 `capabilities/QIANCHUAN_CAPABILITY_CATALOG.md`，不确定时先跑 `tools/discover_qianchuan_capabilities.py`。
+- 这是运行文档目录，对应代码目录不要随意重命名脚本、改动配置字段或删除任务逻辑。
 - 不要改掉 `9898` 的 dashboard 部署和登录保护，除非用户明确要求。
 - 如果要增加更多数据、更多维度、更多提醒，必须按 `STANDARD.md` 的扩展流程进行。

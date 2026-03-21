@@ -4,13 +4,12 @@
 
 目录说明：
 
-- `qianchuan_standard_docs/`
-  - 目标产品、架构、部署、运维、接口和执行清单文档
+- `docs/`
+  - 全部正式文档入口
+  - 包含 `standard / runtime / integrations / prompts`
 - `server_payload/qianchuan_openclaw_reporter/`
   - 当前可运行代码
   - 已迁移到 `FastAPI + PostgreSQL + Redis + Celery + scheduler + Docker Compose`
-- `docs/`
-  - 补充文档与 OpenClaw 主提示词
 
 当前部署基线：
 
@@ -23,5 +22,6 @@
 
 当前正式文档入口：
 
-- `qianchuan_standard_docs/00_README_千川投放趋势大盘.md`
-- `server_payload/qianchuan_openclaw_reporter/README.md`
+- `docs/README.md`
+- `docs/standard/00_README_千川投放趋势大盘.md`
+- `docs/runtime/README.md`
