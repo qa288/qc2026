@@ -152,6 +152,7 @@ Dashboard 页面当前包含：
 - 分钟级：`summary_snapshots / account_snapshots / plan_snapshots`
 - 分钟级余额与钱包：`account_balances / shared_wallets / shared_wallet_account_relations`
 - 10 分钟级细粒度：`plan_detail_snapshots / product_snapshots / material_snapshots / video_origin_flags`
+- 素材预聚合：`material_rollups`
 - 细粒度同步状态：`extended_sync_runs`
 
 当前页面 API 额外可直接读取：
@@ -159,11 +160,11 @@ Dashboard 页面当前包含：
 - `GET /api/public/employee-rankings`
   - 匿名公开归属人榜
 - `POST /api/sync/extended`
-  - 手动触发一次细粒度同步
+  - 手动提交一次细粒度同步任务，接口立即返回 `202`
 - `GET /api/plans/{ad_id}/assets`
   - 读取某条计划最近一次落库的详情、商品、素材和视频首发标记
 - `GET /api/material-rankings`
-  - 读取最近一次素材聚合榜单
+  - 读取素材聚合榜单，优先走 `material_rollups`
 - `GET /api/system/integrations/ocean-engine/token-latest`
   - 登录后读取当前最新 `access_token / refresh_token / expires_at / updated_at`
 - `POST /api/system/integrations/ocean-engine/exchange-auth-code`
@@ -193,6 +194,54 @@ Dashboard 页面当前包含：
 - 未命中任何规则时统一归到 `未归属`
 - 若当前还没有配置任何归属规则，则公开页和后台归属人榜会回退到 `anchor_name` 兜底聚合；一旦配置归属人后，公开页仅展示正式归属人结果
 - 当前运营角色查看归属规则页时默认为只读；管理员可修改归属人、关键词和绑定
+
+## 查询执行边界
+
+当前正式规则：
+
+- 页面查询接口只读本地库，不允许在查询请求里直接拉取 OceanEngine 远程报表
+- 官方接口只允许出现在：
+  - 定时同步任务
+  - 手动补数
+  - token 换取与刷新
+- 当前已确认纯读库的页面接口包括：
+  - `GET /api/public/employee-rankings`
+  - `GET /api/dashboard`
+  - `GET /api/performance`
+  - `GET /api/material-rankings`
+  - `GET /api/accounts/{advertiser_id}/history`
+  - `GET /api/plans/{ad_id}/history`
+  - `GET /api/plans/{ad_id}/assets`
+
+这条规则是为了避免再次出现“切时间范围时页面绕回官方接口、导致响应变慢”的问题。
+
+## 历史回补与预聚合
+
+当前历史与性能策略：
+
+- `GET /api/performance`
+  - 默认只读 `summary_snapshots / account_snapshots / plan_snapshots`
+  - 若查询 `昨日 / 本周 / 本月 / 指定日期范围` 时发现缺失历史日快照：
+    - 自动按天从官方接口回补
+    - 回补完成后写入 PostgreSQL
+    - 后续查询继续只读库
+- `GET /api/material-rankings`
+  - 优先读取 `material_rollups`
+  - `material_rollups` 在每次细粒度同步后生成
+  - 如历史老快照尚未生成 `material_rollups`，才临时回退到 `material_snapshots` 聚合
+
+## 手动同步行为
+
+当前手动同步接口统一改为“入队，不阻塞等待”：
+
+- `POST /api/sync`
+- `POST /api/sync/extended`
+
+接口行为：
+
+- 立即返回 `202 Accepted`
+- 由 Celery Worker 异步执行
+- 避免经过 1Panel / 反向代理时因长任务导致 `504 Gateway Timeout`
 
 当前 Web 看板数据刷新节奏：
 
