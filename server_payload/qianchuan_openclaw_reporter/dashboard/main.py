@@ -2741,6 +2741,30 @@ class DashboardService:
         selected.sort(key=lambda item: str(item.get("snapshot_time") or ""))
         return selected
 
+    def _missing_summary_days(self, conn: Any, start_dt: datetime, end_dt: datetime) -> list[datetime]:
+        start_day = start_dt.date()
+        end_day = end_dt.date()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT substr(snapshot_time, 1, 10) AS day_key
+            FROM summary_snapshots
+            WHERE snapshot_time >= ?
+              AND snapshot_time <= ?
+            """,
+            (
+                start_dt.strftime("%Y-%m-%d 00:00:00"),
+                end_dt.strftime("%Y-%m-%d 23:59:59"),
+            ),
+        ).fetchall()
+        existing_days = {str(row["day_key"] or "") for row in rows if str(row["day_key"] or "").strip()}
+        missing: list[datetime] = []
+        cursor = start_day
+        while cursor <= end_day:
+            if cursor.strftime("%Y-%m-%d") not in existing_days:
+                missing.append(datetime(cursor.year, cursor.month, cursor.day))
+            cursor += timedelta(days=1)
+        return missing
+
     def _aggregate_account_snapshots(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[int, dict[str, Any]] = {}
         for row in rows:
@@ -2934,11 +2958,25 @@ class DashboardService:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def _collect_window_snapshot(self, start_dt: datetime, end_dt: datetime) -> dict[str, Any]:
+    def _collect_window_snapshot(
+        self,
+        start_dt: datetime,
+        end_dt: datetime,
+        *,
+        include_balances: bool = True,
+    ) -> dict[str, Any]:
         config = self.read_config()
         client = self.build_client(config)
         accounts = client.list_accounts()
-        balance_snapshot = self._collect_balance_snapshot(client, accounts)
+        if include_balances:
+            balance_snapshot = self._collect_balance_snapshot(client, accounts)
+        else:
+            balance_snapshot = {
+                "account_balances": [],
+                "shared_wallets": [],
+                "wallet_relations": [],
+                "errors": [],
+            }
         account_workers = int(config.get("max_workers", 6) or 6)
         plan_workers = int(config.get("plan_max_workers", 2) or 2)
 
@@ -3061,6 +3099,37 @@ class DashboardService:
         config = self.read_config()
         start_dt, end_dt, _title, _label = build_window("intraday", config["timezone"])
         return self._collect_window_snapshot(start_dt, end_dt)
+
+    def backfill_performance_history(self, start_dt: datetime, end_dt: datetime) -> dict[str, Any]:
+        tz = ZoneInfo(self.read_config()["timezone"])
+        today = datetime.now(tz).date()
+        with self.db() as conn:
+            missing_days = self._missing_summary_days(conn, start_dt, end_dt)
+        backfilled = 0
+        skipped_current_day = 0
+        for day_marker in missing_days:
+            target_day = day_marker.date()
+            if target_day >= today:
+                skipped_current_day += 1
+                continue
+            day_start = datetime(target_day.year, target_day.month, target_day.day, 0, 0, 0, tzinfo=tz)
+            day_end = datetime(target_day.year, target_day.month, target_day.day, 23, 59, 59, tzinfo=tz)
+            payload = self._collect_window_snapshot(day_start, day_end, include_balances=False)
+            payload["snapshot_time"] = day_end.strftime("%Y-%m-%d %H:%M:%S")
+            payload["window_start"] = day_start.strftime("%Y-%m-%d %H:%M:%S")
+            payload["window_end"] = day_end.strftime("%Y-%m-%d %H:%M:%S")
+            payload["accountBalances"] = []
+            payload["sharedWallets"] = []
+            payload["walletRelations"] = []
+            if "errors" not in payload or not isinstance(payload["errors"], dict):
+                payload["errors"] = {"accounts": [], "plans": [], "balances": []}
+            else:
+                payload["errors"]["balances"] = []
+            self.persist_snapshot(payload)
+            backfilled += 1
+        if backfilled:
+            self._performance_cache.clear()
+        return {"backfilled_days": backfilled, "skipped_current_day": skipped_current_day}
 
     def persist_snapshot(self, payload: dict[str, Any]) -> None:
         with self.db() as conn:
@@ -4015,6 +4084,8 @@ class DashboardService:
             start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
         else:
             start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
+        if normalized in {"week", "month", "custom", "yesterday"}:
+            self.backfill_performance_history(start_dt, end_dt)
         payload = self._performance_snapshot_from_db(start_dt, end_dt)
         payload["range_key"] = normalized
         payload["range_label"] = range_label
