@@ -21,8 +21,9 @@
 2. [已确认决策基线](/Users/xy/千川/docs/standard/13_已确认决策基线.md)
 3. [目标技术架构与部署基线](/Users/xy/千川/docs/standard/03_目标技术架构与部署基线.md)
 4. [内部接口与集成规范](/Users/xy/千川/docs/standard/05_内部接口与集成规范.md)
-5. [运行目录说明](/Users/xy/千川/docs/runtime/README.md)
-6. [官方能力目录](/Users/xy/千川/docs/runtime/capabilities/QIANCHUAN_CAPABILITY_CATALOG.md)
+5. [公开页与后台重构方案](/Users/xy/千川/docs/standard/18_公开页与后台重构方案.md)
+6. [运行目录说明](/Users/xy/千川/docs/runtime/README.md)
+7. [官方能力目录](/Users/xy/千川/docs/runtime/capabilities/QIANCHUAN_CAPABILITY_CATALOG.md)
 
 统一规则：
 

@@ -28,6 +28,7 @@ except Exception:  # noqa: BLE001
 ACCESS_TOKEN_URL = "https://ad.oceanengine.com/open_api/oauth2/access_token/"
 REFRESH_URL = "https://ad.oceanengine.com/open_api/oauth2/refresh_token/"
 CUSTOMER_CENTER_URL = "https://ad.oceanengine.com/open_api/2/customer_center/advertiser/list/"
+ACCOUNT_FUND_URL = "https://api.oceanengine.com/open_api/v3.0/account/fund/get/"
 ACCOUNT_REPORT_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/get/"
 PLAN_LIST_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/list/"
 UNI_PROMOTION_CONFIG_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/config/get/"
@@ -92,6 +93,7 @@ TOKEN_LOCK_BLOCKING_TIMEOUT_SECONDS = int(
 )
 
 PLAN_MONEY_SCALE = 100000.0
+ACCOUNT_FUND_MONEY_SCALE = 100.0
 RETRYABLE_API_CODES = {40100, 50000}
 
 DELIVERY_STATUS_LABELS = {
@@ -537,6 +539,38 @@ class OceanEngineClient:
                 return results
             page += 1
 
+    def get_account_funds(
+        self,
+        account_ids: list[int],
+        account_type: str = "QIANCHUAN",
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        params = {
+            "account_ids": [int(item) for item in account_ids],
+            "account_type": account_type,
+        }
+        response = get_json_with_retries(ACCOUNT_FUND_URL, access_token, params)
+        if response.get("code") != 0:
+            raise ApiError(f"get account funds failed: {response}")
+        return response
+
+    def list_account_funds(
+        self,
+        account_ids: list[int],
+        account_type: str = "QIANCHUAN",
+        batch_size: int = 20,
+    ) -> list[dict[str, Any]]:
+        normalized = [int(item) for item in account_ids if int(item)]
+        if not normalized:
+            return []
+        rows: list[dict[str, Any]] = []
+        for start_index in range(0, len(normalized), batch_size):
+            batch = normalized[start_index : start_index + batch_size]
+            response = self.get_account_funds(batch, account_type=account_type)
+            data = response.get("data") or {}
+            rows.extend(data.get("list") or [])
+        return rows
+
     def get_uni_promotion_config(
         self,
         advertiser_id: int,
@@ -866,6 +900,10 @@ def format_money(value: float) -> str:
 
 def normalize_plan_money(value: Any) -> float:
     return round(float(value or 0.0) / PLAN_MONEY_SCALE, 2)
+
+
+def normalize_account_fund_money(value: Any) -> float:
+    return round(float(value or 0.0) / ACCOUNT_FUND_MONEY_SCALE, 2)
 
 
 def get_plan_marketing_goals(config: dict[str, Any]) -> list[str]:

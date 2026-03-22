@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ app_name }} 员工榜</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body class="public-body">
+    <main class="public-shell">
+      <header class="public-header">
+        <div class="public-header-copy">
+          <div class="hero-chip-row">
+            <span class="hero-chip strong">公开员工榜</span>
+            <span class="hero-chip">匿名可访问</span>
+            <span class="hero-chip">1 分钟刷新</span>
+          </div>
+          <h1>{{ app_name }}</h1>
+          <p>按归属人汇总消耗、支付、订单和 ROI，默认按消耗降序展示。</p>
+        </div>
+        <div class="public-header-actions">
+          <a class="button ghost" href="/login">登录工作台</a>
+        </div>
+      </header>
+
+      <section class="panel public-panel">
+        <div class="panel-head public-panel-head">
+          <div class="range-filter-group">
+            <div class="range-switch" id="publicRangeSwitch">
+              <button type="button" class="range-button" data-range="day">日</button>
+              <button type="button" class="range-button" data-range="week">周</button>
+              <button type="button" class="range-button" data-range="month">月</button>
+            </div>
+            <div class="date-range-inline custom-date-inline">
+              <span class="date-range-label">自定义</span>
+              <input id="publicDateStart" class="date-input" type="date" />
+              <span class="date-range-sep">至</span>
+              <input id="publicDateEnd" class="date-input" type="date" />
+              <button id="publicDateApply" class="date-apply-button" type="button">查询</button>
+            </div>
+          </div>
+          <div class="public-sort-strip">
+            <select id="publicSortKey" class="select-input compact">
+              <option value="stat_cost">按消耗</option>
+              <option value="pay_amount">按支付</option>
+              <option value="order_count">按订单</option>
+              <option value="roi">按 ROI</option>
+            </select>
+            <button id="publicSortDir" class="button ghost" type="button">降序</button>
+          </div>
+        </div>
+
+        <div class="section-range-meta public-range-meta" id="publicRangeMeta">统计范围：加载中</div>
+        <div class="table-shell tall">
+          <table id="publicEmployeeTable" class="data-table"></table>
+        </div>
+      </section>
+    </main>
+    <script src="/static/public.js"></script>
+  </body>
+</html>

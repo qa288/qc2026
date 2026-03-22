@@ -20,7 +20,7 @@
 - 当前正式运行栈：`FastAPI + PostgreSQL + Redis + Celery + Celery Beat + Docker Compose`
 - 当前前端形态：`Jinja2 + 原生 JS/CSS`
 - 当前站点运维入口：`1Panel`
-- 当前主入口域名：`ss.tyos.cc`
+- 当前主入口域名：`qc.tyos.cc`
 - 当前主机：`119.45.193.138`
 - 当前服务角色：
   - `web`
@@ -79,6 +79,14 @@
 
 - 阈值告警
 
+当前已纳入规则对象：
+
+- 账户
+- 计划
+- 账户余额
+- 共享钱包
+- 爆单计划
+
 当前通知链路：
 
 - 系统 -> `bridge_send_alerts.py` -> `openclaw message send` -> 已配置 channel
@@ -132,6 +140,16 @@ ROI 规则：
 ```text
 总支付金额 / 总消耗
 ```
+
+### 7.2A 余额与共享钱包
+
+- 余额主来源统一使用 `account/fund/get`
+- 共享钱包关系通过 `wallet_id` 聚合推导
+- 不依赖高权限共享钱包接口作为 V1 主链路
+- 当前分钟级落库表：
+  - `account_balances`
+  - `shared_wallets`
+  - `shared_wallet_account_relations`
 
 ### 7.3 计划金额单位
 

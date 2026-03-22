@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,6 +40,7 @@ from report_qianchuan import (  # noqa: E402
     fetch_plan_bundle,
     format_plan_status_text,
     load_runtime_config,
+    normalize_account_fund_money,
     normalize_plan_money,
     plan_delivery_status_label,
     plan_marketing_goal_label,
@@ -61,10 +66,49 @@ RANGE_CACHE_SECONDS = int(os.environ.get("RANGE_CACHE_SECONDS", "55"))
 PERFORMANCE_RANGES = {"day", "week", "month", "custom"}
 DETAIL_SYNC_INTERVAL_MINUTES = int(os.environ.get("DETAIL_SYNC_INTERVAL_MINUTES", "10"))
 ENABLE_IN_PROCESS_SCHEDULER = os.environ.get("ENABLE_IN_PROCESS_SCHEDULER", "0") == "1"
+ROLE_ADMIN = "admin"
+ROLE_OPERATOR = "operator"
+PUBLIC_SORT_FIELDS = {"stat_cost", "pay_amount", "order_count", "roi"}
+EMPLOYEE_KEYWORD_SCOPES = {"all", "account", "plan", "product", "material"}
+EMPLOYEE_BINDING_TYPES = {"account", "plan", "product", "material"}
+ALERT_ENTITY_TYPES = {"account", "plan", "account_balance", "shared_wallet", "burst_plan"}
+ALERT_METRICS = {"stat_cost", "roi", "order_count", "pay_amount", "account_balance", "wallet_balance", "burst_order_count"}
+ALERT_ENTITY_METRICS = {
+    "account": {"stat_cost", "roi", "order_count", "pay_amount"},
+    "plan": {"stat_cost", "roi", "order_count", "pay_amount"},
+    "account_balance": {"account_balance"},
+    "shared_wallet": {"wallet_balance"},
+    "burst_plan": {"burst_order_count"},
+}
 
 
 def now_text(tz_name: str = TIMEZONE) -> str:
     return datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def build_password_hash(password: str, iterations: int = 390000) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return "pbkdf2_sha256${}${}${}".format(
+        iterations,
+        base64.b64encode(salt).decode("ascii"),
+        base64.b64encode(digest).decode("ascii"),
+    )
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    text = str(stored_hash or "").strip()
+    try:
+        algorithm, iterations_text, salt_b64, digest_b64 = text.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        iterations = int(iterations_text)
+        salt = base64.b64decode(salt_b64.encode("ascii"))
+        expected = base64.b64decode(digest_b64.encode("ascii"))
+    except Exception:
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(actual, expected)
 
 
 def normalize_summary_times(value: str) -> str:
@@ -127,8 +171,8 @@ def build_performance_cache_key(range_key: str, start_date: str = "", end_date: 
 
 
 class AlertRulePayload(BaseModel):
-    entity_type: str = Field(pattern="^(account|plan)$")
-    metric: str = Field(pattern="^(stat_cost|roi|order_count|pay_amount)$")
+    entity_type: str = Field(pattern="^(account|plan|account_balance|shared_wallet|burst_plan)$")
+    metric: str = Field(pattern="^(stat_cost|roi|order_count|pay_amount|account_balance|wallet_balance|burst_order_count)$")
     operator: str = Field(pattern="^(gt|lt|gte|lte)$")
     threshold: float
     min_spend: float = 0.0
@@ -136,6 +180,16 @@ class AlertRulePayload(BaseModel):
     enabled: bool = True
     target_id: str = ""
     note: str = ""
+
+
+def validate_alert_rule_payload(payload: AlertRulePayload) -> None:
+    entity_type = str(payload.entity_type or "").strip()
+    metric = str(payload.metric or "").strip()
+    allowed_metrics = ALERT_ENTITY_METRICS.get(entity_type, set())
+    if metric not in allowed_metrics:
+        raise ValueError("当前对象不支持所选指标。")
+    if entity_type in {"account_balance", "shared_wallet", "burst_plan"} and float(payload.min_spend or 0) != 0:
+        raise ValueError("当前规则类型不支持最低消耗限制。")
 
 
 class NotificationSettingsPayload(BaseModel):
@@ -153,6 +207,38 @@ class NotificationSettingsPayload(BaseModel):
 
 class AuthCodeExchangePayload(BaseModel):
     auth_code: str = Field(min_length=20, max_length=200)
+
+
+class EmployeePayload(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+    note: str = Field(default="", max_length=200)
+    enabled: bool = True
+
+
+class EmployeeKeywordPayload(BaseModel):
+    keyword: str = Field(min_length=1, max_length=80)
+    scope: str = Field(default="all", pattern="^(all|account|plan|product|material)$")
+    priority: int = Field(default=100, ge=1, le=9999)
+    enabled: bool = True
+
+
+class EmployeeBindingPayload(BaseModel):
+    object_type: str = Field(pattern="^(account|plan|product|material)$")
+    object_key: str = Field(min_length=1, max_length=200)
+    object_label: str = Field(default="", max_length=255)
+    note: str = Field(default="", max_length=200)
+
+
+class AppUserPayload(BaseModel):
+    username: str = Field(min_length=3, max_length=60, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(default="", max_length=120)
+    role: str = Field(default=ROLE_OPERATOR, pattern="^(admin|operator)$")
+    display_name: str = Field(default="", max_length=80)
+    enabled: bool = True
+
+
+class UserScopePayload(BaseModel):
+    advertiser_ids: list[int] = Field(default_factory=list)
 
 
 class DashboardService:
@@ -390,6 +476,89 @@ class DashboardService:
                     PRIMARY KEY (app_id, customer_center_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS employees (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    display_name TEXT NOT NULL UNIQUE,
+                    note TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS employee_keywords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    employee_id INTEGER NOT NULL,
+                    keyword TEXT NOT NULL,
+                    scope TEXT NOT NULL DEFAULT 'all',
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(employee_id) REFERENCES employees(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS employee_manual_bindings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    employee_id INTEGER NOT NULL,
+                    object_type TEXT NOT NULL,
+                    object_key TEXT NOT NULL,
+                    object_label TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(employee_id) REFERENCES employees(id),
+                    UNIQUE (object_type, object_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS app_users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'admin',
+                    display_name TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS user_account_scopes (
+                    user_id INTEGER NOT NULL,
+                    advertiser_id BIGINT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, advertiser_id),
+                    FOREIGN KEY(user_id) REFERENCES app_users(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS account_balances (
+                    snapshot_time TEXT NOT NULL,
+                    advertiser_id BIGINT NOT NULL,
+                    advertiser_name TEXT NOT NULL,
+                    account_balance REAL NOT NULL DEFAULT 0,
+                    available_balance REAL NOT NULL DEFAULT 0,
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (snapshot_time, advertiser_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS shared_wallets (
+                    snapshot_time TEXT NOT NULL,
+                    main_wallet_id TEXT NOT NULL,
+                    wallet_name TEXT NOT NULL DEFAULT '',
+                    total_balance REAL NOT NULL DEFAULT 0,
+                    valid_balance REAL NOT NULL DEFAULT 0,
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (snapshot_time, main_wallet_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS shared_wallet_account_relations (
+                    snapshot_time TEXT NOT NULL,
+                    main_wallet_id TEXT NOT NULL,
+                    advertiser_id BIGINT NOT NULL,
+                    child_wallet_id TEXT NOT NULL DEFAULT '',
+                    wallet_name TEXT NOT NULL DEFAULT '',
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (snapshot_time, main_wallet_id, advertiser_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_account_snapshots_adv_time
                 ON account_snapshots (advertiser_id, snapshot_time);
 
@@ -422,6 +591,30 @@ class DashboardService:
 
                 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_updated
                 ON oauth_tokens (updated_at);
+
+                CREATE INDEX IF NOT EXISTS idx_employees_enabled
+                ON employees (enabled, display_name);
+
+                CREATE INDEX IF NOT EXISTS idx_employee_keywords_employee
+                ON employee_keywords (employee_id, enabled, scope);
+
+                CREATE INDEX IF NOT EXISTS idx_employee_manual_bindings_employee
+                ON employee_manual_bindings (employee_id, object_type);
+
+                CREATE INDEX IF NOT EXISTS idx_app_users_role_enabled
+                ON app_users (role, enabled);
+
+                CREATE INDEX IF NOT EXISTS idx_user_account_scopes_user
+                ON user_account_scopes (user_id);
+
+                CREATE INDEX IF NOT EXISTS idx_account_balances_adv_time
+                ON account_balances (advertiser_id, snapshot_time);
+
+                CREATE INDEX IF NOT EXISTS idx_shared_wallets_wallet_time
+                ON shared_wallets (main_wallet_id, snapshot_time);
+
+                CREATE INDEX IF NOT EXISTS idx_shared_wallet_account_rel_wallet_adv
+                ON shared_wallet_account_relations (main_wallet_id, advertiser_id, snapshot_time);
                 """
             )
             self._ensure_notification_settings_locked(conn)
@@ -458,6 +651,616 @@ class DashboardService:
             """,
             (self._default_notification_target(), now_text()),
         )
+
+    def bootstrap_auth_store(self) -> None:
+        username = str(DASHBOARD_USERNAME or "").strip()
+        password = str(DASHBOARD_PASSWORD or "").strip()
+        if not username or not password:
+            return
+        hashed = build_password_hash(password)
+        now = now_text()
+        with self.db() as conn:
+            row = conn.execute("SELECT id FROM app_users WHERE username = ?", (username,)).fetchone()
+            if row:
+                conn.execute(
+                    """
+                    UPDATE app_users
+                    SET password_hash = ?, role = ?, enabled = 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (hashed, ROLE_ADMIN, now, row["id"]),
+                )
+                return
+            conn.execute(
+                """
+                INSERT INTO app_users (username, password_hash, role, display_name, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
+                """,
+                (username, hashed, ROLE_ADMIN, "管理员", now, now),
+            )
+
+    def get_user_by_id(self, user_id: int) -> dict[str, Any] | None:
+        with self.db() as conn:
+            row = conn.execute(
+                """
+                SELECT id, username, role, display_name, enabled, created_at, updated_at
+                FROM app_users
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+        if not row or not bool(row["enabled"]):
+            return None
+        return dict(row)
+
+    def authenticate_user(self, username: str, password: str) -> dict[str, Any] | None:
+        with self.db() as conn:
+            row = conn.execute(
+                """
+                SELECT id, username, password_hash, role, display_name, enabled
+                FROM app_users
+                WHERE username = ?
+                LIMIT 1
+                """,
+                (str(username or "").strip(),),
+            ).fetchone()
+        if not row or not bool(row["enabled"]):
+            return None
+        if not verify_password(password, str(row["password_hash"] or "")):
+            return None
+        payload = dict(row)
+        payload.pop("password_hash", None)
+        return payload
+
+    def allowed_advertiser_ids_for_user(self, user: dict[str, Any] | None) -> set[int] | None:
+        if not user:
+            return None
+        if str(user.get("role") or "") == ROLE_ADMIN:
+            return None
+        with self.db() as conn:
+            rows = conn.execute(
+                "SELECT advertiser_id FROM user_account_scopes WHERE user_id = ?",
+                (int(user["id"]),),
+            ).fetchall()
+        return {int(row["advertiser_id"]) for row in rows}
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self.db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, username, role, display_name, enabled, created_at, updated_at
+                FROM app_users
+                ORDER BY role ASC, username ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_user(self, payload: AppUserPayload) -> dict[str, Any]:
+        password = str(payload.password or "").strip()
+        if not password:
+            raise ValueError("创建账号时必须填写密码。")
+        now = now_text()
+        password_hash = build_password_hash(password)
+        with self.db() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM app_users WHERE username = ? LIMIT 1",
+                (str(payload.username).strip(),),
+            ).fetchone()
+            if exists:
+                raise ValueError("用户名已存在。")
+            conn.execute(
+                """
+                INSERT INTO app_users (username, password_hash, role, display_name, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(payload.username).strip(),
+                    password_hash,
+                    str(payload.role).strip(),
+                    str(payload.display_name).strip(),
+                    1 if payload.enabled else 0,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT id
+                FROM app_users
+                WHERE username = ?
+                LIMIT 1
+                """,
+                (str(payload.username).strip(),),
+            ).fetchone()
+        return self.get_user_by_id(int(row["id"])) if row else {}
+
+    def update_user(self, user_id: int, payload: AppUserPayload) -> dict[str, Any]:
+        current = self.get_user_by_id(user_id)
+        if not current:
+            raise ValueError("用户不存在。")
+        with self.db() as conn:
+            exists = conn.execute(
+                """
+                SELECT 1
+                FROM app_users
+                WHERE username = ? AND id <> ?
+                LIMIT 1
+                """,
+                (str(payload.username).strip(), user_id),
+            ).fetchone()
+            if exists:
+                raise ValueError("用户名已存在。")
+        params: list[Any] = [
+            str(payload.username).strip(),
+            str(payload.role).strip(),
+            str(payload.display_name).strip(),
+            1 if payload.enabled else 0,
+            now_text(),
+        ]
+        sql = """
+            UPDATE app_users
+            SET username = ?, role = ?, display_name = ?, enabled = ?, updated_at = ?
+        """
+        password = str(payload.password or "").strip()
+        if password:
+            sql += ", password_hash = ?"
+            params.append(build_password_hash(password))
+        sql += " WHERE id = ?"
+        params.append(user_id)
+        with self.db() as conn:
+            conn.execute(sql, tuple(params))
+        return self.get_user_by_id(user_id) or {}
+
+    def user_account_scopes(self, user_id: int) -> list[int]:
+        with self.db() as conn:
+            rows = conn.execute(
+                """
+                SELECT advertiser_id
+                FROM user_account_scopes
+                WHERE user_id = ?
+                ORDER BY advertiser_id ASC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [int(row["advertiser_id"]) for row in rows]
+
+    def replace_user_account_scopes(self, user_id: int, advertiser_ids: list[int]) -> list[int]:
+        if not self.get_user_by_id(user_id):
+            raise ValueError("用户不存在。")
+        unique_ids = sorted({int(item) for item in advertiser_ids if int(item) > 0})
+        now = now_text()
+        with self.db() as conn:
+            conn.execute("DELETE FROM user_account_scopes WHERE user_id = ?", (user_id,))
+            if unique_ids:
+                conn.executemany(
+                    """
+                    INSERT INTO user_account_scopes (user_id, advertiser_id, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    [(user_id, advertiser_id, now) for advertiser_id in unique_ids],
+                )
+        return unique_ids
+
+    def list_employees(self) -> list[dict[str, Any]]:
+        with self.db() as conn:
+            employee_rows = conn.execute(
+                """
+                SELECT id, display_name, note, enabled, created_at, updated_at
+                FROM employees
+                ORDER BY enabled DESC, display_name ASC
+                """
+            ).fetchall()
+            keyword_rows = conn.execute(
+                """
+                SELECT employee_id, COUNT(*) AS keyword_count
+                FROM employee_keywords
+                GROUP BY employee_id
+                """
+            ).fetchall()
+            binding_rows = conn.execute(
+                """
+                SELECT employee_id, COUNT(*) AS binding_count
+                FROM employee_manual_bindings
+                GROUP BY employee_id
+                """
+            ).fetchall()
+        keyword_count = {int(row["employee_id"]): int(row["keyword_count"]) for row in keyword_rows}
+        binding_count = {int(row["employee_id"]): int(row["binding_count"]) for row in binding_rows}
+        items: list[dict[str, Any]] = []
+        for row in employee_rows:
+            item = dict(row)
+            item["keyword_count"] = keyword_count.get(int(row["id"]), 0)
+            item["binding_count"] = binding_count.get(int(row["id"]), 0)
+            item["enabled"] = bool(item["enabled"])
+            items.append(item)
+        return items
+
+    def employee_detail(self, employee_id: int) -> dict[str, Any] | None:
+        with self.db() as conn:
+            row = conn.execute(
+                """
+                SELECT id, display_name, note, enabled, created_at, updated_at
+                FROM employees
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (employee_id,),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["enabled"] = bool(item["enabled"])
+        return item
+
+    def create_employee(self, payload: EmployeePayload) -> dict[str, Any]:
+        now = now_text()
+        with self.db() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM employees WHERE display_name = ? LIMIT 1",
+                (str(payload.display_name).strip(),),
+            ).fetchone()
+            if exists:
+                raise ValueError("归属人名称已存在。")
+            conn.execute(
+                """
+                INSERT INTO employees (display_name, note, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    str(payload.display_name).strip(),
+                    str(payload.note).strip(),
+                    1 if payload.enabled else 0,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT id
+                FROM employees
+                WHERE display_name = ?
+                LIMIT 1
+                """,
+                (str(payload.display_name).strip(),),
+            ).fetchone()
+        return self.employee_detail(int(row["id"])) if row else {}
+
+    def update_employee(self, employee_id: int, payload: EmployeePayload) -> dict[str, Any]:
+        if not self.employee_detail(employee_id):
+            raise ValueError("归属人不存在。")
+        with self.db() as conn:
+            exists = conn.execute(
+                """
+                SELECT 1
+                FROM employees
+                WHERE display_name = ? AND id <> ?
+                LIMIT 1
+                """,
+                (str(payload.display_name).strip(), employee_id),
+            ).fetchone()
+            if exists:
+                raise ValueError("归属人名称已存在。")
+            conn.execute(
+                """
+                UPDATE employees
+                SET display_name = ?, note = ?, enabled = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(payload.display_name).strip(),
+                    str(payload.note).strip(),
+                    1 if payload.enabled else 0,
+                    now_text(),
+                    employee_id,
+                ),
+            )
+        return self.employee_detail(employee_id) or {}
+
+    def list_employee_keywords(self, employee_id: int | None = None) -> list[dict[str, Any]]:
+        query = """
+            SELECT k.id, k.employee_id, e.display_name AS employee_name, k.keyword, k.scope, k.priority,
+                   k.enabled, k.created_at, k.updated_at
+            FROM employee_keywords AS k
+            INNER JOIN employees AS e ON e.id = k.employee_id
+        """
+        params: tuple[Any, ...] = ()
+        if employee_id is not None:
+            query += " WHERE k.employee_id = ?"
+            params = (employee_id,)
+        query += " ORDER BY e.display_name ASC, k.priority ASC, LENGTH(k.keyword) DESC, k.id ASC"
+        with self.db() as conn:
+            rows = conn.execute(query, params).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            item["enabled"] = bool(item["enabled"])
+        return items
+
+    def create_employee_keyword(self, employee_id: int, payload: EmployeeKeywordPayload) -> dict[str, Any]:
+        if not self.employee_detail(employee_id):
+            raise ValueError("归属人不存在。")
+        now = now_text()
+        with self.db() as conn:
+            exists = conn.execute(
+                """
+                SELECT 1
+                FROM employee_keywords
+                WHERE employee_id = ? AND keyword = ? AND scope = ?
+                LIMIT 1
+                """,
+                (employee_id, str(payload.keyword).strip(), str(payload.scope).strip()),
+            ).fetchone()
+            if exists:
+                raise ValueError("同一归属人下已存在相同关键词。")
+            conn.execute(
+                """
+                INSERT INTO employee_keywords (employee_id, keyword, scope, priority, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    employee_id,
+                    str(payload.keyword).strip(),
+                    str(payload.scope).strip(),
+                    int(payload.priority),
+                    1 if payload.enabled else 0,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT id
+                FROM employee_keywords
+                WHERE employee_id = ? AND keyword = ? AND scope = ? AND created_at = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (employee_id, str(payload.keyword).strip(), str(payload.scope).strip(), now),
+            ).fetchone()
+        keyword_id = int(row["id"]) if row else 0
+        return next((item for item in self.list_employee_keywords(employee_id) if int(item["id"]) == keyword_id), {})
+
+    def update_employee_keyword(self, keyword_id: int, payload: EmployeeKeywordPayload) -> dict[str, Any]:
+        now = now_text()
+        with self.db() as conn:
+            row = conn.execute(
+                "SELECT employee_id FROM employee_keywords WHERE id = ? LIMIT 1",
+                (keyword_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("关键词不存在。")
+            employee_id = int(row["employee_id"])
+            conn.execute(
+                """
+                UPDATE employee_keywords
+                SET keyword = ?, scope = ?, priority = ?, enabled = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(payload.keyword).strip(),
+                    str(payload.scope).strip(),
+                    int(payload.priority),
+                    1 if payload.enabled else 0,
+                    now,
+                    keyword_id,
+                ),
+            )
+        return next((item for item in self.list_employee_keywords(employee_id) if int(item["id"]) == keyword_id), {})
+
+    def delete_employee_keyword(self, keyword_id: int) -> None:
+        with self.db() as conn:
+            conn.execute("DELETE FROM employee_keywords WHERE id = ?", (keyword_id,))
+
+    def list_employee_bindings(self, employee_id: int | None = None) -> list[dict[str, Any]]:
+        query = """
+            SELECT b.id, b.employee_id, e.display_name AS employee_name, b.object_type, b.object_key,
+                   b.object_label, b.note, b.created_at, b.updated_at
+            FROM employee_manual_bindings AS b
+            INNER JOIN employees AS e ON e.id = b.employee_id
+        """
+        params: tuple[Any, ...] = ()
+        if employee_id is not None:
+            query += " WHERE b.employee_id = ?"
+            params = (employee_id,)
+        query += " ORDER BY e.display_name ASC, b.object_type ASC, b.object_label ASC, b.id ASC"
+        with self.db() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_employee_binding(self, employee_id: int, payload: EmployeeBindingPayload) -> dict[str, Any]:
+        if not self.employee_detail(employee_id):
+            raise ValueError("归属人不存在。")
+        now = now_text()
+        with self.db() as conn:
+            exists = conn.execute(
+                """
+                SELECT 1
+                FROM employee_manual_bindings
+                WHERE object_type = ? AND object_key = ?
+                LIMIT 1
+                """,
+                (str(payload.object_type).strip(), str(payload.object_key).strip()),
+            ).fetchone()
+            if exists:
+                raise ValueError("该对象已经绑定到其他归属人。")
+            conn.execute(
+                """
+                INSERT INTO employee_manual_bindings (employee_id, object_type, object_key, object_label, note, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    employee_id,
+                    str(payload.object_type).strip(),
+                    str(payload.object_key).strip(),
+                    str(payload.object_label).strip(),
+                    str(payload.note).strip(),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT id
+                FROM employee_manual_bindings
+                WHERE employee_id = ? AND object_type = ? AND object_key = ?
+                LIMIT 1
+                """,
+                (employee_id, str(payload.object_type).strip(), str(payload.object_key).strip()),
+            ).fetchone()
+        binding_id = int(row["id"]) if row else 0
+        return next((item for item in self.list_employee_bindings(employee_id) if int(item["id"]) == binding_id), {})
+
+    def delete_employee_binding(self, binding_id: int) -> None:
+        with self.db() as conn:
+            conn.execute("DELETE FROM employee_manual_bindings WHERE id = ?", (binding_id,))
+
+    def latest_account_catalog(self, allowed_advertiser_ids: set[int] | None = None) -> list[dict[str, Any]]:
+        latest = self.latest_snapshot(allowed_advertiser_ids)
+        if not latest:
+            return []
+        items = latest.get("accounts", [])
+        return [
+            {
+                "advertiser_id": int(item.get("advertiser_id", 0) or 0),
+                "advertiser_name": str(item.get("advertiser_name") or "").strip(),
+            }
+            for item in items
+        ]
+
+    def _reference_catalog(self) -> dict[str, Any]:
+        with self.db() as conn:
+            latest_summary = self._latest_summary_meta(conn)
+            latest_extended = self._latest_extended_sync_run(conn)
+            accounts: list[dict[str, Any]] = []
+            plans: list[dict[str, Any]] = []
+            products: list[dict[str, Any]] = []
+            materials: list[dict[str, Any]] = []
+            if latest_summary:
+                snapshot_time = str(latest_summary["snapshot_time"])
+                accounts = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT advertiser_id, advertiser_name
+                        FROM account_snapshots
+                        WHERE snapshot_time = ?
+                        ORDER BY advertiser_name ASC, advertiser_id ASC
+                        """,
+                        (snapshot_time,),
+                    ).fetchall()
+                ]
+                plans = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT advertiser_id, advertiser_name, ad_id, ad_name, product_id, product_name
+                        FROM plan_snapshots
+                        WHERE snapshot_time = ?
+                        ORDER BY ad_name ASC, ad_id ASC
+                        """,
+                        (snapshot_time,),
+                    ).fetchall()
+                ]
+            if latest_extended:
+                extended_snapshot = str(latest_extended["snapshot_time"])
+                products = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT advertiser_id, advertiser_name, ad_id, ad_name, product_key, product_id, product_name
+                        FROM product_snapshots
+                        WHERE snapshot_time = ?
+                        ORDER BY product_name ASC, product_id ASC, product_key ASC
+                        """,
+                        (extended_snapshot,),
+                    ).fetchall()
+                ]
+                materials = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT advertiser_id, advertiser_name, ad_id, ad_name, material_key, material_id, material_name, video_id, material_type
+                        FROM material_snapshots
+                        WHERE snapshot_time = ?
+                        ORDER BY material_name ASC, material_id ASC, material_key ASC
+                        """,
+                        (extended_snapshot,),
+                    ).fetchall()
+                ]
+        return {
+            "summary_snapshot_time": str(latest_summary["snapshot_time"]) if latest_summary else "",
+            "detail_snapshot_time": str(latest_extended["snapshot_time"]) if latest_extended else "",
+            "accounts": accounts,
+            "plans": plans,
+            "products": products,
+            "materials": materials,
+        }
+
+    @staticmethod
+    def _normalize_match_text(*values: Any) -> str:
+        return " ".join(str(value or "").strip() for value in values if str(value or "").strip()).casefold()
+
+    def preview_keyword_matches(self, keyword: str, scope: str = "all", allowed_advertiser_ids: set[int] | None = None) -> dict[str, Any]:
+        needle = str(keyword or "").strip()
+        scope_value = str(scope or "all").strip().lower()
+        if not needle:
+            raise ValueError("关键词不能为空。")
+        if scope_value not in EMPLOYEE_KEYWORD_SCOPES:
+            raise ValueError("scope 必须是 all/account/plan/product/material 之一。")
+        catalog = self._reference_catalog()
+        allowed = None if allowed_advertiser_ids is None else {int(item) for item in allowed_advertiser_ids}
+        matcher = needle.casefold()
+
+        def allowed_row(row: dict[str, Any]) -> bool:
+            if allowed is None:
+                return True
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            return advertiser_id in allowed
+
+        sections: dict[str, list[dict[str, Any]]] = {"accounts": [], "plans": [], "products": [], "materials": []}
+        if scope_value in {"all", "account"}:
+            for row in catalog["accounts"]:
+                if not allowed_row(row):
+                    continue
+                if matcher in self._normalize_match_text(row.get("advertiser_name"), row.get("advertiser_id")):
+                    sections["accounts"].append(row)
+        if scope_value in {"all", "plan"}:
+            for row in catalog["plans"]:
+                if not allowed_row(row):
+                    continue
+                if matcher in self._normalize_match_text(row.get("ad_name"), row.get("ad_id"), row.get("advertiser_name")):
+                    sections["plans"].append(row)
+        if scope_value in {"all", "product"}:
+            for row in catalog["products"]:
+                if not allowed_row(row):
+                    continue
+                if matcher in self._normalize_match_text(
+                    row.get("product_name"),
+                    row.get("product_id"),
+                    row.get("product_key"),
+                    row.get("ad_name"),
+                ):
+                    sections["products"].append(row)
+        if scope_value in {"all", "material"}:
+            for row in catalog["materials"]:
+                if not allowed_row(row):
+                    continue
+                if matcher in self._normalize_match_text(
+                    row.get("material_name"),
+                    row.get("material_id"),
+                    row.get("material_key"),
+                    row.get("video_id"),
+                    row.get("ad_name"),
+                ):
+                    sections["materials"].append(row)
+        return {
+            "keyword": needle,
+            "scope": scope_value,
+            "summary_snapshot_time": catalog["summary_snapshot_time"],
+            "detail_snapshot_time": catalog["detail_snapshot_time"],
+            "counts": {key: len(value) for key, value in sections.items()},
+            "items": sections,
+        }
 
     def read_config(self) -> dict[str, Any]:
         return load_runtime_config(CONFIG_PATH)
@@ -829,11 +1632,336 @@ class DashboardService:
             cls._json_text(row),
         )
 
+    @staticmethod
+    def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int, str]:
+        return (
+            int(candidate.get("priority", 100) or 100),
+            -int(candidate.get("keyword_length", 0) or 0),
+            str(candidate.get("employee_name") or ""),
+        )
+
+    def _best_candidate(self, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not candidates:
+            return None
+        return sorted(candidates, key=self._candidate_sort_key)[0]
+
+    def _best_voted_candidate(self, votes: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+        if not votes:
+            return None
+        ranked = sorted(
+            votes.values(),
+            key=lambda item: (
+                -int(item.get("count", 0) or 0),
+                *self._candidate_sort_key(item["candidate"]),
+            ),
+        )
+        return ranked[0]["candidate"]
+
+    def _active_employee_config(self) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        with self.db() as conn:
+            employees = {
+                int(row["id"]): {
+                    "id": int(row["id"]),
+                    "display_name": str(row["display_name"] or "").strip(),
+                    "note": str(row["note"] or "").strip(),
+                }
+                for row in conn.execute(
+                    """
+                    SELECT id, display_name, note
+                    FROM employees
+                    WHERE enabled = 1
+                    ORDER BY display_name ASC
+                    """
+                ).fetchall()
+            }
+            keywords = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT id, employee_id, keyword, scope, priority, enabled
+                    FROM employee_keywords
+                    WHERE enabled = 1
+                    ORDER BY priority ASC, LENGTH(keyword) DESC, id ASC
+                    """
+                ).fetchall()
+            ]
+            bindings = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT id, employee_id, object_type, object_key, object_label, note
+                    FROM employee_manual_bindings
+                    ORDER BY object_type ASC, id ASC
+                    """
+                ).fetchall()
+            ]
+        keywords = [item for item in keywords if int(item["employee_id"]) in employees]
+        bindings = [item for item in bindings if int(item["employee_id"]) in employees]
+        return employees, keywords, bindings
+
+    def _keyword_candidate(
+        self,
+        employee: dict[str, Any],
+        keyword_row: dict[str, Any],
+        source: str,
+        matched_value: str,
+        object_key: str,
+    ) -> dict[str, Any]:
+        keyword = str(keyword_row.get("keyword") or "").strip()
+        return {
+            "employee_id": int(employee["id"]),
+            "employee_name": str(employee["display_name"]),
+            "source": source,
+            "source_label": source,
+            "priority": int(keyword_row.get("priority", 100) or 100),
+            "keyword": keyword,
+            "keyword_length": len(keyword),
+            "matched_value": matched_value,
+            "object_key": object_key,
+        }
+
+    def _manual_candidate(
+        self,
+        employee: dict[str, Any],
+        source: str,
+        object_key: str,
+        matched_value: str,
+    ) -> dict[str, Any]:
+        return {
+            "employee_id": int(employee["id"]),
+            "employee_name": str(employee["display_name"]),
+            "source": source,
+            "source_label": source,
+            "priority": 0,
+            "keyword": "",
+            "keyword_length": 0,
+            "matched_value": matched_value,
+            "object_key": object_key,
+        }
+
+    def _match_text_candidate(
+        self,
+        texts: list[str],
+        scope_value: str,
+        keywords: list[dict[str, Any]],
+        employees: dict[int, dict[str, Any]],
+        object_key: str,
+    ) -> dict[str, Any] | None:
+        haystack = self._normalize_match_text(*texts)
+        if not haystack:
+            return None
+        candidates: list[dict[str, Any]] = []
+        for row in keywords:
+            employee = employees.get(int(row["employee_id"]))
+            if not employee:
+                continue
+            keyword_scope = str(row.get("scope") or "all").strip()
+            if keyword_scope not in {"all", scope_value}:
+                continue
+            keyword_text = str(row.get("keyword") or "").strip()
+            if keyword_text and keyword_text.casefold() in haystack:
+                candidates.append(
+                    self._keyword_candidate(
+                        employee,
+                        row,
+                        f"keyword_{scope_value}",
+                        texts[0] if texts else object_key,
+                        object_key,
+                    )
+                )
+        return self._best_candidate(candidates)
+
+    def _object_binding_maps(
+        self,
+        employees: dict[int, dict[str, Any]],
+        bindings: list[dict[str, Any]],
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        result: dict[str, dict[str, dict[str, Any]]] = {
+            "account": {},
+            "plan": {},
+            "product": {},
+            "material": {},
+        }
+        for item in bindings:
+            employee = employees.get(int(item["employee_id"]))
+            if not employee:
+                continue
+            object_type = str(item.get("object_type") or "").strip()
+            object_key = str(item.get("object_key") or "").strip()
+            if object_type not in result or not object_key:
+                continue
+            result[object_type][object_key] = self._manual_candidate(
+                employee,
+                f"manual_{object_type}",
+                object_key,
+                str(item.get("object_label") or object_key),
+            )
+        return result
+
+    def _product_material_votes(
+        self,
+        employees: dict[int, dict[str, Any]],
+        keywords: list[dict[str, Any]],
+        binding_maps: dict[str, dict[str, dict[str, Any]]],
+    ) -> tuple[dict[int, dict[int, dict[str, Any]]], dict[int, dict[int, dict[str, Any]]]]:
+        catalog = self._reference_catalog()
+        product_votes: dict[int, dict[int, dict[str, Any]]] = {}
+        material_votes: dict[int, dict[int, dict[str, Any]]] = {}
+
+        for row in catalog["products"]:
+            plan_id = int(row.get("ad_id", 0) or 0)
+            if not plan_id:
+                continue
+            product_key = str(row.get("product_key") or "").strip()
+            candidate = binding_maps["product"].get(product_key)
+            if not candidate:
+                candidate = self._match_text_candidate(
+                    [
+                        str(row.get("product_name") or "").strip(),
+                        str(row.get("product_id") or "").strip(),
+                        product_key,
+                        str(row.get("ad_name") or "").strip(),
+                    ],
+                    "product",
+                    keywords,
+                    employees,
+                    product_key or str(plan_id),
+                )
+            if not candidate:
+                continue
+            plan_votes = product_votes.setdefault(plan_id, {})
+            vote = plan_votes.setdefault(
+                int(candidate["employee_id"]),
+                {"count": 0, "candidate": candidate},
+            )
+            vote["count"] += 1
+            if self._candidate_sort_key(candidate) < self._candidate_sort_key(vote["candidate"]):
+                vote["candidate"] = candidate
+
+        for row in catalog["materials"]:
+            plan_id = int(row.get("ad_id", 0) or 0)
+            if not plan_id:
+                continue
+            material_key = str(row.get("material_key") or "").strip()
+            candidate = binding_maps["material"].get(material_key)
+            if not candidate:
+                candidate = self._match_text_candidate(
+                    [
+                        str(row.get("material_name") or "").strip(),
+                        str(row.get("material_id") or "").strip(),
+                        str(row.get("video_id") or "").strip(),
+                        material_key,
+                        str(row.get("ad_name") or "").strip(),
+                    ],
+                    "material",
+                    keywords,
+                    employees,
+                    material_key or str(plan_id),
+                )
+            if not candidate:
+                continue
+            plan_votes = material_votes.setdefault(plan_id, {})
+            vote = plan_votes.setdefault(
+                int(candidate["employee_id"]),
+                {"count": 0, "candidate": candidate},
+            )
+            vote["count"] += 1
+            if self._candidate_sort_key(candidate) < self._candidate_sort_key(vote["candidate"]):
+                vote["candidate"] = candidate
+
+        return product_votes, material_votes
+
+    def _assign_employee_to_plan(
+        self,
+        row: dict[str, Any],
+        employees: dict[int, dict[str, Any]],
+        keywords: list[dict[str, Any]],
+        binding_maps: dict[str, dict[str, dict[str, Any]]],
+        product_votes: dict[int, dict[int, dict[str, Any]]],
+        material_votes: dict[int, dict[int, dict[str, Any]]],
+    ) -> dict[str, Any] | None:
+        ad_id = int(row.get("ad_id", 0) or 0)
+        advertiser_id = int(row.get("advertiser_id", 0) or 0)
+        if ad_id and ad_id in material_votes:
+            return self._best_voted_candidate(material_votes[ad_id])
+        product_key = self._product_key(row)
+        if product_key and product_key in binding_maps["product"]:
+            return binding_maps["product"][product_key]
+        if ad_id and ad_id in product_votes:
+            return self._best_voted_candidate(product_votes[ad_id])
+        direct_plan = binding_maps["plan"].get(str(ad_id))
+        if direct_plan:
+            return direct_plan
+        direct_account = binding_maps["account"].get(str(advertiser_id))
+        if direct_account:
+            return direct_account
+
+        plan_candidate = self._match_text_candidate(
+            [str(row.get("ad_name") or "").strip(), str(ad_id)],
+            "plan",
+            keywords,
+            employees,
+            str(ad_id),
+        )
+        if plan_candidate:
+            return plan_candidate
+        account_candidate = self._match_text_candidate(
+            [str(row.get("advertiser_name") or "").strip(), str(advertiser_id)],
+            "account",
+            keywords,
+            employees,
+            str(advertiser_id),
+        )
+        if account_candidate:
+            return account_candidate
+        return None
+
+    def _apply_employee_attribution(
+        self,
+        plans: list[dict[str, Any]],
+        accounts: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        employees, keywords, bindings = self._active_employee_config()
+        if not employees:
+            fallback_rows: list[dict[str, Any]] = []
+            for item in plans:
+                row = dict(item)
+                row["employee_id"] = None
+                row["employee_name"] = self._employee_name(row.get("anchor_name"))
+                row["employee_source"] = "legacy_anchor"
+                row["employee_source_label"] = "主播字段归属"
+                row["employee_keyword"] = ""
+                fallback_rows.append(row)
+            return fallback_rows
+
+        binding_maps = self._object_binding_maps(employees, bindings)
+        product_votes, material_votes = self._product_material_votes(employees, keywords, binding_maps)
+        rows: list[dict[str, Any]] = []
+        for item in plans:
+            row = dict(item)
+            assignment = self._assign_employee_to_plan(row, employees, keywords, binding_maps, product_votes, material_votes)
+            if assignment:
+                row["employee_id"] = int(assignment["employee_id"])
+                row["employee_name"] = str(assignment["employee_name"])
+                row["employee_source"] = str(assignment["source"])
+                row["employee_source_label"] = str(assignment["source_label"])
+                row["employee_keyword"] = str(assignment.get("keyword") or "")
+                row["employee_matched_value"] = str(assignment.get("matched_value") or "")
+            else:
+                row["employee_id"] = None
+                row["employee_name"] = "未归属"
+                row["employee_source"] = "unassigned"
+                row["employee_source_label"] = "未命中归属规则"
+                row["employee_keyword"] = ""
+                row["employee_matched_value"] = ""
+            rows.append(row)
+        return rows
+
     def _build_product_rankings(self, plans: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         for row in plans:
             product_key = self._product_key(row)
-            employee_name = self._employee_name(row.get("anchor_name"))
+            employee_name = self._employee_name(row.get("employee_name") or row.get("anchor_name"))
             group = groups.setdefault(
                 product_key,
                 {
@@ -898,12 +2026,16 @@ class DashboardService:
     def _build_employee_rankings(self, plans: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         for row in plans:
-            employee_name = self._employee_name(row.get("anchor_name"))
+            employee_name = self._employee_name(row.get("employee_name") or row.get("anchor_name"))
+            employee_id = row.get("employee_id")
+            employee_source = str(row.get("employee_source") or "")
             product_key = self._product_key(row)
             group = groups.setdefault(
                 employee_name,
                 {
+                    "employee_id": employee_id,
                     "employee_name": employee_name,
+                    "employee_source": employee_source,
                     "stat_cost": 0.0,
                     "pay_amount": 0.0,
                     "order_count": 0,
@@ -942,7 +2074,9 @@ class DashboardService:
             roi = round(group["pay_amount"] / group["stat_cost"], 2) if group["stat_cost"] > 0 else 0.0
             rows.append(
                 {
+                    "employee_id": group["employee_id"],
                     "employee_name": group["employee_name"],
+                    "employee_source": group["employee_source"],
                     "stat_cost": group["stat_cost"],
                     "pay_amount": group["pay_amount"],
                     "order_count": group["order_count"],
@@ -1057,6 +2191,301 @@ class DashboardService:
         )
         return enriched_summary, products, employees
 
+    @staticmethod
+    def _scoped_summary(accounts: list[dict[str, Any]], plans: list[dict[str, Any]]) -> dict[str, Any]:
+        stat_cost = round(sum(float(item.get("stat_cost", 0.0) or 0.0) for item in accounts), 2)
+        pay_amount = round(sum(float(item.get("pay_amount", 0.0) or 0.0) for item in accounts), 2)
+        order_count = int(sum(int(float(item.get("order_count", 0.0) or 0.0)) for item in accounts))
+        roi = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+        return {
+            "account_count": len(accounts),
+            "active_account_count": sum(
+                1 for item in accounts if bool(item.get("ok", True)) and float(item.get("stat_cost", 0.0) or 0.0) > 0
+            ),
+            "plan_count": len(plans),
+            "active_plan_count": sum(1 for item in plans if float(item.get("stat_cost", 0.0) or 0.0) > 0),
+            "stat_cost": stat_cost,
+            "pay_amount": pay_amount,
+            "order_count": order_count,
+            "roi": roi,
+            "account_failures": sum(1 for item in accounts if not bool(item.get("ok", True))),
+            "plan_failures": 0,
+        }
+
+    def _apply_account_scope(
+        self, payload: dict[str, Any], allowed_advertiser_ids: set[int] | None
+    ) -> dict[str, Any]:
+        if allowed_advertiser_ids is None:
+            return payload
+        allowed = {int(item) for item in allowed_advertiser_ids}
+        accounts = [dict(item) for item in payload.get("accounts", []) if int(item.get("advertiser_id", 0) or 0) in allowed]
+        plans = [dict(item) for item in payload.get("plans", []) if int(item.get("advertiser_id", 0) or 0) in allowed]
+        account_balances = [
+            dict(item) for item in payload.get("accountBalances", []) if int(item.get("advertiser_id", 0) or 0) in allowed
+        ]
+        wallet_relations = [
+            dict(item) for item in payload.get("walletRelations", []) if int(item.get("advertiser_id", 0) or 0) in allowed
+        ]
+        allowed_wallet_ids = {str(item.get("main_wallet_id") or "") for item in wallet_relations if str(item.get("main_wallet_id") or "")}
+        shared_wallets = [
+            dict(item) for item in payload.get("sharedWallets", []) if str(item.get("main_wallet_id") or "") in allowed_wallet_ids
+        ]
+        next_payload = dict(payload)
+        next_payload["accounts"] = accounts
+        next_payload["plans"] = plans
+        next_payload["accountBalances"] = account_balances
+        next_payload["walletRelations"] = wallet_relations
+        next_payload["sharedWallets"] = shared_wallets
+        next_payload["summary"], next_payload["products"], next_payload["employees"] = self._rankings_bundle(
+            self._scoped_summary(accounts, plans),
+            accounts,
+            plans,
+        )
+        return next_payload
+
+    @staticmethod
+    def _wallet_display_name(wallet_id: str, member_count: int) -> str:
+        text = str(wallet_id or "").strip()
+        if not text:
+            return "未命名钱包"
+        suffix = text[-6:] if len(text) > 6 else text
+        return f"{'共享钱包' if member_count > 1 else '钱包'} {suffix}"
+
+    def _collect_balance_snapshot(self, client: OceanEngineClient, accounts: list[dict[str, Any]]) -> dict[str, Any]:
+        account_ids = [int(item.get("advertiser_id", 0) or 0) for item in accounts if int(item.get("advertiser_id", 0) or 0)]
+        account_map = {int(item["advertiser_id"]): item for item in accounts if int(item.get("advertiser_id", 0) or 0)}
+        if not account_ids:
+            return {
+                "account_balances": [],
+                "shared_wallets": [],
+                "wallet_relations": [],
+                "errors": [],
+            }
+
+        try:
+            rows = client.list_account_funds(account_ids, account_type="QIANCHUAN")
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "account_balances": [],
+                "shared_wallets": [],
+                "wallet_relations": [],
+                "errors": [
+                    {
+                        "stage": "account_fund_get",
+                        "error": str(exc),
+                    }
+                ],
+            }
+        fund_map = {int(item.get("account_id", 0) or 0): item for item in rows if int(item.get("account_id", 0) or 0)}
+
+        account_balance_rows: list[dict[str, Any]] = []
+        shared_wallet_groups: dict[str, dict[str, Any]] = {}
+        errors: list[dict[str, Any]] = []
+
+        for advertiser_id in account_ids:
+            meta = account_map.get(advertiser_id) or {}
+            raw = fund_map.get(advertiser_id)
+            if not raw:
+                errors.append(
+                    {
+                        "stage": "account_fund_get",
+                        "advertiser_id": advertiser_id,
+                        "error": "missing account fund row",
+                    }
+                )
+                continue
+
+            advertiser_name = str(meta.get("advertiser_name") or raw.get("account_id") or advertiser_id)
+            wallet_id = str(raw.get("wallet_id") or "").strip()
+            balance = normalize_account_fund_money(raw.get("balance"))
+            valid_balance = normalize_account_fund_money(raw.get("valid_balance"))
+            wallet_valid_balance = normalize_account_fund_money(raw.get("wallet_total_balance_valid"))
+            account_balance_rows.append(
+                {
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": advertiser_name,
+                    "account_balance": balance,
+                    "available_balance": valid_balance,
+                    "wallet_id": wallet_id,
+                    "wallet_balance": wallet_valid_balance,
+                    "stat_cost": 0.0,
+                    "pay_amount": 0.0,
+                    "order_count": 0,
+                    "roi": 0.0,
+                    "raw_json": self._json_text(raw),
+                }
+            )
+
+            if not wallet_id:
+                continue
+            group = shared_wallet_groups.setdefault(
+                wallet_id,
+                {
+                    "main_wallet_id": wallet_id,
+                    "account_ids": set(),
+                    "account_names": [],
+                    "valid_balances": [],
+                    "rows": [],
+                },
+            )
+            group["account_ids"].add(advertiser_id)
+            group["account_names"].append(advertiser_name)
+            group["valid_balances"].append(wallet_valid_balance)
+            group["rows"].append(raw)
+
+        shared_wallet_rows: list[dict[str, Any]] = []
+        wallet_relation_rows: list[dict[str, Any]] = []
+        for wallet_id, group in shared_wallet_groups.items():
+            member_count = len(group["account_ids"])
+            if member_count < 2:
+                continue
+            wallet_name = self._wallet_display_name(wallet_id, member_count)
+            valid_balance = max((float(item or 0.0) for item in group["valid_balances"]), default=0.0)
+            shared_wallet_rows.append(
+                {
+                    "main_wallet_id": wallet_id,
+                    "wallet_name": wallet_name,
+                    "wallet_balance": round(valid_balance, 2),
+                    "total_balance": round(valid_balance, 2),
+                    "valid_balance": round(valid_balance, 2),
+                    "member_count": member_count,
+                    "stat_cost": 0.0,
+                    "pay_amount": 0.0,
+                    "order_count": 0,
+                    "roi": 0.0,
+                    "raw_json": self._json_text(
+                        {
+                            "source": "account_fund_get_v3.0",
+                            "account_ids": sorted(group["account_ids"]),
+                            "account_names": group["account_names"],
+                            "rows": group["rows"],
+                        }
+                    ),
+                }
+            )
+            for advertiser_id in sorted(group["account_ids"]):
+                advertiser_name = str(account_map.get(advertiser_id, {}).get("advertiser_name") or advertiser_id)
+                wallet_relation_rows.append(
+                    {
+                        "main_wallet_id": wallet_id,
+                        "advertiser_id": advertiser_id,
+                        "advertiser_name": advertiser_name,
+                        "child_wallet_id": wallet_id,
+                        "wallet_name": wallet_name,
+                        "raw_json": self._json_text(
+                            {
+                                "source": "account_fund_get_v3.0",
+                                "wallet_id": wallet_id,
+                                "advertiser_id": advertiser_id,
+                            }
+                        ),
+                    }
+                )
+
+        account_balance_rows.sort(key=lambda item: (-float(item["available_balance"]), int(item["advertiser_id"])))
+        shared_wallet_rows.sort(key=lambda item: (-float(item["valid_balance"]), str(item["main_wallet_id"])))
+        wallet_relation_rows.sort(key=lambda item: (str(item["main_wallet_id"]), int(item["advertiser_id"])))
+        return {
+            "account_balances": account_balance_rows,
+            "shared_wallets": shared_wallet_rows,
+            "wallet_relations": wallet_relation_rows,
+            "errors": errors,
+        }
+
+    def _previous_plan_order_map(self, conn: Any, snapshot_time: str) -> dict[int, int]:
+        previous = conn.execute(
+            """
+            SELECT snapshot_time
+            FROM summary_snapshots
+            WHERE snapshot_time < ?
+            ORDER BY snapshot_time DESC
+            LIMIT 1
+            """,
+            (snapshot_time,),
+        ).fetchone()
+        if not previous:
+            return {}
+        rows = conn.execute(
+            """
+            SELECT ad_id, order_count
+            FROM plan_snapshots
+            WHERE snapshot_time = ?
+            """,
+            (str(previous["snapshot_time"]),),
+        ).fetchall()
+        return {int(row["ad_id"]): int(row["order_count"] or 0) for row in rows}
+
+    @staticmethod
+    def _build_burst_rows(plans: list[dict[str, Any]], previous_orders: dict[int, int]) -> list[dict[str, Any]]:
+        burst_rows: list[dict[str, Any]] = []
+        for row in plans:
+            current_orders = int(row.get("order_count", 0) or 0)
+            previous = int(previous_orders.get(int(row.get("ad_id", 0) or 0), 0) or 0)
+            delta = current_orders - previous
+            if delta <= 0:
+                continue
+            item = dict(row)
+            item["burst_order_count"] = delta
+            burst_rows.append(item)
+        return burst_rows
+
+    def _snapshot_account_balances(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM account_balances
+            WHERE snapshot_time = ?
+            ORDER BY available_balance DESC, advertiser_id ASC
+            """,
+            (snapshot_time,),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                raw = json.loads(str(item.get("raw_json") or "{}"))
+            except Exception:
+                raw = {}
+            item["wallet_id"] = str(raw.get("wallet_id") or "")
+            item["wallet_balance"] = normalize_account_fund_money(raw.get("wallet_total_balance_valid"))
+            items.append(item)
+        return items
+
+    def _snapshot_shared_wallets(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT w.*,
+                   COALESCE(rel.member_count, 0) AS member_count
+            FROM shared_wallets AS w
+            LEFT JOIN (
+                SELECT snapshot_time, main_wallet_id, COUNT(*) AS member_count
+                FROM shared_wallet_account_relations
+                GROUP BY snapshot_time, main_wallet_id
+            ) AS rel
+              ON rel.snapshot_time = w.snapshot_time
+             AND rel.main_wallet_id = w.main_wallet_id
+            WHERE w.snapshot_time = ?
+            ORDER BY w.valid_balance DESC, w.main_wallet_id ASC
+            """,
+            (snapshot_time,),
+        ).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            item["wallet_balance"] = item.get("valid_balance", 0)
+        return items
+
+    def _snapshot_wallet_relations(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM shared_wallet_account_relations
+            WHERE snapshot_time = ?
+            ORDER BY main_wallet_id ASC, advertiser_id ASC
+            """,
+            (snapshot_time,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def _latest_summary_meta(self, conn: Any) -> Any:
         return conn.execute(
             """
@@ -1093,6 +2522,7 @@ class DashboardService:
         config = self.read_config()
         client = self.build_client(config)
         accounts = client.list_accounts()
+        balance_snapshot = self._collect_balance_snapshot(client, accounts)
         account_workers = int(config.get("max_workers", 6) or 6)
         plan_workers = int(config.get("plan_max_workers", 2) or 2)
 
@@ -1196,12 +2626,18 @@ class DashboardService:
                 "roi": total_roi,
                 "account_failures": len(failures),
                 "plan_failures": len(plan_failures),
+                "wallet_count": len(balance_snapshot["shared_wallets"]),
+                "balance_failures": len(balance_snapshot["errors"]),
             },
             "accounts": [asdict(item) for item in summaries],
             "plans": [asdict(item) for item in plans],
+            "accountBalances": balance_snapshot["account_balances"],
+            "sharedWallets": balance_snapshot["shared_wallets"],
+            "walletRelations": balance_snapshot["wallet_relations"],
             "errors": {
                 "accounts": [asdict(item) for item in failures],
                 "plans": plan_failures,
+                "balances": balance_snapshot["errors"],
             },
         }
 
@@ -1251,6 +2687,9 @@ class DashboardService:
             )
             conn.execute("DELETE FROM account_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
             conn.execute("DELETE FROM plan_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
+            conn.execute("DELETE FROM account_balances WHERE snapshot_time = ?", (payload["snapshot_time"],))
+            conn.execute("DELETE FROM shared_wallets WHERE snapshot_time = ?", (payload["snapshot_time"],))
+            conn.execute("DELETE FROM shared_wallet_account_relations WHERE snapshot_time = ?", (payload["snapshot_time"],))
             conn.executemany(
                 """
                 INSERT INTO account_snapshots (
@@ -1303,6 +2742,66 @@ class DashboardService:
                     for item in payload["plans"]
                 ],
             )
+            if payload.get("accountBalances"):
+                conn.executemany(
+                    """
+                    INSERT INTO account_balances (
+                        snapshot_time, advertiser_id, advertiser_name, account_balance,
+                        available_balance, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            payload["snapshot_time"],
+                            item["advertiser_id"],
+                            item["advertiser_name"],
+                            item["account_balance"],
+                            item["available_balance"],
+                            item["raw_json"],
+                        )
+                        for item in payload["accountBalances"]
+                    ],
+                )
+            if payload.get("sharedWallets"):
+                conn.executemany(
+                    """
+                    INSERT INTO shared_wallets (
+                        snapshot_time, main_wallet_id, wallet_name, total_balance,
+                        valid_balance, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            payload["snapshot_time"],
+                            item["main_wallet_id"],
+                            item["wallet_name"],
+                            item["total_balance"],
+                            item["valid_balance"],
+                            item["raw_json"],
+                        )
+                        for item in payload["sharedWallets"]
+                    ],
+                )
+            if payload.get("walletRelations"):
+                conn.executemany(
+                    """
+                    INSERT INTO shared_wallet_account_relations (
+                        snapshot_time, main_wallet_id, advertiser_id, child_wallet_id,
+                        wallet_name, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            payload["snapshot_time"],
+                            item["main_wallet_id"],
+                            item["advertiser_id"],
+                            item["child_wallet_id"],
+                            item["wallet_name"],
+                            item["raw_json"],
+                        )
+                        for item in payload["walletRelations"]
+                    ],
+                )
 
     def _collect_plan_assets_bundle(
         self,
@@ -1635,6 +3134,9 @@ class DashboardService:
             conn.execute("DELETE FROM summary_snapshots WHERE snapshot_time < ?", (cutoff,))
             conn.execute("DELETE FROM account_snapshots WHERE snapshot_time < ?", (cutoff,))
             conn.execute("DELETE FROM plan_snapshots WHERE snapshot_time < ?", (cutoff,))
+            conn.execute("DELETE FROM account_balances WHERE snapshot_time < ?", (cutoff,))
+            conn.execute("DELETE FROM shared_wallets WHERE snapshot_time < ?", (cutoff,))
+            conn.execute("DELETE FROM shared_wallet_account_relations WHERE snapshot_time < ?", (cutoff,))
             conn.execute("DELETE FROM plan_detail_snapshots WHERE snapshot_time < ?", (cutoff,))
             conn.execute("DELETE FROM product_snapshots WHERE snapshot_time < ?", (cutoff,))
             conn.execute("DELETE FROM material_snapshots WHERE snapshot_time < ?", (cutoff,))
@@ -1655,17 +3157,41 @@ class DashboardService:
 
             latest_accounts = [item for item in payload["accounts"] if item["ok"]]
             latest_plans = payload["plans"]
+            latest_account_balances = payload.get("accountBalances", [])
+            latest_wallets = payload.get("sharedWallets", [])
             now_text = payload["snapshot_time"]
+            burst_rows = self._build_burst_rows(latest_plans, self._previous_plan_order_map(conn, now_text))
 
             for rule in rules:
-                rows = latest_accounts if rule["entity_type"] == "account" else latest_plans
+                entity_type = str(rule["entity_type"] or "")
+                metric = str(rule["metric"] or "")
+                if entity_type == "account":
+                    rows = latest_accounts
+                    entity_id_field = "advertiser_id"
+                    entity_name_field = "advertiser_name"
+                elif entity_type in {"plan", "burst_plan"}:
+                    rows = burst_rows if entity_type == "burst_plan" else latest_plans
+                    entity_id_field = "ad_id"
+                    entity_name_field = "ad_name"
+                elif entity_type == "account_balance":
+                    rows = latest_account_balances
+                    entity_id_field = "advertiser_id"
+                    entity_name_field = "advertiser_name"
+                elif entity_type == "shared_wallet":
+                    rows = latest_wallets
+                    entity_id_field = "main_wallet_id"
+                    entity_name_field = "wallet_name"
+                else:
+                    continue
                 for row in rows:
-                    entity_id = str(row["advertiser_id"] if rule["entity_type"] == "account" else row["ad_id"])
+                    if metric not in row:
+                        continue
+                    entity_id = str(row[entity_id_field])
                     if rule["target_id"] and rule["target_id"] != entity_id:
                         continue
-                    if float(row["stat_cost"]) < float(rule["min_spend"]):
+                    if entity_type in {"account", "plan", "burst_plan"} and float(row["stat_cost"]) < float(rule["min_spend"]):
                         continue
-                    current_value = float(row[rule["metric"]])
+                    current_value = float(row[metric])
                     if not self._compare(current_value, str(rule["operator"]), float(rule["threshold"])):
                         continue
                     recent = conn.execute(
@@ -1685,7 +3211,7 @@ class DashboardService:
                     ).fetchone()
                     if recent:
                         continue
-                    entity_name = row["advertiser_name"] if rule["entity_type"] == "account" else row["ad_name"]
+                    entity_name = row[entity_name_field]
                     message = self._build_alert_message(rule, row, now_text)
                     conn.execute(
                         """
@@ -1705,16 +3231,16 @@ class DashboardService:
                             rule["operator"],
                             rule["threshold"],
                             current_value,
-                            row["stat_cost"],
-                            row["pay_amount"],
-                            row["order_count"],
-                            row["roi"],
+                            row.get("stat_cost", 0),
+                            row.get("pay_amount", 0),
+                            row.get("order_count", 0),
+                            row.get("roi", 0),
                             message,
                             now_text,
                         ),
                     )
 
-    def latest_snapshot(self) -> dict[str, Any] | None:
+    def latest_snapshot(self, allowed_advertiser_ids: set[int] | None = None) -> dict[str, Any] | None:
         with self.db() as conn:
             latest = conn.execute(
                 "SELECT snapshot_time FROM summary_snapshots ORDER BY snapshot_time DESC LIMIT 1"
@@ -1742,32 +3268,47 @@ class DashboardService:
                 """,
                 (snapshot_time,),
             ).fetchall()
-            plan_items = [self._decorate_plan_item(row) for row in plans]
+            account_items = [dict(row) for row in accounts]
+            plan_items = self._apply_employee_attribution(
+                [self._decorate_plan_item(row) for row in plans],
+                account_items,
+            )
+            account_balance_items = self._snapshot_account_balances(conn, snapshot_time)
+            shared_wallet_items = self._snapshot_shared_wallets(conn, snapshot_time)
+            wallet_relation_items = self._snapshot_wallet_relations(conn, snapshot_time)
             summary_payload, products, employees = self._rankings_bundle(
                 dict(summary),
-                [dict(row) for row in accounts],
+                account_items,
                 plan_items,
             )
+            summary_payload["wallet_count"] = len(shared_wallet_items)
+            summary_payload["account_balance_count"] = len(account_balance_items)
             extended_run = conn.execute(
                 "SELECT * FROM extended_sync_runs WHERE snapshot_time = ?",
                 (snapshot_time,),
             ).fetchone()
-            return {
+            payload = {
                 "snapshot_time": snapshot_time,
                 "summary": summary_payload,
-                "accounts": [dict(row) for row in accounts],
+                "accounts": account_items,
                 "plans": plan_items,
+                "accountBalances": account_balance_items,
+                "sharedWallets": shared_wallet_items,
+                "walletRelations": wallet_relation_items,
                 "products": products,
                 "employees": employees,
                 "extendedSync": dict(extended_run) if extended_run else None,
             }
+            return self._apply_account_scope(payload, allowed_advertiser_ids)
 
     def latest_extended_sync(self) -> dict[str, Any] | None:
         with self.db() as conn:
             row = self._latest_extended_sync_run(conn)
         return dict(row) if row else None
 
-    def plan_assets(self, ad_id: int, snapshot_time: str = "") -> dict[str, Any]:
+    def plan_assets(
+        self, ad_id: int, snapshot_time: str = "", allowed_advertiser_ids: set[int] | None = None
+    ) -> dict[str, Any]:
         with self.db() as conn:
             target_snapshot = str(snapshot_time or "").strip()
             if not target_snapshot:
@@ -1829,6 +3370,11 @@ class DashboardService:
                 ).fetchall()
             }
 
+        if plan_row and allowed_advertiser_ids is not None:
+            allowed = {int(item) for item in allowed_advertiser_ids}
+            if int(plan_row["advertiser_id"] or 0) not in allowed:
+                return {"snapshot_time": target_snapshot, "plan": None, "detail": None, "products": [], "materials": []}
+
         plan_payload = self._decorate_plan_item(plan_row) if plan_row else None
         detail_payload = dict(detail_row) if detail_row else None
         if detail_payload:
@@ -1848,7 +3394,9 @@ class DashboardService:
             "originalVideoCount": sum(1 for item in material_items if item["is_original"]),
         }
 
-    def material_rankings(self, snapshot_time: str = "") -> dict[str, Any]:
+    def material_rankings(
+        self, snapshot_time: str = "", allowed_advertiser_ids: set[int] | None = None
+    ) -> dict[str, Any]:
         with self.db() as conn:
             target_snapshot = str(snapshot_time or "").strip()
             if not target_snapshot:
@@ -1882,7 +3430,11 @@ class DashboardService:
                 """,
                 (target_snapshot,),
             ).fetchall()
-        items = self._build_material_rankings([dict(row) for row in rows])
+        scoped_rows = [dict(row) for row in rows]
+        if allowed_advertiser_ids is not None:
+            allowed = {int(item) for item in allowed_advertiser_ids}
+            scoped_rows = [row for row in scoped_rows if int(row.get("advertiser_id", 0) or 0) in allowed]
+        items = self._build_material_rankings(scoped_rows)
         return {"snapshot_time": target_snapshot, "items": items, "meta": latest_meta}
 
     def get_performance_snapshot(
@@ -1891,6 +3443,7 @@ class DashboardService:
         start_date: str = "",
         end_date: str = "",
         force_refresh: bool = False,
+        allowed_advertiser_ids: set[int] | None = None,
     ) -> dict[str, Any]:
         normalized = str(range_key or "day").strip().lower()
         if normalized not in PERFORMANCE_RANGES:
@@ -1899,7 +3452,7 @@ class DashboardService:
         cached = self._range_cache.get(cache_key)
         now_ts = time.time()
         if not force_refresh and cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
-            return cached["payload"]
+            return self._apply_account_scope(cached["payload"], allowed_advertiser_ids)
 
         config = self.read_config()
         if normalized == "custom":
@@ -1911,14 +3464,49 @@ class DashboardService:
         payload["range_label"] = range_label
         payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")
         payload["query_end_date"] = end_dt.strftime("%Y-%m-%d")
-        payload["plans"] = [self._decorate_plan_item(item) for item in payload["plans"]]
+        payload["plans"] = self._apply_employee_attribution(
+            [self._decorate_plan_item(item) for item in payload["plans"]],
+            payload["accounts"],
+        )
         payload["summary"], payload["products"], payload["employees"] = self._rankings_bundle(
             payload["summary"],
             payload["accounts"],
             payload["plans"],
         )
         self._range_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
-        return payload
+        return self._apply_account_scope(payload, allowed_advertiser_ids)
+
+    def public_employee_rankings(
+        self,
+        range_key: str,
+        start_date: str = "",
+        end_date: str = "",
+        sort_key: str = "stat_cost",
+        sort_dir: str = "desc",
+    ) -> dict[str, Any]:
+        payload = self.get_performance_snapshot(range_key, start_date, end_date)
+        metric = sort_key if sort_key in PUBLIC_SORT_FIELDS else "stat_cost"
+        direction = "asc" if sort_dir == "asc" else "desc"
+        items = [dict(item) for item in payload.get("employees", [])]
+        items.sort(
+            key=lambda item: (
+                float(item.get(metric, 0.0) or 0.0),
+                float(item.get("pay_amount", 0.0) or 0.0),
+                float(item.get("order_count", 0.0) or 0.0),
+                str(item.get("employee_name") or ""),
+            ),
+            reverse=direction == "desc",
+        )
+        return {
+            "range_key": payload.get("range_key", range_key),
+            "range_label": payload.get("range_label", ""),
+            "query_start_date": payload.get("query_start_date", ""),
+            "query_end_date": payload.get("query_end_date", ""),
+            "sort_key": metric,
+            "sort_dir": direction,
+            "updated_at": payload.get("snapshot_time", ""),
+            "items": items,
+        }
 
     def summary_history(self, limit: int = 144) -> list[dict[str, Any]]:
         with self.db() as conn:
@@ -1933,7 +3521,14 @@ class DashboardService:
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
-    def account_history(self, advertiser_id: int, limit: int = 72) -> list[dict[str, Any]]:
+    def account_history(
+        self,
+        advertiser_id: int,
+        limit: int = 72,
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        if allowed_advertiser_ids is not None and int(advertiser_id) not in {int(item) for item in allowed_advertiser_ids}:
+            return []
         with self.db() as conn:
             rows = conn.execute(
                 """
@@ -1947,8 +3542,26 @@ class DashboardService:
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
-    def plan_history(self, ad_id: int, limit: int = 72) -> list[dict[str, Any]]:
+    def plan_history(
+        self,
+        ad_id: int,
+        limit: int = 72,
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
         with self.db() as conn:
+            if allowed_advertiser_ids is not None:
+                latest = conn.execute(
+                    """
+                    SELECT advertiser_id
+                    FROM plan_snapshots
+                    WHERE ad_id = ?
+                    ORDER BY snapshot_time DESC
+                    LIMIT 1
+                    """,
+                    (ad_id,),
+                ).fetchone()
+                if not latest or int(latest["advertiser_id"] or 0) not in {int(item) for item in allowed_advertiser_ids}:
+                    return []
             rows = conn.execute(
                 """
                 SELECT snapshot_time, stat_cost, pay_amount, order_count, roi
@@ -2012,6 +3625,7 @@ class DashboardService:
         return [dict(row) for row in rows]
 
     def create_alert_rule(self, payload: AlertRulePayload) -> None:
+        validate_alert_rule_payload(payload)
         now_text = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
         with self.db() as conn:
             conn.execute(
@@ -2037,6 +3651,7 @@ class DashboardService:
             )
 
     def update_alert_rule(self, rule_id: int, payload: AlertRulePayload) -> None:
+        validate_alert_rule_payload(payload)
         now_text = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
         with self.db() as conn:
             conn.execute(
@@ -2091,20 +3706,47 @@ class DashboardService:
 
     @staticmethod
     def _build_alert_message(rule: Any, row: dict[str, Any], now_text: str) -> str:
-        entity_label = "账户" if rule["entity_type"] == "account" else "计划"
+        entity_label = {
+            "account": "账户",
+            "plan": "计划",
+            "burst_plan": "爆单计划",
+            "account_balance": "账户余额",
+            "shared_wallet": "共享钱包",
+        }.get(str(rule["entity_type"] or ""), "对象")
+        if str(rule["entity_type"] or "") == "account_balance":
+            return (
+                f"[千川告警] 账户余额触发阈值\n"
+                f"时间：{now_text}\n"
+                f"账户：{row['advertiser_name']}\n"
+                f"规则：账户余额 {rule['operator']} {rule['threshold']}\n"
+                f"当前余额：{row.get('account_balance', 0)}\n"
+                f"可用余额：{row.get('available_balance', 0)}\n"
+                f"备注：{rule['note'] or '请及时补充账户余额。'}"
+            )
+        if str(rule["entity_type"] or "") == "shared_wallet":
+            return (
+                f"[千川告警] 共享钱包触发阈值\n"
+                f"时间：{now_text}\n"
+                f"钱包：{row['wallet_name']}\n"
+                f"规则：共享钱包余额 {rule['operator']} {rule['threshold']}\n"
+                f"当前余额：{row.get('wallet_balance', 0)}\n"
+                f"覆盖账户数：{row.get('member_count', 0)}\n"
+                f"备注：{rule['note'] or '请及时检查共享钱包余额。'}"
+            )
         extra = ""
-        if rule["entity_type"] == "plan":
+        if str(rule["entity_type"] or "") in {"plan", "burst_plan"}:
             if row["product_name"]:
                 extra += f"\n商品：{row['product_name']}"
             if row["anchor_name"]:
                 extra += f"\n主播：{row['anchor_name']}"
             extra += f"\n账户：{row['advertiser_name']}"
+        metric_label = "爆单订单数" if str(rule["metric"] or "") == "burst_order_count" else rule["metric"]
         return (
             f"[千川告警] {entity_label}触发阈值\n"
             f"时间：{now_text}\n"
             f"{entity_label}：{row['advertiser_name'] if rule['entity_type'] == 'account' else row['ad_name']}"
             f"{extra}\n"
-            f"规则：{rule['metric']} {rule['operator']} {rule['threshold']}\n"
+            f"规则：{metric_label} {rule['operator']} {rule['threshold']}\n"
             f"当前值：{row[rule['metric']]}\n"
             f"消耗：{row['stat_cost']}\n"
             f"支付：{row['pay_amount']}\n"
@@ -2148,6 +3790,7 @@ class DashboardService:
 
     async def start(self) -> None:
         self.init_db()
+        self.bootstrap_auth_store()
         self.bootstrap_token_store()
         if ENABLE_IN_PROCESS_SCHEDULER:
             await self.run_sync()
@@ -2162,9 +3805,21 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax"
 app.mount("/static", StaticFiles(directory=str(Path(__file__).resolve().parent / "static")), name="static")
 
 
-def require_auth(request: Request) -> None:
-    if not request.session.get("authenticated"):
+def require_auth(request: Request) -> dict[str, Any]:
+    user_id = request.session.get("user_id")
+    if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
+    user = service.get_user_by_id(int(user_id))
+    if not user:
+        request.session.clear()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
+    return user
+
+
+def require_admin(user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    if str(user.get("role") or "") != ROLE_ADMIN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+    return user
 
 
 @app.on_event("startup")
@@ -2186,8 +3841,8 @@ async def healthz() -> dict[str, str]:
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request) -> HTMLResponse:
-    if request.session.get("authenticated"):
-        return RedirectResponse("/", status_code=302)
+    if request.session.get("user_id"):
+        return RedirectResponse("/workbench", status_code=302)
     return service.templates.TemplateResponse(
         request=request,
         name="login.html",
@@ -2197,9 +3852,13 @@ async def login_page(request: Request) -> HTMLResponse:
 
 @app.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
-    if username == DASHBOARD_USERNAME and password == DASHBOARD_PASSWORD:
+    user = service.authenticate_user(username, password)
+    if user:
         request.session["authenticated"] = True
-        return RedirectResponse("/", status_code=302)
+        request.session["user_id"] = int(user["id"])
+        request.session["username"] = str(user["username"])
+        request.session["role"] = str(user["role"])
+        return RedirectResponse("/workbench", status_code=302)
     return RedirectResponse("/login?error=1", status_code=302)
 
 
@@ -2210,9 +3869,20 @@ async def logout(request: Request) -> RedirectResponse:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request) -> HTMLResponse:
-    if not request.session.get("authenticated"):
-        return RedirectResponse("/login", status_code=302)
+async def public_index(request: Request) -> HTMLResponse:
+    return service.templates.TemplateResponse(
+        request=request,
+        name="public.html",
+        context={
+            "request": request,
+            "app_name": APP_NAME,
+            "customer_center_id": service.read_config()["customer_center_id"],
+        },
+    )
+
+
+@app.get("/workbench", response_class=HTMLResponse)
+async def index(request: Request, _user: dict[str, Any] = Depends(require_auth)) -> HTMLResponse:
     return service.templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -2224,11 +3894,203 @@ async def index(request: Request) -> HTMLResponse:
     )
 
 
-@app.get("/api/dashboard")
-async def dashboard_data(_auth: None = Depends(require_auth)) -> JSONResponse:
-    latest = service.latest_snapshot()
+@app.get("/api/public/employee-rankings")
+async def public_employee_rankings(
+    range: str = "day",
+    start_date: str = "",
+    end_date: str = "",
+    sort_key: str = "stat_cost",
+    sort_dir: str = "desc",
+) -> JSONResponse:
+    try:
+        payload = await asyncio.to_thread(service.public_employee_rankings, range, start_date, end_date, sort_key, sort_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(payload)
+
+
+@app.get("/api/session/me")
+async def current_session(user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    allowed = service.allowed_advertiser_ids_for_user(user)
     return JSONResponse(
         {
+            "id": user["id"],
+            "username": user["username"],
+            "role": user["role"],
+            "display_name": user.get("display_name") or "",
+            "scope_type": "all" if allowed is None else "restricted",
+            "scope_count": None if allowed is None else len(allowed),
+        }
+    )
+
+
+@app.get("/api/employees")
+async def employees(_user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    return JSONResponse({"items": service.list_employees()})
+
+
+@app.post("/api/employees")
+async def create_employee(payload: EmployeePayload, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+    try:
+        item = service.create_employee(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(item)
+
+
+@app.put("/api/employees/{employee_id}")
+async def update_employee(
+    employee_id: int,
+    payload: EmployeePayload,
+    _user: dict[str, Any] = Depends(require_admin),
+) -> JSONResponse:
+    try:
+        item = service.update_employee(employee_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(item)
+
+
+@app.get("/api/employees/{employee_id}/keywords")
+async def employee_keywords(employee_id: int, _user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    return JSONResponse({"items": service.list_employee_keywords(employee_id)})
+
+
+@app.post("/api/employees/{employee_id}/keywords")
+async def create_employee_keyword(
+    employee_id: int,
+    payload: EmployeeKeywordPayload,
+    _user: dict[str, Any] = Depends(require_admin),
+) -> JSONResponse:
+    try:
+        item = service.create_employee_keyword(employee_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(item)
+
+
+@app.put("/api/employee-keywords/{keyword_id}")
+async def update_employee_keyword(
+    keyword_id: int,
+    payload: EmployeeKeywordPayload,
+    _user: dict[str, Any] = Depends(require_admin),
+) -> JSONResponse:
+    try:
+        item = service.update_employee_keyword(keyword_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(item)
+
+
+@app.delete("/api/employee-keywords/{keyword_id}")
+async def delete_employee_keyword(keyword_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+    service.delete_employee_keyword(keyword_id)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/employees/{employee_id}/bindings")
+async def employee_bindings(employee_id: int, _user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    return JSONResponse({"items": service.list_employee_bindings(employee_id)})
+
+
+@app.post("/api/employees/{employee_id}/bindings")
+async def create_employee_binding(
+    employee_id: int,
+    payload: EmployeeBindingPayload,
+    _user: dict[str, Any] = Depends(require_admin),
+) -> JSONResponse:
+    try:
+        item = service.create_employee_binding(employee_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(item)
+
+
+@app.delete("/api/employee-bindings/{binding_id}")
+async def delete_employee_binding(binding_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+    service.delete_employee_binding(binding_id)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/employee-match-preview")
+async def employee_match_preview(
+    keyword: str,
+    scope: str = "all",
+    user: dict[str, Any] = Depends(require_auth),
+) -> JSONResponse:
+    allowed = service.allowed_advertiser_ids_for_user(user)
+    try:
+        payload = service.preview_keyword_matches(keyword, scope, allowed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(payload)
+
+
+@app.get("/api/users")
+async def users(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+    return JSONResponse({"items": service.list_users()})
+
+
+@app.post("/api/users")
+async def create_user(payload: AppUserPayload, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+    try:
+        item = service.create_user(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(item)
+
+
+@app.put("/api/users/{user_id}")
+async def update_user(
+    user_id: int,
+    payload: AppUserPayload,
+    _user: dict[str, Any] = Depends(require_admin),
+) -> JSONResponse:
+    try:
+        item = service.update_user(user_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(item)
+
+
+@app.get("/api/users/{user_id}/account-scopes")
+async def user_account_scopes(user_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+    return JSONResponse({"advertiser_ids": service.user_account_scopes(user_id)})
+
+
+@app.put("/api/users/{user_id}/account-scopes")
+async def replace_user_account_scopes(
+    user_id: int,
+    payload: UserScopePayload,
+    _user: dict[str, Any] = Depends(require_admin),
+) -> JSONResponse:
+    try:
+        advertiser_ids = service.replace_user_account_scopes(user_id, payload.advertiser_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"advertiser_ids": advertiser_ids})
+
+
+@app.get("/api/catalog/accounts")
+async def available_accounts(user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    allowed = service.allowed_advertiser_ids_for_user(user)
+    return JSONResponse({"items": service.latest_account_catalog(allowed)})
+
+
+@app.get("/api/dashboard")
+async def dashboard_data(user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    allowed = service.allowed_advertiser_ids_for_user(user)
+    latest = service.latest_snapshot(allowed)
+    return JSONResponse(
+        {
+            "session": {
+                "id": user["id"],
+                "username": user["username"],
+                "role": user["role"],
+                "display_name": user.get("display_name") or "",
+                "scope_type": "all" if allowed is None else "restricted",
+                "scope_count": None if allowed is None else len(allowed),
+            },
             "latest": latest,
             "extendedSync": service.latest_extended_sync(),
             "tokenInfo": service.latest_token_payload(masked=True),
@@ -2246,10 +4108,11 @@ async def performance_data(
     range: str = "day",
     start_date: str = "",
     end_date: str = "",
-    _auth: None = Depends(require_auth),
+    user: dict[str, Any] = Depends(require_auth),
 ) -> JSONResponse:
     try:
-        payload = await asyncio.to_thread(service.get_performance_snapshot, range, start_date, end_date)
+        allowed = service.allowed_advertiser_ids_for_user(user)
+        payload = await asyncio.to_thread(service.get_performance_snapshot, range, start_date, end_date, False, allowed)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(payload)
@@ -2268,13 +4131,13 @@ async def manual_extended_sync(_auth: None = Depends(require_auth)) -> JSONRespo
 
 
 @app.get("/api/system/integrations/ocean-engine/token-latest")
-async def latest_token(_auth: None = Depends(require_auth)) -> JSONResponse:
+async def latest_token(_auth: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
     return JSONResponse(service.latest_token_payload(masked=False))
 
 
 @app.post("/api/system/integrations/ocean-engine/exchange-auth-code")
 async def exchange_auth_code(
-    payload: AuthCodeExchangePayload, _auth: None = Depends(require_auth)
+    payload: AuthCodeExchangePayload, _auth: dict[str, Any] = Depends(require_auth)
 ) -> JSONResponse:
     try:
         token_payload = await asyncio.to_thread(service.exchange_auth_code, payload.auth_code)
@@ -2284,23 +4147,27 @@ async def exchange_auth_code(
 
 
 @app.get("/api/accounts/{advertiser_id}/history")
-async def account_history(advertiser_id: int, _auth: None = Depends(require_auth)) -> JSONResponse:
-    return JSONResponse({"items": service.account_history(advertiser_id)})
+async def account_history(advertiser_id: int, user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    allowed = service.allowed_advertiser_ids_for_user(user)
+    return JSONResponse({"items": service.account_history(advertiser_id, allowed_advertiser_ids=allowed)})
 
 
 @app.get("/api/plans/{ad_id}/history")
-async def plan_history(ad_id: int, _auth: None = Depends(require_auth)) -> JSONResponse:
-    return JSONResponse({"items": service.plan_history(ad_id)})
+async def plan_history(ad_id: int, user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    allowed = service.allowed_advertiser_ids_for_user(user)
+    return JSONResponse({"items": service.plan_history(ad_id, allowed_advertiser_ids=allowed)})
 
 
 @app.get("/api/plans/{ad_id}/assets")
-async def plan_assets(ad_id: int, snapshot_time: str = "", _auth: None = Depends(require_auth)) -> JSONResponse:
-    return JSONResponse(service.plan_assets(ad_id, snapshot_time))
+async def plan_assets(ad_id: int, snapshot_time: str = "", user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    allowed = service.allowed_advertiser_ids_for_user(user)
+    return JSONResponse(service.plan_assets(ad_id, snapshot_time, allowed))
 
 
 @app.get("/api/material-rankings")
-async def material_rankings(snapshot_time: str = "", _auth: None = Depends(require_auth)) -> JSONResponse:
-    return JSONResponse(service.material_rankings(snapshot_time))
+async def material_rankings(snapshot_time: str = "", user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    allowed = service.allowed_advertiser_ids_for_user(user)
+    return JSONResponse(service.material_rankings(snapshot_time, allowed))
 
 
 @app.get("/api/alert-rules")
@@ -2326,13 +4193,19 @@ async def update_notification_settings(
 
 @app.post("/api/alert-rules")
 async def create_alert_rule(payload: AlertRulePayload, _auth: None = Depends(require_auth)) -> JSONResponse:
-    service.create_alert_rule(payload)
+    try:
+        service.create_alert_rule(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse({"ok": True})
 
 
 @app.put("/api/alert-rules/{rule_id}")
 async def update_alert_rule(rule_id: int, payload: AlertRulePayload, _auth: None = Depends(require_auth)) -> JSONResponse:
-    service.update_alert_rule(rule_id, payload)
+    try:
+        service.update_alert_rule(rule_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse({"ok": True})
 
 

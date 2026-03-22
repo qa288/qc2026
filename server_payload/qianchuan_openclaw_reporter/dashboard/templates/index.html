@@ -52,6 +52,8 @@
               <button type="button" class="view-tab" data-view="breakdown">经营拆解</button>
               <button type="button" class="view-tab" data-view="plans">计划</button>
               <button type="button" class="view-tab" data-view="materials">素材</button>
+              <button type="button" class="view-tab" data-view="ownership">归属规则</button>
+              <button type="button" class="view-tab" data-view="access">权限</button>
               <button type="button" class="view-tab" data-view="signals">通知规则</button>
             </div>
           </div>
@@ -73,8 +75,7 @@
           <div class="panel alert-panel">
             <div class="panel-head overview-alert-head">
               <div>
-                <p class="panel-kicker">老板关注</p>
-                <h2>最新提醒</h2>
+                <h2>老板关注</h2>
               </div>
               <div class="meta-block compact single-line">
                 <span>优先看最近命中、待处理数量和重点对象</span>
@@ -104,7 +105,6 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">运营视角</p>
               <h2>账户表现</h2>
             </div>
             <div class="toolbar">
@@ -113,9 +113,9 @@
                   <button type="button" class="range-button" data-range="day">日</button>
                   <button type="button" class="range-button" data-range="week">周</button>
                   <button type="button" class="range-button" data-range="month">月</button>
-                  <button type="button" class="range-button" data-range="custom">自定义</button>
                 </div>
-                <div class="date-range-inline">
+                <div class="date-range-inline custom-date-inline">
+                  <span class="date-range-label">自定义</span>
                   <input id="accountDateStart" class="date-input" type="date" />
                   <span class="date-range-sep">至</span>
                   <input id="accountDateEnd" class="date-input" type="date" />
@@ -136,7 +136,6 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">经营拆解</p>
               <h2>商品与员工排名</h2>
             </div>
             <div class="toolbar">
@@ -145,9 +144,9 @@
                   <button type="button" class="range-button" data-range="day">日</button>
                   <button type="button" class="range-button" data-range="week">周</button>
                   <button type="button" class="range-button" data-range="month">月</button>
-                  <button type="button" class="range-button" data-range="custom">自定义</button>
                 </div>
-                <div class="date-range-inline">
+                <div class="date-range-inline custom-date-inline">
+                  <span class="date-range-label">自定义</span>
                   <input id="breakdownDateStart" class="date-input" type="date" />
                   <span class="date-range-sep">至</span>
                   <input id="breakdownDateEnd" class="date-input" type="date" />
@@ -161,21 +160,19 @@
             <div class="rank-panel">
               <div class="rank-panel-head">
                 <div>
-                  <p class="panel-kicker">员工维度</p>
                   <h3>员工排名</h3>
                 </div>
-                <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索员工 / 代表计划" />
+                <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索归属人 / 代表计划" />
               </div>
-              <div class="rank-note">当前按计划里的抖音号 / 主播字段归属员工，空值统一归到未归属。</div>
+              <div class="rank-note">当前按归属规则把账户、计划、商品、素材映射到归属人，再按计划数据汇总排名。</div>
               <div class="table-shell rank-table-shell">
                 <table id="employeeTable" class="data-table compact"></table>
               </div>
-              <div id="employeeDetail" class="detail-panel empty">点击员工行，查看该员工当前负责的计划规模和核心表现。</div>
+              <div id="employeeDetail" class="detail-panel empty">点击归属人行，查看该归属人当前负责的计划规模和核心表现。</div>
             </div>
             <div class="rank-panel">
               <div class="rank-panel-head">
                 <div>
-                  <p class="panel-kicker">商品维度</p>
                   <h3>商品排名</h3>
                 </div>
                 <input id="productSearch" class="search-input rank-search" type="search" placeholder="搜索商品 / 代表计划" />
@@ -194,7 +191,6 @@
         <section class="panel decision-panel">
           <div class="panel-head plan-head">
             <div>
-              <p class="panel-kicker">投流决策台</p>
               <h2>计划效果明细</h2>
             </div>
             <div class="toolbar wide">
@@ -203,9 +199,9 @@
                   <button type="button" class="range-button" data-range="day">日</button>
                   <button type="button" class="range-button" data-range="week">周</button>
                   <button type="button" class="range-button" data-range="month">月</button>
-                  <button type="button" class="range-button" data-range="custom">自定义</button>
                 </div>
-                <div class="date-range-inline">
+                <div class="date-range-inline custom-date-inline">
+                  <span class="date-range-label">自定义</span>
                   <input id="planDateStart" class="date-input" type="date" />
                   <span class="date-range-sep">至</span>
                   <input id="planDateEnd" class="date-input" type="date" />
@@ -237,11 +233,10 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <p class="panel-kicker">素材分析</p>
-              <h2>素材效果排名</h2>
+              <h2>素材效果排行</h2>
             </div>
             <div class="toolbar wide">
-              <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材 / 素材ID / 计划 / 账户" />
+              <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材 / 素材ID / 视频ID / 计划 / 账户" />
               <button id="syncExtendedButton" class="button ghost" type="button">刷新素材</button>
             </div>
           </div>
@@ -259,22 +254,291 @@
         </section>
       </section>
 
+      <section class="view-section" data-view="ownership">
+        <section class="panel ownership-panel">
+          <div class="panel-head">
+            <div>
+              <h2>归属规则</h2>
+            </div>
+            <div class="meta-block compact single-line">
+              <span>先维护归属人，再配置关键词和人工绑定；公开页与后台员工排名都使用这里的规则。</span>
+            </div>
+          </div>
+          <div class="ownership-layout">
+            <section class="ownership-list-card">
+              <div class="subpanel-head">
+                <div>
+                  <h3>归属人列表</h3>
+                </div>
+              </div>
+              <div class="table-shell tall">
+                <table id="employeeManagerTable" class="data-table compact"></table>
+              </div>
+            </section>
+
+            <section class="ownership-editor-card">
+              <div class="subpanel-head">
+                <div>
+                  <h3>归属人配置</h3>
+                </div>
+                <div id="employeeEditorStatus" class="section-range-meta compact-inline">先选择或创建归属人。</div>
+              </div>
+
+              <form id="employeeForm" class="ownership-form-grid">
+                <label>
+                  <span>展示名</span>
+                  <input name="display_name" type="text" placeholder="例如：李杰 / 刘磊磊 / 一组" required />
+                </label>
+                <label class="wide-field">
+                  <span>备注</span>
+                  <input name="note" type="text" placeholder="说明这个归属人负责的业务线或命名规范" />
+                </label>
+                <label class="toggle-chip">
+                  <input name="enabled" type="checkbox" checked />
+                  <span>启用</span>
+                </label>
+                <div class="ownership-form-actions">
+                  <button type="submit" class="button primary">保存归属人</button>
+                  <button type="button" id="employeeFormReset" class="button ghost">新建</button>
+                </div>
+              </form>
+
+              <div class="ownership-dual-grid">
+                <section class="ownership-card">
+                  <div class="subpanel-head">
+                    <div>
+                      <h3>关键词规则</h3>
+                    </div>
+                  </div>
+                  <form id="keywordForm" class="ownership-inline-form">
+                    <label class="wide-field">
+                      <span>关键词</span>
+                      <input name="keyword" type="text" placeholder="例如：李杰 / 磊磊 / 一奕科技-娜娜" required />
+                    </label>
+                    <label>
+                      <span>范围</span>
+                      <select name="scope">
+                        <option value="all">全部</option>
+                        <option value="account">只匹配账户</option>
+                        <option value="plan">只匹配计划</option>
+                        <option value="product">只匹配商品</option>
+                        <option value="material">只匹配素材</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>优先级</span>
+                      <input name="priority" type="number" min="1" max="9999" value="100" />
+                    </label>
+                    <label class="toggle-chip">
+                      <input name="enabled" type="checkbox" checked />
+                      <span>启用</span>
+                    </label>
+                    <button type="submit" class="button primary">新增关键词</button>
+                  </form>
+                  <div class="table-shell">
+                    <table id="keywordTable" class="data-table compact"></table>
+                  </div>
+                </section>
+
+                <section class="ownership-card">
+                  <div class="subpanel-head">
+                    <div>
+                      <h3>命中预览与人工绑定</h3>
+                    </div>
+                  </div>
+                  <form id="matchPreviewForm" class="ownership-inline-form">
+                    <label class="wide-field">
+                      <span>关键词预览</span>
+                      <input id="matchKeywordInput" name="keyword" type="text" placeholder="输入关键词，预览将命中的账户 / 计划 / 商品 / 素材" required />
+                    </label>
+                    <label>
+                      <span>搜索范围</span>
+                      <select id="matchScopeSelect" name="scope">
+                        <option value="all">全部</option>
+                        <option value="account">账户</option>
+                        <option value="plan">计划</option>
+                        <option value="product">商品</option>
+                        <option value="material">素材</option>
+                      </select>
+                    </label>
+                    <button type="submit" class="button ghost">预览命中</button>
+                  </form>
+                  <div id="matchPreviewMeta" class="section-range-meta compact-inline">先选择归属人，再预览命中结果。</div>
+                  <div class="table-shell">
+                    <table id="matchPreviewTable" class="data-table compact"></table>
+                  </div>
+                  <div class="subpanel-head narrow-top">
+                    <div>
+                      <h3>人工绑定列表</h3>
+                    </div>
+                  </div>
+                  <div class="table-shell">
+                    <table id="bindingTable" class="data-table compact"></table>
+                  </div>
+                </section>
+              </div>
+            </section>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-section" data-view="access">
+        <section class="panel access-panel">
+          <div class="panel-head">
+            <div>
+              <h2>账号与权限</h2>
+            </div>
+            <div class="meta-block compact single-line">
+              <span>管理员可以创建运营账号，并按账户范围授权；运营与老板共用工作台，但只看被分配的账户数据。</span>
+            </div>
+          </div>
+          <div class="access-layout">
+            <section class="access-list-card">
+              <div class="subpanel-head">
+                <div>
+                  <h3>后台账号</h3>
+                </div>
+              </div>
+              <div class="table-shell tall">
+                <table id="userTable" class="data-table compact"></table>
+              </div>
+            </section>
+
+            <section class="access-editor-card">
+              <div class="subpanel-head">
+                <div>
+                  <h3>账号配置</h3>
+                </div>
+                <div id="userEditorStatus" class="section-range-meta compact-inline">管理员可配置运营账号和账户范围。</div>
+              </div>
+              <form id="userForm" class="ownership-form-grid">
+                <label>
+                  <span>用户名</span>
+                  <input name="username" type="text" placeholder="operator_a" required />
+                </label>
+                <label>
+                  <span>显示名</span>
+                  <input name="display_name" type="text" placeholder="运营A / 老板" />
+                </label>
+                <label>
+                  <span>角色</span>
+                  <select name="role">
+                    <option value="operator">运营</option>
+                    <option value="admin">管理员</option>
+                  </select>
+                </label>
+                <label>
+                  <span>密码</span>
+                  <input name="password" type="password" placeholder="新建必填；编辑时留空表示不改" />
+                </label>
+                <label class="toggle-chip">
+                  <input name="enabled" type="checkbox" checked />
+                  <span>启用</span>
+                </label>
+                <div class="ownership-form-actions">
+                  <button type="submit" class="button primary">保存账号</button>
+                  <button type="button" id="userFormReset" class="button ghost">新建</button>
+                </div>
+              </form>
+
+              <section class="ownership-card">
+                <div class="subpanel-head">
+                  <div>
+                    <h3>账户范围</h3>
+                  </div>
+                  <button type="button" id="saveUserScopesButton" class="button primary">保存账户范围</button>
+                </div>
+                <div id="scopeEditorMeta" class="section-range-meta compact-inline">管理员默认拥有全量权限；运营默认无数据，需勾选账户范围。</div>
+                <div id="scopeAccountList" class="scope-checklist"></div>
+              </section>
+            </section>
+          </div>
+        </section>
+      </section>
+
       <section class="view-section" data-view="signals">
         <section class="panel signal-panel">
           <div class="panel-head signal-panel-head">
             <div>
-              <p class="panel-kicker">通知联动</p>
-              <h2>通知与阈值规则</h2>
+              <h2>预警中心</h2>
             </div>
           </div>
           <div id="signalOverview" class="signal-summary-strip"></div>
 
           <div class="signal-console">
+            <section class="signal-config-card signal-rule-card">
+              <div class="signal-config-head">
+                <div>
+                  <h3>规则编辑器</h3>
+                </div>
+                <div class="signal-head-actions">
+                  <button type="submit" form="ruleForm" id="ruleFormSubmitButton" class="button primary">新增规则</button>
+                  <button type="button" id="ruleFormCancelButton" class="button ghost hidden">取消编辑</button>
+                </div>
+              </div>
+              <div id="ruleFormHint" class="signal-form-hint">先选对象，再设阈值；余额、共享钱包和爆单规则会自动收起无关字段。</div>
+              <form id="ruleForm" class="signal-compact-form">
+                <input name="rule_id" type="hidden" />
+                <div class="signal-form-row signal-form-row-rule">
+                  <label>
+                    <span>对象</span>
+                    <select name="entity_type" required>
+                      <option value="plan">计划</option>
+                      <option value="account">账户</option>
+                      <option value="account_balance">账户余额</option>
+                      <option value="shared_wallet">共享钱包</option>
+                      <option value="burst_plan">爆单计划</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>指标</span>
+                    <select name="metric" required>
+                    </select>
+                  </label>
+                  <label class="wide-field">
+                    <span id="ruleTargetLabel">限定对象</span>
+                    <input name="target_id" id="ruleTargetInput" type="text" list="ruleTargetOptions" placeholder="留空表示全部生效" />
+                    <datalist id="ruleTargetOptions"></datalist>
+                  </label>
+                </div>
+                <div class="signal-form-row signal-form-row-rule">
+                  <label>
+                    <span>比较</span>
+                    <select name="operator" required>
+                      <option value="lt">&lt;</option>
+                      <option value="lte">&lt;=</option>
+                      <option value="gt">&gt;</option>
+                      <option value="gte">&gt;=</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>阈值</span>
+                    <input name="threshold" type="number" step="0.01" required />
+                  </label>
+                  <label>
+                    <span>冷却分钟</span>
+                    <input name="cooldown_minutes" type="number" step="1" value="60" />
+                  </label>
+                  <label class="wide-field" id="ruleMinSpendField">
+                    <span>最低消耗</span>
+                    <input name="min_spend" type="number" step="0.01" value="0" />
+                  </label>
+                  <label class="wide-field">
+                    <span>备注</span>
+                    <input name="note" type="text" placeholder="例如：ROI 低于 1.2 立即复核" />
+                  </label>
+                  <label class="toggle-chip">
+                    <input name="enabled" type="checkbox" checked />
+                    <span>立即启用</span>
+                  </label>
+                </div>
+              </form>
+            </section>
+
             <section class="signal-config-card signal-notify-card">
               <div class="signal-config-head">
                 <div>
-                  <p class="panel-kicker">通知设置</p>
-                  <h3>告警通知</h3>
+                  <h3>通知通道</h3>
                 </div>
                 <button type="submit" form="notificationForm" class="button primary">保存通知</button>
               </div>
@@ -308,71 +572,8 @@
                     <span>阈值告警</span>
                   </label>
                   <label>
-                    <span>告警条数</span>
+                    <span>单次发送条数</span>
                     <input name="alert_batch_size" type="number" step="1" min="1" max="20" value="6" />
-                  </label>
-                </div>
-              </form>
-            </section>
-
-            <section class="signal-config-card signal-rule-card">
-              <div class="signal-config-head">
-                <div>
-                  <p class="panel-kicker">阈值规则</p>
-                  <h3>快速新增</h3>
-                </div>
-                <button type="submit" form="ruleForm" class="button primary">新增规则</button>
-              </div>
-              <form id="ruleForm" class="signal-compact-form">
-                <div class="signal-form-row signal-form-row-rule">
-                  <label>
-                    <span>对象</span>
-                    <select name="entity_type" required>
-                      <option value="plan">计划</option>
-                      <option value="account">账户</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>指标</span>
-                    <select name="metric" required>
-                      <option value="roi">ROI</option>
-                      <option value="stat_cost">消耗</option>
-                      <option value="order_count">订单数</option>
-                      <option value="pay_amount">支付金额</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>比较</span>
-                    <select name="operator" required>
-                      <option value="lt">&lt;</option>
-                      <option value="lte">&lt;=</option>
-                      <option value="gt">&gt;</option>
-                      <option value="gte">&gt;=</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>阈值</span>
-                    <input name="threshold" type="number" step="0.01" required />
-                  </label>
-                  <label>
-                    <span>最低消耗</span>
-                    <input name="min_spend" type="number" step="0.01" value="0" />
-                  </label>
-                  <label>
-                    <span>冷却分钟</span>
-                    <input name="cooldown_minutes" type="number" step="1" value="60" />
-                  </label>
-                  <label class="wide-field">
-                    <span>限定 ID</span>
-                    <input name="target_id" type="text" placeholder="留空表示全部生效" />
-                  </label>
-                  <label class="wide-field">
-                    <span>备注</span>
-                    <input name="note" type="text" placeholder="例如：ROI 低于 1.2 立即复核" />
-                  </label>
-                  <label class="toggle-chip">
-                    <input name="enabled" type="checkbox" checked />
-                    <span>立即启用</span>
                   </label>
                 </div>
               </form>
@@ -381,7 +582,6 @@
             <section class="signal-config-card signal-rule-list-card">
               <div class="signal-config-head">
                 <div>
-                  <p class="panel-kicker">规则列表</p>
                   <h3>已生效规则</h3>
                 </div>
               </div>

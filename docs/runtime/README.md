@@ -85,7 +85,8 @@ export PLAN_PAGE_SIZE="100"
 当前正式运行方式统一为 Docker Compose：
 
 ```bash
-docker-compose -f docker-compose.dashboard.yml --env-file .env.dashboard up -d --build
+set -a && . ./.env.dashboard && set +a
+docker-compose -f docker-compose.dashboard.yml up -d --build
 ```
 
 现网运维入口：
@@ -115,33 +116,44 @@ docker-compose -f docker-compose.dashboard.yml --env-file .env.dashboard up -d -
 
 ## 当前目标输出
 
-- `9898` 端口提供登录保护的运营看板
+- `9898` 端口提供公开页与登录保护的运营工作台
+- 当前正式域名：`qc.tyos.cc`
 - 页面必须覆盖：
+  - 公开员工排名页
   - 全部账户整体情况
   - 每个账户的基本情况
   - 推广计划的排名明细
   - 商品、素材、员工维度的经营拆解
+  - 员工归属规则与账号权限
   - 阈值告警配置与告警事件
 - 计划排名默认按 `订单数 -> 支付金额 -> ROI -> 消耗` 排序
 
 Dashboard 页面当前包含：
 
-- 六个主视图：`总览 / 账户 / 经营拆解 / 计划 / 素材 / 通知规则`
+- 公开页：`/`
+  - 匿名可访问员工排名页
+- 工作台：`/workbench`
+  - 八个主视图：`总览 / 账户 / 经营拆解 / 计划 / 素材 / 归属规则 / 权限 / 预警中心`
 - 总览：KPI、系统状态、明细同步状态、老板关注提醒
 - 账户：按账户看 `消耗 / 支付 / 订单 / ROI`，支持排序、搜索和 `日 / 周 / 月`
 - 经营拆解：商品榜和员工榜，支持排序、搜索、详情卡和 `日 / 周 / 月`
 - 计划：计划明细表 + 右侧详情栏 + 最近一次素材/商品摘要
 - 素材：素材榜单 + 右侧素材详情，支持刷新最近一次明细同步结果
-- 通知规则：统一管理通知渠道、目标和阈值规则
+- 归属规则：维护归属人、关键词规则、命中预览和人工绑定
+- 权限：维护后台账号和账户可见范围
+- 预警中心：统一管理通知通道、阈值规则和告警事件
 
 当前落库层已经包括：
 
 - 分钟级：`summary_snapshots / account_snapshots / plan_snapshots`
+- 分钟级余额与钱包：`account_balances / shared_wallets / shared_wallet_account_relations`
 - 10 分钟级细粒度：`plan_detail_snapshots / product_snapshots / material_snapshots / video_origin_flags`
 - 细粒度同步状态：`extended_sync_runs`
 
 当前页面 API 额外可直接读取：
 
+- `GET /api/public/employee-rankings`
+  - 匿名公开员工榜
 - `POST /api/sync/extended`
   - 手动触发一次细粒度同步
 - `GET /api/plans/{ad_id}/assets`
@@ -163,14 +175,35 @@ Dashboard 页面当前包含：
 
 当前员工维度口径：
 
-- 第一版按计划里的 `anchor_name` 聚合
-- `anchor_name` 为空时统一归到 `未归属`
-- 如果后续引入员工映射表，必须先更新 `FUNCTIONAL_SPEC.md` 和 `STANDARD.md`
+- 当前正式口径是“归属人”
+- 归属人来自管理员维护的：
+  - 归属人列表
+  - 关键词规则
+  - 人工绑定
+- 命中对象包括：
+  - 账户
+  - 计划
+  - 商品
+  - 素材
+- 未命中任何规则时统一归到 `未归属`
+- 若当前还没有配置任何归属规则，则公开页和后台员工榜会回退到 `anchor_name` 兜底聚合
 
 当前 Web 看板数据刷新节奏：
 
 - 服务端采集：每 `1` 分钟
 - 浏览器轮询：每 `60` 秒
+
+当前余额与共享钱包口径：
+
+- 主来源：`/open_api/v3.0/account/fund/get/`
+- 账户余额使用：
+  - `total_balance`
+  - `valid_balance`
+- 共享钱包使用：
+  - `wallet_id`
+  - `wallet_total_balance_valid`
+- 当前通过同 `wallet_id` 关联多个账户来推导共享钱包关系
+- 更高权限共享钱包接口当前存在权限限制，不作为 V1 主链路
 
 当前 token 真源：
 

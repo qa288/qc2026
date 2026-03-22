@@ -5,14 +5,70 @@ const RANGE_LABELS = {
   custom: "自定义时间段",
 };
 
+const RULE_ENTITY_CONFIG = {
+  account: {
+    label: "账户",
+    metrics: ["stat_cost", "roi", "order_count", "pay_amount"],
+    targetLabel: "限定账户",
+    targetPlaceholder: "留空表示全部账户",
+    targetSource: "accounts",
+    supportsMinSpend: true,
+    thresholdStep: "0.01",
+  },
+  plan: {
+    label: "计划",
+    metrics: ["stat_cost", "roi", "order_count", "pay_amount"],
+    targetLabel: "限定计划",
+    targetPlaceholder: "留空表示全部计划",
+    targetSource: "plans",
+    supportsMinSpend: true,
+    thresholdStep: "0.01",
+  },
+  account_balance: {
+    label: "账户余额",
+    metrics: ["account_balance"],
+    targetLabel: "限定账户",
+    targetPlaceholder: "留空表示全部账户余额",
+    targetSource: "accountBalances",
+    supportsMinSpend: false,
+    thresholdStep: "0.01",
+  },
+  shared_wallet: {
+    label: "共享钱包",
+    metrics: ["wallet_balance"],
+    targetLabel: "限定共享钱包",
+    targetPlaceholder: "留空表示全部共享钱包",
+    targetSource: "sharedWallets",
+    supportsMinSpend: false,
+    thresholdStep: "0.01",
+  },
+  burst_plan: {
+    label: "爆单计划",
+    metrics: ["burst_order_count"],
+    targetLabel: "限定计划",
+    targetPlaceholder: "留空表示全部计划",
+    targetSource: "plans",
+    supportsMinSpend: false,
+    thresholdStep: "1",
+  },
+};
+
 const state = {
   payload: null,
+  session: null,
   rangePayloads: {},
   planAssetCache: {},
   materialPayload: null,
+  employees: [],
+  users: [],
+  catalogAccounts: [],
+  employeeKeywords: {},
+  employeeBindings: {},
+  userScopes: {},
+  matchPreview: null,
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
-  employeeSort: loadSort("employee-sort", { key: "pay_amount", dir: "desc" }),
+  employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
   productSort: loadSort("product-sort", { key: "order_count", dir: "desc" }),
   materialSort: loadSort("material-sort", { key: "order_count", dir: "desc" }),
   activeView: loadPreference("active-view", "overview"),
@@ -25,6 +81,10 @@ const state = {
   selectedEmployeeName: null,
   selectedProductKey: null,
   selectedMaterialKey: null,
+  selectedEmployeeId: null,
+  selectedUserId: null,
+  selectedUserScopeIds: [],
+  editingRuleId: null,
 };
 
 const kpiGrid = document.getElementById("kpiGrid");
@@ -50,6 +110,13 @@ const planAccountFilter = document.getElementById("planAccountFilter");
 const notificationForm = document.getElementById("notificationForm");
 const notificationStatus = document.getElementById("notificationStatus");
 const ruleForm = document.getElementById("ruleForm");
+const ruleFormHint = document.getElementById("ruleFormHint");
+const ruleFormSubmitButton = document.getElementById("ruleFormSubmitButton");
+const ruleFormCancelButton = document.getElementById("ruleFormCancelButton");
+const ruleTargetInput = document.getElementById("ruleTargetInput");
+const ruleTargetLabel = document.getElementById("ruleTargetLabel");
+const ruleTargetOptions = document.getElementById("ruleTargetOptions");
+const ruleMinSpendField = document.getElementById("ruleMinSpendField");
 const syncButton = document.getElementById("syncButton");
 const syncExtendedButton = document.getElementById("syncExtendedButton");
 const heroStatusText = document.getElementById("heroStatusText");
@@ -78,6 +145,25 @@ const breakdownDateStart = document.getElementById("breakdownDateStart");
 const breakdownDateEnd = document.getElementById("breakdownDateEnd");
 const breakdownDateApply = document.getElementById("breakdownDateApply");
 const materialSyncMeta = document.getElementById("materialSyncMeta");
+const employeeManagerTable = document.getElementById("employeeManagerTable");
+const employeeForm = document.getElementById("employeeForm");
+const employeeFormReset = document.getElementById("employeeFormReset");
+const employeeEditorStatus = document.getElementById("employeeEditorStatus");
+const keywordForm = document.getElementById("keywordForm");
+const keywordTable = document.getElementById("keywordTable");
+const matchPreviewForm = document.getElementById("matchPreviewForm");
+const matchKeywordInput = document.getElementById("matchKeywordInput");
+const matchScopeSelect = document.getElementById("matchScopeSelect");
+const matchPreviewMeta = document.getElementById("matchPreviewMeta");
+const matchPreviewTable = document.getElementById("matchPreviewTable");
+const bindingTable = document.getElementById("bindingTable");
+const userTable = document.getElementById("userTable");
+const userForm = document.getElementById("userForm");
+const userFormReset = document.getElementById("userFormReset");
+const userEditorStatus = document.getElementById("userEditorStatus");
+const scopeAccountList = document.getElementById("scopeAccountList");
+const saveUserScopesButton = document.getElementById("saveUserScopesButton");
+const scopeEditorMeta = document.getElementById("scopeEditorMeta");
 const PERFORMANCE_SECTION_CONFIG = {
   account: {
     storageKey: "account-range-filter",
@@ -235,12 +321,22 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+function truncateMiddle(value, head = 8, tail = 6) {
+  const text = String(value || "").trim();
+  if (!text) return "--";
+  if (text.length <= head + tail + 3) return text;
+  return `${text.slice(0, head)}...${text.slice(-tail)}`;
+}
+
 function metricLabel(metric) {
   const labels = {
     roi: "ROI",
     stat_cost: "消耗",
     order_count: "订单数",
     pay_amount: "支付金额",
+    account_balance: "账户余额",
+    wallet_balance: "共享钱包余额",
+    burst_order_count: "爆单订单数",
   };
   return labels[metric] || metric;
 }
@@ -267,7 +363,179 @@ function operatorLabel(operator) {
 }
 
 function entityLabel(entityType) {
-  return entityType === "plan" ? "计划" : "账户";
+  const labels = {
+    account: "账户",
+    plan: "计划",
+    account_balance: "账户余额",
+    shared_wallet: "共享钱包",
+    burst_plan: "爆单计划",
+  };
+  return labels[entityType] || "账户";
+}
+
+function ruleEntityConfig(entityType) {
+  return RULE_ENTITY_CONFIG[String(entityType || "").trim()] || RULE_ENTITY_CONFIG.plan;
+}
+
+function ruleMetricOptions(entityType) {
+  return ruleEntityConfig(entityType).metrics.map((metric) => ({
+    value: metric,
+    label: metricLabel(metric),
+  }));
+}
+
+function entityTargetOptions(entityType) {
+  const latest = state.payload?.latest || {};
+  const config = ruleEntityConfig(entityType);
+  const sourceKey = config.targetSource;
+  const items = latest?.[sourceKey] || [];
+  if (sourceKey === "accounts") {
+    return items.map((item) => ({
+      value: String(item.advertiser_id || ""),
+      label: `${item.advertiser_name || item.advertiser_id || "账户"} · ${item.advertiser_id || "-"}`,
+    }));
+  }
+  if (sourceKey === "plans") {
+    return items.map((item) => ({
+      value: String(item.ad_id || ""),
+      label: `${item.ad_name || item.ad_id || "计划"} · ${item.advertiser_name || "-"}`,
+    }));
+  }
+  if (sourceKey === "accountBalances") {
+    return items.map((item) => ({
+      value: String(item.advertiser_id || ""),
+      label: `${item.advertiser_name || item.advertiser_id || "账户"} · 余额 ${formatMoney(item.available_balance ?? item.account_balance ?? 0)}`,
+    }));
+  }
+  if (sourceKey === "sharedWallets") {
+    return items.map((item) => ({
+      value: String(item.main_wallet_id || ""),
+      label: `${item.wallet_name || item.main_wallet_id || "共享钱包"} · 余额 ${formatMoney(item.wallet_balance ?? item.valid_balance ?? 0)}`,
+    }));
+  }
+  return [];
+}
+
+function targetDisplayLabel(entityType, targetId) {
+  const target = String(targetId || "").trim();
+  if (!target) return "全部";
+  const options = entityTargetOptions(entityType);
+  const match = options.find((item) => item.value === target);
+  return match?.label || target;
+}
+
+function resetRuleFormState() {
+  if (!ruleForm) return;
+  state.editingRuleId = null;
+  ruleForm.reset();
+  const ruleIdInput = ruleForm.querySelector('input[name="rule_id"]');
+  if (ruleIdInput) ruleIdInput.value = "";
+  const enabledInput = ruleForm.querySelector('input[name="enabled"]');
+  if (enabledInput) enabledInput.checked = true;
+  const cooldownInput = ruleForm.querySelector('input[name="cooldown_minutes"]');
+  if (cooldownInput) cooldownInput.value = "60";
+  const thresholdInput = ruleForm.querySelector('input[name="threshold"]');
+  if (thresholdInput) thresholdInput.value = "";
+  const minSpendInput = ruleForm.querySelector('input[name="min_spend"]');
+  if (minSpendInput) minSpendInput.value = "0";
+  const entitySelect = ruleForm.querySelector('select[name="entity_type"]');
+  if (entitySelect) entitySelect.value = "plan";
+  const operatorSelect = ruleForm.querySelector('select[name="operator"]');
+  if (operatorSelect) operatorSelect.value = "lt";
+  if (ruleFormSubmitButton) ruleFormSubmitButton.textContent = "新增规则";
+  if (ruleFormCancelButton) ruleFormCancelButton.classList.add("hidden");
+  syncRuleFormFields();
+}
+
+function fillRuleForm(rule) {
+  if (!ruleForm || !rule) return;
+  state.editingRuleId = Number(rule.id);
+  ruleForm.querySelector('input[name="rule_id"]').value = String(rule.id || "");
+  ruleForm.querySelector('select[name="entity_type"]').value = String(rule.entity_type || "plan");
+  syncRuleFormFields();
+  ruleForm.querySelector('select[name="metric"]').value = String(rule.metric || "");
+  ruleForm.querySelector('select[name="operator"]').value = String(rule.operator || "lt");
+  ruleForm.querySelector('input[name="threshold"]').value = String(rule.threshold ?? "");
+  ruleForm.querySelector('input[name="min_spend"]').value = String(rule.min_spend ?? 0);
+  ruleForm.querySelector('input[name="cooldown_minutes"]').value = String(rule.cooldown_minutes ?? 60);
+  ruleForm.querySelector('input[name="target_id"]').value = String(rule.target_id || "");
+  ruleForm.querySelector('input[name="note"]').value = String(rule.note || "");
+  ruleForm.querySelector('input[name="enabled"]').checked = Boolean(rule.enabled);
+  if (ruleFormSubmitButton) ruleFormSubmitButton.textContent = "保存规则";
+  if (ruleFormCancelButton) ruleFormCancelButton.classList.remove("hidden");
+  syncRuleFormFields();
+}
+
+function syncRuleFormFields() {
+  if (!ruleForm) return;
+  const entitySelect = ruleForm.querySelector('select[name="entity_type"]');
+  const metricSelect = ruleForm.querySelector('select[name="metric"]');
+  const thresholdInput = ruleForm.querySelector('input[name="threshold"]');
+  const minSpendInput = ruleForm.querySelector('input[name="min_spend"]');
+  const entityType = String(entitySelect?.value || "plan");
+  const config = ruleEntityConfig(entityType);
+  const currentMetric = String(metricSelect?.value || "");
+  const metricOptions = ruleMetricOptions(entityType);
+  metricSelect.innerHTML = metricOptions
+    .map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`)
+    .join("");
+  metricSelect.value = metricOptions.some((item) => item.value === currentMetric) ? currentMetric : metricOptions[0].value;
+  thresholdInput.step = config.thresholdStep || "0.01";
+  ruleTargetLabel.textContent = config.targetLabel;
+  ruleTargetInput.placeholder = config.targetPlaceholder;
+  ruleMinSpendField.classList.toggle("hidden", !config.supportsMinSpend);
+  minSpendInput.disabled = !config.supportsMinSpend;
+  if (!config.supportsMinSpend) {
+    minSpendInput.value = "0";
+  }
+  const targetOptions = entityTargetOptions(entityType);
+  ruleTargetOptions.innerHTML = targetOptions
+    .slice(0, 400)
+    .map((item) => `<option value="${escapeHtml(item.value)}" label="${escapeHtml(item.label)}"></option>`)
+    .join("");
+  if (ruleFormHint) {
+    const modeLabel = state.editingRuleId ? "当前为编辑模式" : "当前为新增模式";
+    const targetLabel = targetOptions.length ? `可选对象 ${formatNumber(targetOptions.length)} 个` : "当前暂无可选对象";
+    const minSpendLabel = config.supportsMinSpend ? "支持最低消耗门槛" : "当前对象不使用最低消耗";
+    ruleFormHint.textContent = `${modeLabel} · ${config.label}规则 · ${targetLabel} · ${minSpendLabel}`;
+  }
+}
+
+function keywordScopeLabel(scope) {
+  const labels = {
+    all: "全部",
+    account: "账户",
+    plan: "计划",
+    product: "商品",
+    material: "素材",
+  };
+  return labels[String(scope || "").trim()] || scope || "-";
+}
+
+function bindingTypeLabel(value) {
+  const labels = {
+    account: "账户",
+    plan: "计划",
+    product: "商品",
+    material: "素材",
+  };
+  return labels[String(value || "").trim()] || value || "-";
+}
+
+function employeeSourceLabel(value) {
+  const labels = {
+    manual_material: "人工绑定素材",
+    manual_product: "人工绑定商品",
+    manual_plan: "人工绑定计划",
+    manual_account: "人工绑定账户",
+    keyword_material: "素材关键词",
+    keyword_product: "商品关键词",
+    keyword_plan: "计划关键词",
+    keyword_account: "账户关键词",
+    legacy_anchor: "主播字段兜底",
+    unassigned: "未归属",
+  };
+  return labels[String(value || "").trim()] || value || "未归属";
 }
 
 function planStatusTone(statusText) {
@@ -367,7 +635,7 @@ function renderNotificationSettings(settings) {
       <span class="pill">${escapeHtml(targetInfo.label)}</span>
       <span class="pill">${settings?.alert_enabled ? `告警 ${formatNumber(settings?.alert_batch_size || 6)} 条` : "告警关闭"}</span>
     </div>
-    <p class="notify-inline-copy">${escapeHtml(targetInfo.detail)} ${settings?.alert_enabled ? `当前会按每批 ${formatNumber(settings?.alert_batch_size || 6)} 条的方式发送阈值告警。` : "当前只保留页面内提醒，不对外推送。"} </p>
+    <p class="notify-inline-copy">${escapeHtml(targetInfo.detail)} ${settings?.alert_enabled ? `当前按每批 ${formatNumber(settings?.alert_batch_size || 6)} 条发送阈值告警。` : "当前先只保留页面内提醒，外发可后续开启。"} </p>
   `;
 }
 
@@ -376,6 +644,8 @@ function renderSignalOverview(settings, rules) {
   const totalRules = (rules || []).length;
   const planRules = (rules || []).filter((item) => item.enabled && item.entity_type === "plan").length;
   const accountRules = (rules || []).filter((item) => item.enabled && item.entity_type === "account").length;
+  const balanceRules = (rules || []).filter((item) => item.enabled && ["account_balance", "shared_wallet"].includes(item.entity_type)).length;
+  const burstRules = (rules || []).filter((item) => item.enabled && item.entity_type === "burst_plan").length;
   const targetInfo = describeNotificationTarget(settings);
   signalOverview.innerHTML = `
     <article class="signal-summary-card">
@@ -389,9 +659,14 @@ function renderSignalOverview(settings, rules) {
       <span class="signal-summary-sub">共 ${formatNumber(totalRules)} 条 · 计划 ${formatNumber(planRules)} · 账户 ${formatNumber(accountRules)}</span>
     </article>
     <article class="signal-summary-card">
-      <span class="signal-summary-label">告警</span>
-      <strong>${settings?.alert_enabled ? `${formatNumber(settings?.alert_batch_size || 6)} 条` : "关闭"}</strong>
-      <span class="signal-summary-sub">${settings?.alert_enabled ? "命中后批量发送" : "仅保留页面提醒"}</span>
+      <span class="signal-summary-label">余额与钱包</span>
+      <strong class="mono">${formatNumber(balanceRules)}</strong>
+      <span class="signal-summary-sub">账户余额与共享钱包规则</span>
+    </article>
+    <article class="signal-summary-card">
+      <span class="signal-summary-label">爆单</span>
+      <strong class="mono">${formatNumber(burstRules)}</strong>
+      <span class="signal-summary-sub">${settings?.alert_enabled ? `外发每批 ${formatNumber(settings?.alert_batch_size || 6)} 条` : "先保留页面提醒，可后续开启外发"}</span>
     </article>
   `;
 }
@@ -448,6 +723,10 @@ function syncSectionRangeControls(sectionKey) {
   if (!config) return;
   const filter = sectionFilter(sectionKey);
   renderRangeSwitch(config.switchEl, filter.mode);
+  const customInline = config.startEl?.closest(".custom-date-inline");
+  if (customInline) {
+    customInline.classList.toggle("active", filter.mode === "custom");
+  }
   if (config.startEl && document.activeElement !== config.startEl) config.startEl.value = filter.start || "";
   if (config.endEl && document.activeElement !== config.endEl) config.endEl.value = filter.end || "";
 }
@@ -568,7 +847,6 @@ function renderOverviewHero(latest) {
   overviewHeroCard.innerHTML = `
     <div class="overview-hero-head">
       <div>
-        <p class="panel-kicker">经营总览</p>
         <h2>今日投放概况</h2>
         <p class="overview-hero-copy">先看消耗、支付、订单和 ROI，再决定进入哪个账户或计划处理。</p>
       </div>
@@ -758,7 +1036,7 @@ function renderAccountTable(accounts) {
 
 function clearEmployeeDetail() {
   employeeDetail.className = "detail-panel empty";
-  employeeDetail.textContent = "点击员工行，查看该员工当前负责的计划规模和核心表现。";
+  employeeDetail.textContent = "点击归属人行，查看该归属人当前负责的计划规模和核心表现。";
 }
 
 function clearProductDetail() {
@@ -775,6 +1053,7 @@ function renderEmployeeDetail(employeeName) {
   employeeDetail.innerHTML = `
     <div class="detail-stats">
       <div class="detail-stat detail-stat-wide"><span class="label">员工主体</span><span class="value compact">${escapeHtml(row.employee_name)}</span></div>
+      <div class="detail-stat"><span class="label">归属来源</span><span class="value compact">${escapeHtml(employeeSourceLabel(row.employee_source))}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
@@ -984,11 +1263,12 @@ function renderMaterialDetail(materialKey) {
   if (!row) return;
   materialDetail.className = "detail-panel";
   materialDetail.innerHTML = `
+    <div class="detail-block-head">
+      <h4>素材覆盖与表现</h4>
+      <span>完整 ID 已支持在左侧悬停查看</span>
+    </div>
     <div class="detail-stats">
-      <div class="detail-stat detail-stat-wide"><span class="label">素材名称</span><span class="value compact">${escapeHtml(row.material_name)}</span></div>
-      <div class="detail-stat"><span class="label">素材 ID</span><span class="value compact mono">${escapeHtml(row.material_id || "-")}</span></div>
       <div class="detail-stat"><span class="label">素材类型</span><span class="value compact">${escapeHtml(row.material_type || "-")}</span></div>
-      <div class="detail-stat"><span class="label">视频 ID</span><span class="value compact mono">${escapeHtml(row.video_id || "-")}</span></div>
       <div class="detail-stat"><span class="label">最近一次素材同步消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
       <div class="detail-stat"><span class="label">最近一次素材同步支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
       <div class="detail-stat"><span class="label">最近一次素材同步订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
@@ -1035,7 +1315,7 @@ function renderMaterialInteractions(rows) {
 function renderMaterialTable(rows) {
   const query = materialSearch.value.trim().toLowerCase();
   const visibleRows = rows.filter((row) => {
-    const haystack = [row.material_name, row.material_id, row.top_plan_name, row.top_account_name].join(" ").toLowerCase();
+    const haystack = [row.material_name, row.material_id, row.video_id, row.top_plan_name, row.top_account_name].join(" ").toLowerCase();
     return haystack.includes(query);
   });
   const columns = [
@@ -1054,7 +1334,13 @@ function renderMaterialTable(rows) {
     <tbody>
       ${sorted.map((row) => `
         <tr data-material-key="${escapeHtml(row.material_key)}" class="${state.selectedMaterialKey === row.material_key ? "active-row" : ""}">
-          <td>${escapeHtml(row.material_name)}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.material_name || "未命名素材")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem" title="素材 ID：${escapeHtml(row.material_id || "-")}">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
+              <span class="cell-subitem" title="视频 ID：${escapeHtml(row.video_id || "-")}">VID ${escapeHtml(truncateMiddle(row.video_id || "-", 8, 6))}</span>
+            </div>
+          </td>
           <td><span class="pill">${escapeHtml(row.material_type || "-")}</span></td>
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
@@ -1372,30 +1658,46 @@ function renderRuleTable(rules) {
       <tr>
         <th>对象</th>
         <th>指标</th>
+        <th>对象范围</th>
         <th>规则</th>
         <th>最低消耗</th>
         <th>冷却</th>
         <th>状态</th>
+        <th>备注</th>
         <th>操作</th>
       </tr>
     </thead>
     <tbody>
-      ${rules.map((rule) => `
+      ${rules.length ? rules.map((rule) => `
         <tr>
           <td>${escapeHtml(entityLabel(rule.entity_type))}</td>
           <td>${escapeHtml(metricLabel(rule.metric))}</td>
+          <td>${escapeHtml(targetDisplayLabel(rule.entity_type, rule.target_id))}</td>
           <td class="mono">${escapeHtml(operatorLabel(rule.operator))} ${escapeHtml(rule.threshold)}</td>
-          <td class="mono">${formatMoney(rule.min_spend)}</td>
+          <td class="mono">${["account", "plan"].includes(rule.entity_type) ? formatMoney(rule.min_spend) : "--"}</td>
           <td class="mono">${formatNumber(rule.cooldown_minutes)} 分钟</td>
           <td><span class="pill">${rule.enabled ? "启用" : "关闭"}</span></td>
+          <td>${escapeHtml(rule.note || "--")}</td>
           <td>
+            <button class="button ghost edit-rule" data-id="${rule.id}">编辑</button>
             <button class="button ghost toggle-rule" data-id="${rule.id}">${rule.enabled ? "停用" : "启用"}</button>
             <button class="button ghost delete-rule" data-id="${rule.id}">删除</button>
           </td>
         </tr>
-      `).join("")}
+      `).join("") : '<tr><td colspan="8" class="empty-cell">还没有预警规则，先从账户余额、共享钱包、消耗或爆单规则开始。</td></tr>'}
     </tbody>
   `;
+
+  ruleTable.querySelectorAll(".edit-rule").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = Number(button.dataset.id);
+      const rule = rules.find((item) => Number(item.id) === id);
+      if (!rule) return;
+      fillRuleForm(rule);
+      setActiveView("signals");
+      ruleForm.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
 
   ruleTable.querySelectorAll(".toggle-rule").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -1428,6 +1730,443 @@ function renderRuleTable(rules) {
       await fetchDashboard();
     });
   });
+}
+
+function isAdmin() {
+  return state.session?.role === "admin";
+}
+
+function selectedEmployeeRecord() {
+  return state.employees.find((item) => Number(item.id) === Number(state.selectedEmployeeId)) || null;
+}
+
+function selectedUserRecord() {
+  return state.users.find((item) => Number(item.id) === Number(state.selectedUserId)) || null;
+}
+
+function resetEmployeeFormState() {
+  state.selectedEmployeeId = null;
+  if (employeeForm) employeeForm.reset();
+  const enabledInput = employeeForm?.querySelector('input[name="enabled"]');
+  if (enabledInput) enabledInput.checked = true;
+  employeeEditorStatus.textContent = "新建归属人后，再继续配置关键词和人工绑定。";
+  keywordTable.innerHTML = '<tbody><tr><td colspan="6" class="empty-cell">先选择归属人，再维护关键词。</td></tr></tbody>';
+  bindingTable.innerHTML = '<tbody><tr><td colspan="5" class="empty-cell">先选择归属人，再维护人工绑定。</td></tr></tbody>';
+}
+
+function fillEmployeeForm(employee) {
+  if (!employeeForm) return;
+  employeeForm.querySelector('input[name="display_name"]').value = employee?.display_name || "";
+  employeeForm.querySelector('input[name="note"]').value = employee?.note || "";
+  employeeForm.querySelector('input[name="enabled"]').checked = Boolean(employee?.enabled);
+  employeeEditorStatus.textContent = employee
+    ? `当前编辑：${employee.display_name} · 关键词 ${formatNumber(employee.keyword_count || 0)} · 绑定 ${formatNumber(employee.binding_count || 0)}`
+    : "新建归属人后，再继续配置关键词和人工绑定。";
+}
+
+function renderEmployeeManagerTable() {
+  if (!employeeManagerTable) return;
+  employeeManagerTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>归属人</th>
+        <th>关键词</th>
+        <th>绑定</th>
+        <th>状态</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${state.employees.length ? state.employees.map((item) => `
+        <tr data-employee-id="${item.id}" class="${Number(state.selectedEmployeeId) === Number(item.id) ? "active-row" : ""}">
+          <td>${escapeHtml(item.display_name)}</td>
+          <td class="mono">${formatNumber(item.keyword_count || 0)}</td>
+          <td class="mono">${formatNumber(item.binding_count || 0)}</td>
+          <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
+        </tr>
+      `).join("") : '<tr><td colspan="4" class="empty-cell">还没有归属人，请先创建。</td></tr>'}
+    </tbody>
+  `;
+  employeeManagerTable.querySelectorAll("tbody tr[data-employee-id]").forEach((row) => {
+    row.addEventListener("click", async () => {
+      await selectEmployeeManager(Number(row.dataset.employeeId));
+    });
+  });
+}
+
+function renderKeywordTable() {
+  const employee = selectedEmployeeRecord();
+  const rows = employee ? state.employeeKeywords[employee.id] || [] : [];
+  keywordTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>关键词</th>
+        <th>范围</th>
+        <th>优先级</th>
+        <th>状态</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${employee ? (rows.length ? rows.map((item) => `
+        <tr>
+          <td>${escapeHtml(item.keyword)}</td>
+          <td>${escapeHtml(keywordScopeLabel(item.scope))}</td>
+          <td class="mono">${formatNumber(item.priority)}</td>
+          <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
+          <td>
+            ${isAdmin() ? `<button type="button" class="button ghost delete-keyword" data-id="${item.id}">删除</button>` : ""}
+          </td>
+        </tr>
+      `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属人还没有关键词。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属人。</td></tr>'}
+    </tbody>
+  `;
+  keywordTable.querySelectorAll(".delete-keyword").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await fetch(`/api/employee-keywords/${button.dataset.id}`, { method: "DELETE" });
+      if (employee) {
+        await fetchEmployeeKeywords(employee.id, true);
+        await fetchEmployees(true);
+        fillEmployeeForm(selectedEmployeeRecord());
+        renderEmployeeManagerTable();
+      }
+    });
+  });
+}
+
+function renderBindingTable() {
+  const employee = selectedEmployeeRecord();
+  const rows = employee ? state.employeeBindings[employee.id] || [] : [];
+  bindingTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>类型</th>
+        <th>对象</th>
+        <th>标识</th>
+        <th>备注</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${employee ? (rows.length ? rows.map((item) => `
+        <tr>
+          <td>${escapeHtml(bindingTypeLabel(item.object_type))}</td>
+          <td>${escapeHtml(item.object_label || "--")}</td>
+          <td class="mono">${escapeHtml(item.object_key)}</td>
+          <td>${escapeHtml(item.note || "--")}</td>
+          <td>${isAdmin() ? `<button type="button" class="button ghost delete-binding" data-id="${item.id}">删除</button>` : ""}</td>
+        </tr>
+      `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属人还没有人工绑定。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属人。</td></tr>'}
+    </tbody>
+  `;
+  bindingTable.querySelectorAll(".delete-binding").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await fetch(`/api/employee-bindings/${button.dataset.id}`, { method: "DELETE" });
+      if (employee) {
+        await fetchEmployeeBindings(employee.id, true);
+        await fetchEmployees(true);
+        fillEmployeeForm(selectedEmployeeRecord());
+        renderEmployeeManagerTable();
+      }
+    });
+  });
+}
+
+function flattenMatchPreview(preview) {
+  if (!preview?.items) return [];
+  const sections = [
+    ["account", preview.items.accounts || []],
+    ["plan", preview.items.plans || []],
+    ["product", preview.items.products || []],
+    ["material", preview.items.materials || []],
+  ];
+  return sections.flatMap(([objectType, rows]) => rows.map((row) => ({
+    object_type: objectType,
+    object_key: objectType === "account"
+      ? String(row.advertiser_id)
+      : objectType === "plan"
+        ? String(row.ad_id)
+        : objectType === "product"
+          ? String(row.product_key || row.product_id || row.product_name || "")
+          : String(row.material_key || row.material_id || row.material_name || ""),
+    object_label: objectType === "account"
+      ? String(row.advertiser_name || "")
+      : objectType === "plan"
+        ? String(row.ad_name || "")
+        : objectType === "product"
+          ? String(row.product_name || row.product_id || "")
+          : String(row.material_name || row.material_id || ""),
+    account_name: String(row.advertiser_name || ""),
+    plan_name: String(row.ad_name || ""),
+  })));
+}
+
+function renderMatchPreview() {
+  const employee = selectedEmployeeRecord();
+  const rows = flattenMatchPreview(state.matchPreview);
+  matchPreviewMeta.textContent = employee
+    ? `当前归属人：${employee.display_name} · 预览命中后可直接人工绑定。`
+    : "先选择归属人，再预览命中结果。";
+  matchPreviewTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>类型</th>
+        <th>对象</th>
+        <th>所属账户 / 计划</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows.length ? rows.map((row) => `
+        <tr>
+          <td>${escapeHtml(bindingTypeLabel(row.object_type))}</td>
+          <td>${escapeHtml(row.object_label || "--")}<br /><span class="detail-sub mono">${escapeHtml(row.object_key || "--")}</span></td>
+          <td>${escapeHtml([row.account_name, row.plan_name].filter(Boolean).join(" / ") || "--")}</td>
+          <td>
+            ${employee && isAdmin() ? `<button type="button" class="button ghost bind-preview" data-type="${escapeHtml(row.object_type)}" data-key="${escapeHtml(row.object_key)}" data-label="${escapeHtml(row.object_label)}">绑定到当前归属人</button>` : '<span class="detail-sub">先选择归属人</span>'}
+          </td>
+        </tr>
+      `).join("") : '<tr><td colspan="4" class="empty-cell">输入关键词并预览后，这里会展示命中的账户、计划、商品和素材。</td></tr>'}
+    </tbody>
+  `;
+  matchPreviewTable.querySelectorAll(".bind-preview").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!employee) return;
+      const payload = {
+        object_type: button.dataset.type,
+        object_key: button.dataset.key,
+        object_label: button.dataset.label,
+        note: "由命中预览一键绑定",
+      };
+      const response = await fetch(`/api/employees/${employee.id}/bindings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        window.alert(errorPayload.detail || "人工绑定失败");
+        return;
+      }
+      await fetchEmployeeBindings(employee.id, true);
+      await fetchEmployees(true);
+      fillEmployeeForm(selectedEmployeeRecord());
+      renderEmployeeManagerTable();
+    });
+  });
+}
+
+async function fetchEmployees(force = false) {
+  if (!force && state.employees.length) return state.employees;
+  const response = await fetch("/api/employees");
+  const payload = await response.json();
+  state.employees = payload.items || [];
+  if (state.selectedEmployeeId && !state.employees.some((item) => Number(item.id) === Number(state.selectedEmployeeId))) {
+    state.selectedEmployeeId = null;
+  }
+  if (!state.selectedEmployeeId && state.employees.length) {
+    state.selectedEmployeeId = Number(state.employees[0].id);
+  }
+  return state.employees;
+}
+
+async function fetchEmployeeKeywords(employeeId, force = false) {
+  if (!employeeId) return [];
+  if (!force && state.employeeKeywords[employeeId]) return state.employeeKeywords[employeeId];
+  const response = await fetch(`/api/employees/${employeeId}/keywords`);
+  const payload = await response.json();
+  state.employeeKeywords[employeeId] = payload.items || [];
+  renderKeywordTable();
+  renderEmployeeManagerTable();
+  return state.employeeKeywords[employeeId];
+}
+
+async function fetchEmployeeBindings(employeeId, force = false) {
+  if (!employeeId) return [];
+  if (!force && state.employeeBindings[employeeId]) return state.employeeBindings[employeeId];
+  const response = await fetch(`/api/employees/${employeeId}/bindings`);
+  const payload = await response.json();
+  state.employeeBindings[employeeId] = payload.items || [];
+  renderBindingTable();
+  return state.employeeBindings[employeeId];
+}
+
+async function selectEmployeeManager(employeeId) {
+  state.selectedEmployeeId = employeeId;
+  const employee = selectedEmployeeRecord();
+  fillEmployeeForm(employee);
+  renderEmployeeManagerTable();
+  await Promise.all([fetchEmployeeKeywords(employeeId, true), fetchEmployeeBindings(employeeId, true)]);
+  renderMatchPreview();
+}
+
+async function ensureOwnershipData(force = false) {
+  await fetchEmployees(force);
+  renderEmployeeManagerTable();
+  if (state.selectedEmployeeId) {
+    fillEmployeeForm(selectedEmployeeRecord());
+    await Promise.all([
+      fetchEmployeeKeywords(state.selectedEmployeeId, force),
+      fetchEmployeeBindings(state.selectedEmployeeId, force),
+    ]);
+  } else {
+    resetEmployeeFormState();
+  }
+  renderMatchPreview();
+}
+
+function resetUserFormState() {
+  state.selectedUserId = null;
+  state.selectedUserScopeIds = [];
+  if (userForm) userForm.reset();
+  const enabledInput = userForm?.querySelector('input[name="enabled"]');
+  if (enabledInput) enabledInput.checked = true;
+  userEditorStatus.textContent = isAdmin()
+    ? "创建运营账号后，再勾选允许访问的账户范围。"
+    : "只有管理员可以配置后台账号。";
+  scopeEditorMeta.textContent = isAdmin()
+    ? "管理员默认全量可见；运营需要明确勾选账户范围。"
+    : "当前账号无权修改账户范围。";
+  renderScopeChecklist();
+}
+
+function fillUserForm(user) {
+  if (!userForm) return;
+  userForm.querySelector('input[name="username"]').value = user?.username || "";
+  userForm.querySelector('input[name="display_name"]').value = user?.display_name || "";
+  userForm.querySelector('select[name="role"]').value = user?.role || "operator";
+  userForm.querySelector('input[name="password"]').value = "";
+  userForm.querySelector('input[name="enabled"]').checked = Boolean(user?.enabled);
+  userEditorStatus.textContent = user
+    ? `当前编辑：${user.username} · ${user.role === "admin" ? "管理员" : "运营"}`
+    : "创建运营账号后，再勾选允许访问的账户范围。";
+}
+
+function renderUserTable() {
+  if (!userTable) return;
+  if (!isAdmin()) {
+    userTable.innerHTML = '<tbody><tr><td class="empty-cell">当前账号为只读角色，不能配置后台账号。</td></tr></tbody>';
+    return;
+  }
+  userTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>用户名</th>
+        <th>显示名</th>
+        <th>角色</th>
+        <th>状态</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${state.users.length ? state.users.map((item) => `
+        <tr data-user-id="${item.id}" class="${Number(state.selectedUserId) === Number(item.id) ? "active-row" : ""}">
+          <td>${escapeHtml(item.username)}</td>
+          <td>${escapeHtml(item.display_name || "--")}</td>
+          <td>${escapeHtml(item.role === "admin" ? "管理员" : "运营")}</td>
+          <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
+        </tr>
+      `).join("") : '<tr><td colspan="4" class="empty-cell">还没有后台账号。</td></tr>'}
+    </tbody>
+  `;
+  userTable.querySelectorAll("tbody tr[data-user-id]").forEach((row) => {
+    row.addEventListener("click", async () => {
+      await selectUserManager(Number(row.dataset.userId));
+    });
+  });
+}
+
+function renderScopeChecklist() {
+  if (!scopeAccountList) return;
+  const user = selectedUserRecord();
+  if (!isAdmin()) {
+    scopeAccountList.innerHTML = '<div class="empty-cell">只有管理员可以配置账户范围。</div>';
+    return;
+  }
+  if (!user) {
+    scopeAccountList.innerHTML = '<div class="empty-cell">先选择后台账号，再配置账户范围。</div>';
+    return;
+  }
+  if (user.role === "admin") {
+    scopeAccountList.innerHTML = '<div class="empty-cell">管理员默认可查看全部账户，不需要单独勾选。</div>';
+    return;
+  }
+  if (!state.catalogAccounts.length) {
+    scopeAccountList.innerHTML = '<div class="empty-cell">还没有可分配的账户数据。</div>';
+    return;
+  }
+  const selected = new Set((state.selectedUserScopeIds || []).map((item) => Number(item)));
+  scopeAccountList.innerHTML = state.catalogAccounts.map((item) => `
+    <label class="scope-check">
+      <input type="checkbox" value="${item.advertiser_id}" ${selected.has(Number(item.advertiser_id)) ? "checked" : ""} />
+      <span>${escapeHtml(item.advertiser_name || String(item.advertiser_id))}</span>
+      <span class="scope-check-id mono">${formatNumber(item.advertiser_id)}</span>
+    </label>
+  `).join("");
+}
+
+async function fetchUsers(force = false) {
+  if (!isAdmin()) {
+    state.users = [];
+    return [];
+  }
+  if (!force && state.users.length) return state.users;
+  const response = await fetch("/api/users");
+  const payload = await response.json();
+  state.users = payload.items || [];
+  if (state.selectedUserId && !state.users.some((item) => Number(item.id) === Number(state.selectedUserId))) {
+    state.selectedUserId = null;
+  }
+  if (!state.selectedUserId && state.users.length) {
+    state.selectedUserId = Number(state.users[0].id);
+  }
+  return state.users;
+}
+
+async function fetchCatalogAccounts(force = false) {
+  if (!force && state.catalogAccounts.length) return state.catalogAccounts;
+  const response = await fetch("/api/catalog/accounts");
+  const payload = await response.json();
+  state.catalogAccounts = payload.items || [];
+  return state.catalogAccounts;
+}
+
+async function fetchUserScopes(userId, force = false) {
+  if (!userId) return [];
+  if (!isAdmin()) return [];
+  if (!force && state.userScopes[userId]) return state.userScopes[userId];
+  const response = await fetch(`/api/users/${userId}/account-scopes`);
+  const payload = await response.json();
+  state.userScopes[userId] = payload.advertiser_ids || [];
+  return state.userScopes[userId];
+}
+
+async function selectUserManager(userId) {
+  state.selectedUserId = userId;
+  const user = selectedUserRecord();
+  fillUserForm(user);
+  renderUserTable();
+  if (user && user.role !== "admin") {
+    state.selectedUserScopeIds = await fetchUserScopes(userId, true);
+  } else {
+    state.selectedUserScopeIds = [];
+  }
+  renderScopeChecklist();
+}
+
+async function ensureAccessData(force = false) {
+  await Promise.all([fetchUsers(force), fetchCatalogAccounts(force)]);
+  renderUserTable();
+  if (state.selectedUserId) {
+    fillUserForm(selectedUserRecord());
+    const user = selectedUserRecord();
+    if (user && user.role !== "admin" && isAdmin()) {
+      state.selectedUserScopeIds = await fetchUserScopes(state.selectedUserId, force);
+    } else {
+      state.selectedUserScopeIds = [];
+    }
+  } else {
+    resetUserFormState();
+  }
+  renderScopeChecklist();
 }
 
 async function fetchPerformance(filter, force = false) {
@@ -1565,6 +2304,12 @@ function bindInputs() {
         if (view === "materials" && !state.materialPayload) {
           await refreshMaterialSection(true);
         }
+        if (view === "ownership") {
+          await ensureOwnershipData(true);
+        }
+        if (view === "access") {
+          await ensureAccessData(true);
+        }
       });
     });
   }
@@ -1579,6 +2324,99 @@ function bindInputs() {
   bindRangeFilterControls("account");
   bindRangeFilterControls("plan");
   bindRangeFilterControls("breakdown");
+
+  employeeForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(employeeForm);
+    const payload = {
+      display_name: String(form.get("display_name") || "").trim(),
+      note: String(form.get("note") || "").trim(),
+      enabled: form.get("enabled") === "on",
+    };
+    const url = state.selectedEmployeeId ? `/api/employees/${state.selectedEmployeeId}` : "/api/employees";
+    const method = state.selectedEmployeeId ? "PUT" : "POST";
+    const response = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({}));
+      window.alert(errorPayload.detail || "保存归属人失败");
+      return;
+    }
+    const item = await response.json();
+    await fetchEmployees(true);
+    if (item?.id) {
+      await selectEmployeeManager(Number(item.id));
+    } else {
+      await ensureOwnershipData(true);
+    }
+  });
+
+  employeeFormReset?.addEventListener("click", () => {
+    resetEmployeeFormState();
+    renderEmployeeManagerTable();
+    renderMatchPreview();
+  });
+
+  keywordForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.selectedEmployeeId) {
+      window.alert("请先选择归属人");
+      return;
+    }
+    const form = new FormData(keywordForm);
+    const payload = {
+      keyword: String(form.get("keyword") || "").trim(),
+      scope: String(form.get("scope") || "all"),
+      priority: Number(form.get("priority") || 100),
+      enabled: form.get("enabled") === "on",
+    };
+    const response = await fetch(`/api/employees/${state.selectedEmployeeId}/keywords`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({}));
+      window.alert(errorPayload.detail || "新增关键词失败");
+      return;
+    }
+    keywordForm.reset();
+    keywordForm.querySelector('input[name="enabled"]').checked = true;
+    keywordForm.querySelector('input[name="priority"]').value = "100";
+    await fetchEmployeeKeywords(state.selectedEmployeeId, true);
+    await fetchEmployees(true);
+    fillEmployeeForm(selectedEmployeeRecord());
+    renderEmployeeManagerTable();
+  });
+
+  matchPreviewForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const keyword = String(matchKeywordInput?.value || "").trim();
+    const scope = String(matchScopeSelect?.value || "all");
+    if (!keyword) {
+      window.alert("请输入要预览的关键词");
+      return;
+    }
+    const response = await fetch(`/api/employee-match-preview?keyword=${encodeURIComponent(keyword)}&scope=${encodeURIComponent(scope)}`);
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({}));
+      window.alert(errorPayload.detail || "关键词预览失败");
+      return;
+    }
+    state.matchPreview = await response.json();
+    renderMatchPreview();
+  });
+
+  ruleForm?.querySelector('select[name="entity_type"]')?.addEventListener("change", () => {
+    syncRuleFormFields();
+  });
+
+  ruleFormCancelButton?.addEventListener("click", () => {
+    resetRuleFormState();
+  });
 
   notificationForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1611,6 +2449,7 @@ function bindInputs() {
   ruleForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(ruleForm);
+    const ruleId = String(form.get("rule_id") || "").trim();
     const payload = {
       entity_type: form.get("entity_type"),
       metric: form.get("metric"),
@@ -1622,13 +2461,19 @@ function bindInputs() {
       target_id: String(form.get("target_id") || ""),
       note: String(form.get("note") || ""),
     };
-    await fetch("/api/alert-rules", {
-      method: "POST",
+    const method = ruleId ? "PUT" : "POST";
+    const url = ruleId ? `/api/alert-rules/${encodeURIComponent(ruleId)}` : "/api/alert-rules";
+    const response = await fetch(url, {
+      method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    ruleForm.reset();
-    ruleForm.querySelector('input[name="enabled"]').checked = true;
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({}));
+      window.alert(errorPayload.detail || "保存规则失败");
+      return;
+    }
+    resetRuleFormState();
     await fetchDashboard();
   });
 
@@ -1658,12 +2503,76 @@ function bindInputs() {
       }
     });
   }
+
+  userForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!isAdmin()) return;
+    const form = new FormData(userForm);
+    const payload = {
+      username: String(form.get("username") || "").trim(),
+      display_name: String(form.get("display_name") || "").trim(),
+      role: String(form.get("role") || "operator"),
+      password: String(form.get("password") || ""),
+      enabled: form.get("enabled") === "on",
+    };
+    const url = state.selectedUserId ? `/api/users/${state.selectedUserId}` : "/api/users";
+    const method = state.selectedUserId ? "PUT" : "POST";
+    const response = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({}));
+      window.alert(errorPayload.detail || "保存账号失败");
+      return;
+    }
+    const item = await response.json();
+    await fetchUsers(true);
+    if (item?.id) {
+      await selectUserManager(Number(item.id));
+    } else {
+      await ensureAccessData(true);
+    }
+  });
+
+  userFormReset?.addEventListener("click", () => {
+    resetUserFormState();
+    renderUserTable();
+  });
+
+  saveUserScopesButton?.addEventListener("click", async () => {
+    if (!isAdmin() || !state.selectedUserId) return;
+    const user = selectedUserRecord();
+    if (!user || user.role === "admin") {
+      window.alert("管理员默认拥有全部权限，无需设置账户范围。");
+      return;
+    }
+    const advertiserIds = [...scopeAccountList.querySelectorAll('input[type="checkbox"]:checked')].map((item) => Number(item.value));
+    const response = await fetch(`/api/users/${state.selectedUserId}/account-scopes`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ advertiser_ids: advertiserIds }),
+    });
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({}));
+      window.alert(errorPayload.detail || "保存账户范围失败");
+      return;
+    }
+    const payload = await response.json();
+    state.userScopes[state.selectedUserId] = payload.advertiser_ids || [];
+    state.selectedUserScopeIds = state.userScopes[state.selectedUserId];
+    renderScopeChecklist();
+  });
+
+  resetRuleFormState();
 }
 
 async function fetchDashboard() {
   const response = await fetch("/api/dashboard");
   const payload = await response.json();
   state.payload = payload;
+  state.session = payload.session || null;
   if (!payload.latest) return;
   await render(payload);
 }
@@ -1677,6 +2586,7 @@ async function render(payload) {
   renderSignalOverview(payload.notificationSettings || {}, payload.alertRules || []);
   renderNotificationSettings(payload.notificationSettings || {});
   renderRuleTable(payload.alertRules || []);
+  syncRuleFormFields();
   lastSnapshotText.textContent = latest.snapshot_time;
   refreshHintText.textContent = "采集 1 分钟 · 明细 10 分钟 · 页面 60 秒";
   try {
@@ -1689,6 +2599,20 @@ async function render(payload) {
       await refreshMaterialSection(true);
     } catch (error) {
       console.error("refreshMaterialSection failed", error);
+    }
+  }
+  if (state.activeView === "ownership") {
+    try {
+      await ensureOwnershipData(true);
+    } catch (error) {
+      console.error("ensureOwnershipData failed", error);
+    }
+  }
+  if (state.activeView === "access") {
+    try {
+      await ensureAccessData(true);
+    } catch (error) {
+      console.error("ensureAccessData failed", error);
     }
   }
   setActiveView(state.activeView);

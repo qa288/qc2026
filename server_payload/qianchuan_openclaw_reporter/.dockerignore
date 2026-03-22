@@ -2,6 +2,13 @@ config.json
 .env.dashboard
 state/
 data/
+volumes/
 logs/
 __pycache__/
 *.pyc
+.git/
+.playwright-cli/
+docs/
+output/
+.DS_Store
+._*
