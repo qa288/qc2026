@@ -4388,6 +4388,11 @@ class DashboardService:
             return payload
         self.persist_extended_snapshot(payload)
         self.cleanup_history()
+        self._range_cache.clear()
+        try:
+            self.material_rankings("day")
+        except Exception:
+            pass
         return payload
 
     async def start(self) -> None:
