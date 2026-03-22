@@ -797,8 +797,8 @@ function renderAlertSummary(events) {
           <span class="summary-chip">当前状态</span>
           <span class="summary-chip subtle">平稳</span>
         </div>
-        <div class="summary-value">暂无异常提醒</div>
-        <div class="summary-sub">最近没有命中告警规则，当前更适合关注账户和计划表现变化。</div>
+        <div class="summary-value">暂无异常</div>
+        <div class="summary-sub">最近没有命中规则，先关注账户和计划变化。</div>
         <div class="summary-metric-row">
           <div><span>待处理</span><strong class="mono">0</strong></div>
           <div><span>最新状态</span><strong>正常</strong></div>
@@ -808,12 +808,12 @@ function renderAlertSummary(events) {
       <div class="alert-summary-card stat">
         <div class="summary-label">待处理</div>
         <div class="summary-value mono">0</div>
-        <div class="summary-sub">当前没有待外发的提醒</div>
+        <div class="summary-sub">当前没有待处理提醒</div>
       </div>
       <div class="alert-summary-card stat">
         <div class="summary-label">处理节奏</div>
         <div class="summary-value">观察中</div>
-        <div class="summary-sub">等待新触发后再进入重点处理</div>
+        <div class="summary-sub">等待新触发</div>
       </div>
     `;
     return;
@@ -882,7 +882,7 @@ function renderOverviewHero(latest) {
     <div class="overview-hero-head">
       <div>
         <h2>今日投放概况</h2>
-        <p class="overview-hero-copy">先看消耗、支付、订单和 ROI，再决定进入哪个账户或计划处理。</p>
+        <p class="overview-hero-copy">先看消耗、支付、订单和 ROI。</p>
       </div>
       <div class="overview-hero-pills">
         <span class="system-pill ${accountTone === "danger" ? "danger" : ""}">${accountFailures ? `账户异常 ${formatNumber(accountFailures)}` : "账户查询正常"}</span>
@@ -1288,7 +1288,7 @@ function renderProductTable(rows) {
 
 function clearMaterialDetail() {
   materialDetail.className = "detail-panel empty";
-  materialDetail.textContent = "点击素材行，查看该素材覆盖的账户、计划和当前核心表现。";
+  materialDetail.textContent = "点击素材行，查看覆盖范围和当前表现。";
 }
 
 function renderMaterialDetail(materialKey) {
@@ -1299,7 +1299,7 @@ function renderMaterialDetail(materialKey) {
   materialDetail.innerHTML = `
     <div class="detail-block-head">
       <h4>素材覆盖与表现</h4>
-      <span>完整 ID 已支持在左侧悬停查看</span>
+      <span>补充信息</span>
     </div>
     <div class="detail-stats">
       <div class="detail-stat"><span class="label">素材类型</span><span class="value compact">${escapeHtml(row.material_type || "-")}</span></div>
@@ -1580,7 +1580,6 @@ async function renderPlanDetail(adId) {
       <div class="detail-stat"><span class="label">${escapeHtml(currentRangeLabel)}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
       <div class="detail-stat"><span class="label">单均成本</span><span class="value mono">${orderCost === null ? "-" : formatMoney(orderCost)}</span></div>
       <div class="detail-stat"><span class="label">支付减消耗</span><span class="value mono ${payGap >= 0 ? "positive" : "negative"}">${payGap >= 0 ? "+" : ""}${formatMoney(payGap)}</span></div>
-      <div class="detail-stat detail-stat-wide"><span class="label">计划说明</span><span class="value compact">用于快速复核计划主体、商品、账户归属、目标值和当前表现；右侧同时展示最近一次同步到本地的素材与商品摘要。</span></div>
     </div>
   `;
   await renderPlanAssets(adId);
@@ -1588,7 +1587,7 @@ async function renderPlanDetail(adId) {
 
 function clearPlanDetail() {
   planDetail.className = "detail-panel empty";
-  planDetail.textContent = "点击计划行，查看该计划的投放字段、商品信息和当前状态。";
+  planDetail.textContent = "点击计划行，查看计划字段和当前表现。";
   clearPlanAssetSummary();
 }
 
