@@ -2052,7 +2052,11 @@ function renderUnassignedTable() {
   const employee = selectedEmployeeRecord();
   const items = state.unassignedPool?.items || [];
   const rangeText = state.unassignedPool?.range_label || rangeLabel(sectionFilter("plan"));
-  unassignedMeta.textContent = `按计划页当前时间范围查看未命中归属规则的数据 · ${rangeText} · 未归属计划 ${formatNumber(state.unassignedPool?.total_plan_count || 0)} 条 · 当前对象 ${formatNumber(state.unassignedPool?.item_count || 0)} 条`;
+  if (!state.employees.length) {
+    unassignedMeta.textContent = "当前还没有归属人。请先创建归属人，再配置关键词或人工绑定；未归属池会基于这些规则生成。";
+  } else {
+    unassignedMeta.textContent = `按计划页当前时间范围查看未命中归属规则的数据 · ${rangeText} · 未归属计划 ${formatNumber(state.unassignedPool?.total_plan_count || 0)} 条 · 当前对象 ${formatNumber(state.unassignedPool?.item_count || 0)} 条`;
+  }
   unassignedTable.innerHTML = `
     <thead>
       <tr>
@@ -2080,6 +2084,7 @@ function renderUnassignedTable() {
             <div class="cell-subline">
               <span class="cell-subitem">${escapeHtml(row.plan_name || "暂无代表计划")}</span>
               ${row.product_name ? `<span class="cell-subitem">${escapeHtml(row.product_name)}</span>` : ""}
+              ${row.material_type ? `<span class="cell-subitem">${escapeHtml(row.material_type)}</span>` : ""}
             </div>
           </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>

@@ -149,7 +149,10 @@ function renderPublicSummary(items) {
 async function refreshPublicView() {
   try {
     const payload = await loadPublicRankings();
-    publicRangeMeta.textContent = `统计范围：${payload.range_label || PUBLIC_RANGE_LABELS[publicState.range]} · ${payload.query_start_date || "--"} 至 ${payload.query_end_date || "--"} · 更新于 ${payload.updated_at || "--"}`;
+    const attributionNote = payload.attribution_mode === "configured"
+      ? `已启用归属规则 · 已配置 ${publicFormatNumber(payload.configured_employee_count || 0)} 个归属人`
+      : "当前未配置归属规则，暂按主播字段兜底";
+    publicRangeMeta.textContent = `统计范围：${payload.range_label || PUBLIC_RANGE_LABELS[publicState.range]} · ${payload.query_start_date || "--"} 至 ${payload.query_end_date || "--"} · ${attributionNote} · 更新于 ${payload.updated_at || "--"}`;
     renderPublicSummary(payload.items || []);
     renderPublicTable(payload.items || []);
   } catch (error) {

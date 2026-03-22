@@ -3485,9 +3485,13 @@ class DashboardService:
         sort_dir: str = "desc",
     ) -> dict[str, Any]:
         payload = self.get_performance_snapshot(range_key, start_date, end_date)
+        employees_cfg, _, _ = self._active_employee_config()
+        configured_mode = bool(employees_cfg)
         metric = sort_key if sort_key in PUBLIC_SORT_FIELDS else "stat_cost"
         direction = "asc" if sort_dir == "asc" else "desc"
         items = [dict(item) for item in payload.get("employees", [])]
+        if configured_mode:
+            items = [item for item in items if item.get("employee_id") is not None]
         items.sort(
             key=lambda item: (
                 float(item.get(metric, 0.0) or 0.0),
@@ -3505,15 +3509,25 @@ class DashboardService:
             "sort_key": metric,
             "sort_dir": direction,
             "updated_at": payload.get("snapshot_time", ""),
+            "attribution_mode": "configured" if configured_mode else "legacy_anchor_fallback",
+            "configured_employee_count": len(employees_cfg),
+            "unassigned_group_count": len(
+                [
+                    item
+                    for item in payload.get("employees", [])
+                    if str(item.get("employee_source") or "").strip() == "unassigned"
+                ]
+            ),
             "items": items,
         }
 
     def _build_unassigned_candidates(self, plans: list[dict[str, Any]], scope: str) -> list[dict[str, Any]]:
         scope_value = str(scope or "all").strip().lower()
-        if scope_value not in {"all", "account", "plan", "product"}:
-            raise ValueError("scope must be one of all/account/plan/product")
+        if scope_value not in {"all", "account", "plan", "product", "material"}:
+            raise ValueError("scope must be one of all/account/plan/product/material")
 
         items: list[dict[str, Any]] = []
+        plan_ids = {int(row.get("ad_id", 0) or 0) for row in plans if int(row.get("ad_id", 0) or 0)}
 
         if scope_value in {"all", "plan"}:
             for row in plans:
@@ -3561,6 +3575,62 @@ class DashboardService:
                         "binding_options": binding_options,
                     }
                 )
+
+        if scope_value in {"all", "material"} and plan_ids:
+            material_groups: dict[str, dict[str, Any]] = {}
+            for row in self._reference_catalog()["materials"]:
+                plan_id = int(row.get("ad_id", 0) or 0)
+                if plan_id not in plan_ids:
+                    continue
+                material_key = str(row.get("material_key") or "").strip()
+                if not material_key:
+                    continue
+                group = material_groups.setdefault(
+                    material_key,
+                    {
+                        "object_type": "material",
+                        "object_type_label": "素材",
+                        "object_key": material_key,
+                        "object_label": str(row.get("material_name") or row.get("material_id") or material_key).strip(),
+                        "advertiser_name": str(row.get("advertiser_name") or "").strip(),
+                        "plan_name": "",
+                        "product_name": "",
+                        "material_type": str(row.get("material_type") or "").strip(),
+                        "stat_cost": 0.0,
+                        "pay_amount": 0.0,
+                        "order_count": 0,
+                        "plan_count": 0,
+                        "top_plan_name": "",
+                        "top_plan_orders": -1,
+                        "top_plan_pay_amount": -1.0,
+                    },
+                )
+                stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
+                pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+                order_count = int(float(row.get("order_count", 0.0) or 0.0))
+                group["stat_cost"] = round(group["stat_cost"] + stat_cost, 2)
+                group["pay_amount"] = round(group["pay_amount"] + pay_amount, 2)
+                group["order_count"] += order_count
+                group["plan_count"] += 1
+                if order_count > group["top_plan_orders"] or (
+                    order_count == group["top_plan_orders"] and pay_amount > group["top_plan_pay_amount"]
+                ):
+                    group["top_plan_name"] = str(row.get("ad_name") or "").strip()
+                    group["top_plan_orders"] = order_count
+                    group["top_plan_pay_amount"] = pay_amount
+
+            for group in material_groups.values():
+                group["roi"] = round(group["pay_amount"] / group["stat_cost"], 2) if group["stat_cost"] > 0 else 0.0
+                group["plan_name"] = group["top_plan_name"]
+                group["binding_options"] = [
+                    {
+                        "object_type": "material",
+                        "object_key": group["object_key"],
+                        "object_label": group["object_label"],
+                        "action_label": "绑定素材",
+                    }
+                ]
+                items.append(group)
 
         if scope_value in {"all", "product"}:
             product_groups: dict[str, dict[str, Any]] = {}
@@ -3666,7 +3736,7 @@ class DashboardService:
                 ]
                 items.append(group)
 
-        sort_order = {"plan": 0, "product": 1, "account": 2}
+        sort_order = {"plan": 0, "material": 1, "product": 2, "account": 3}
         items.sort(
             key=lambda item: (
                 -float(item.get("stat_cost", 0.0) or 0.0),
