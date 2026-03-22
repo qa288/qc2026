@@ -2543,6 +2543,215 @@ class DashboardService:
         selected.sort(key=lambda item: str(item.get("snapshot_time") or ""))
         return selected
 
+    def _latest_summary_snapshots_for_window(
+        self, conn: Any, start_dt: datetime, end_dt: datetime
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT snapshot_time, window_start, window_end
+            FROM summary_snapshots
+            WHERE snapshot_time >= ?
+              AND snapshot_time <= ?
+            ORDER BY snapshot_time DESC
+            """,
+            (
+                start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchall()
+        selected: list[dict[str, Any]] = []
+        seen_dates: set[str] = set()
+        for row in rows:
+            item = dict(row)
+            day_key = str(item.get("snapshot_time") or "")[:10]
+            if not day_key or day_key in seen_dates:
+                continue
+            selected.append(item)
+            seen_dates.add(day_key)
+        selected.sort(key=lambda item: str(item.get("snapshot_time") or ""))
+        return selected
+
+    def _aggregate_account_snapshots(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        groups: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            if not advertiser_id:
+                continue
+            group = groups.get(advertiser_id)
+            if group is None:
+                group = dict(row)
+                group["stat_cost"] = 0.0
+                group["pay_amount"] = 0.0
+                group["order_count"] = 0
+                group["_all_ok"] = True
+                group["_any_fallback"] = False
+                group["_first_error"] = ""
+                groups[advertiser_id] = group
+            group["stat_cost"] = round(float(group.get("stat_cost", 0.0) or 0.0) + float(row.get("stat_cost", 0.0) or 0.0), 2)
+            group["pay_amount"] = round(float(group.get("pay_amount", 0.0) or 0.0) + float(row.get("pay_amount", 0.0) or 0.0), 2)
+            group["order_count"] = int(group.get("order_count", 0) or 0) + int(float(row.get("order_count", 0.0) or 0.0))
+            row_ok = bool(row.get("ok", True))
+            group["_all_ok"] = bool(group["_all_ok"]) and row_ok
+            row_error = str(row.get("error") or "").strip()
+            if row_error.startswith("fallback:"):
+                group["_any_fallback"] = True
+            elif row_error and not group["_first_error"]:
+                group["_first_error"] = row_error
+
+        items: list[dict[str, Any]] = []
+        for advertiser_id, group in groups.items():
+            stat_cost = round(float(group.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(group.get("pay_amount", 0.0) or 0.0), 2)
+            order_count = int(group.get("order_count", 0) or 0)
+            group["advertiser_id"] = advertiser_id
+            group["stat_cost"] = stat_cost
+            group["pay_amount"] = pay_amount
+            group["order_count"] = order_count
+            group["roi"] = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            group["ok"] = bool(group.pop("_all_ok", True))
+            any_fallback = bool(group.pop("_any_fallback", False))
+            first_error = str(group.pop("_first_error", "") or "").strip()
+            group["error"] = "fallback: plan rollup" if any_fallback else first_error
+            items.append(group)
+        items.sort(key=lambda item: (-float(item.get("stat_cost", 0.0) or 0.0), int(item.get("advertiser_id", 0) or 0)))
+        return items
+
+    def _aggregate_plan_snapshots(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        groups: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            ad_id = int(row.get("ad_id", 0) or 0)
+            if not ad_id:
+                continue
+            group = groups.get(ad_id)
+            if group is None:
+                group = dict(row)
+                group["stat_cost"] = 0.0
+                group["pay_amount"] = 0.0
+                group["order_count"] = 0
+                groups[ad_id] = group
+            group["stat_cost"] = round(float(group.get("stat_cost", 0.0) or 0.0) + float(row.get("stat_cost", 0.0) or 0.0), 2)
+            group["pay_amount"] = round(float(group.get("pay_amount", 0.0) or 0.0) + float(row.get("pay_amount", 0.0) or 0.0), 2)
+            group["order_count"] = int(group.get("order_count", 0) or 0) + int(float(row.get("order_count", 0.0) or 0.0))
+
+        items: list[dict[str, Any]] = []
+        for ad_id, group in groups.items():
+            stat_cost = round(float(group.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(group.get("pay_amount", 0.0) or 0.0), 2)
+            order_count = int(group.get("order_count", 0) or 0)
+            group["ad_id"] = ad_id
+            group["stat_cost"] = stat_cost
+            group["pay_amount"] = pay_amount
+            group["order_count"] = order_count
+            group["roi"] = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            items.append(group)
+        items.sort(
+            key=lambda item: (
+                -int(float(item.get("order_count", 0.0) or 0.0)),
+                -float(item.get("pay_amount", 0.0) or 0.0),
+                -float(item.get("roi", 0.0) or 0.0),
+                -float(item.get("stat_cost", 0.0) or 0.0),
+                int(item.get("ad_id", 0) or 0),
+            )
+        )
+        return items
+
+    def _performance_snapshot_from_db(self, start_dt: datetime, end_dt: datetime) -> dict[str, Any]:
+        with self.db() as conn:
+            snapshots = self._latest_summary_snapshots_for_window(conn, start_dt, end_dt)
+            if not snapshots:
+                return {
+                    "snapshot_time": "",
+                    "window_start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "window_end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "summary": {
+                        "account_count": 0,
+                        "active_account_count": 0,
+                        "plan_count": 0,
+                        "active_plan_count": 0,
+                        "stat_cost": 0.0,
+                        "pay_amount": 0.0,
+                        "order_count": 0,
+                        "roi": 0.0,
+                        "account_failures": 0,
+                        "plan_failures": 0,
+                        "wallet_count": 0,
+                        "balance_failures": 0,
+                    },
+                    "accounts": [],
+                    "plans": [],
+                    "accountBalances": [],
+                    "sharedWallets": [],
+                    "walletRelations": [],
+                    "errors": {"accounts": [], "plans": [], "balances": []},
+                    "snapshot_count": 0,
+                }
+
+            snapshot_times = [str(item.get("snapshot_time") or "") for item in snapshots if str(item.get("snapshot_time") or "").strip()]
+            placeholders = ",".join("?" for _ in snapshot_times)
+            account_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM account_snapshots
+                WHERE snapshot_time IN ({placeholders})
+                ORDER BY snapshot_time DESC, stat_cost DESC, advertiser_id ASC
+                """,
+                snapshot_times,
+            ).fetchall()
+            plan_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM plan_snapshots
+                WHERE snapshot_time IN ({placeholders})
+                ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
+                """,
+                snapshot_times,
+            ).fetchall()
+
+            latest_snapshot_time = snapshot_times[-1]
+            account_balance_items = self._snapshot_account_balances(conn, latest_snapshot_time)
+            shared_wallet_items = self._snapshot_shared_wallets(conn, latest_snapshot_time)
+            wallet_relation_items = self._snapshot_wallet_relations(conn, latest_snapshot_time)
+
+        account_items = self._aggregate_account_snapshots([dict(row) for row in account_rows])
+        plan_items = self._aggregate_plan_snapshots([dict(row) for row in plan_rows])
+
+        total_cost = round(sum(float(item.get("stat_cost", 0.0) or 0.0) for item in account_items if bool(item.get("ok", True))), 2)
+        total_pay = round(sum(float(item.get("pay_amount", 0.0) or 0.0) for item in account_items if bool(item.get("ok", True))), 2)
+        total_orders = int(sum(int(float(item.get("order_count", 0.0) or 0.0)) for item in account_items if bool(item.get("ok", True))))
+        active_accounts = sum(1 for item in account_items if bool(item.get("ok", True)) and float(item.get("stat_cost", 0.0) or 0.0) > 0)
+        active_plans = sum(1 for item in plan_items if float(item.get("stat_cost", 0.0) or 0.0) > 0)
+
+        return {
+            "snapshot_time": latest_snapshot_time,
+            "window_start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "window_end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": {
+                "account_count": len(account_items),
+                "active_account_count": active_accounts,
+                "plan_count": len(plan_items),
+                "active_plan_count": active_plans,
+                "stat_cost": total_cost,
+                "pay_amount": total_pay,
+                "order_count": total_orders,
+                "roi": round(total_pay / total_cost, 2) if total_cost > 0 else 0.0,
+                "account_failures": sum(1 for item in account_items if not bool(item.get("ok", True))),
+                "plan_failures": 0,
+                "wallet_count": len(shared_wallet_items),
+                "balance_failures": 0,
+            },
+            "accounts": account_items,
+            "plans": plan_items,
+            "accountBalances": account_balance_items,
+            "sharedWallets": shared_wallet_items,
+            "walletRelations": wallet_relation_items,
+            "errors": {
+                "accounts": [dict(item) for item in account_items if not bool(item.get("ok", True))],
+                "plans": [],
+                "balances": [],
+            },
+            "snapshot_count": len(snapshot_times),
+        }
+
     def _snapshot_plans(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
@@ -3543,7 +3752,7 @@ class DashboardService:
             start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
         else:
             start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
-        payload = self._collect_window_snapshot(start_dt, end_dt)
+        payload = self._performance_snapshot_from_db(start_dt, end_dt)
         payload["range_key"] = normalized
         payload["range_label"] = range_label
         payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")
