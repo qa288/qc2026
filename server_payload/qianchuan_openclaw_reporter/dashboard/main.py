@@ -2514,6 +2514,35 @@ class DashboardService:
             """
         ).fetchone()
 
+    def _latest_extended_sync_runs_for_window(
+        self, conn: Any, start_dt: datetime, end_dt: datetime
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM extended_sync_runs
+            WHERE status IN ('ok', 'partial')
+              AND snapshot_time >= ?
+              AND snapshot_time <= ?
+            ORDER BY snapshot_time DESC
+            """,
+            (
+                start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchall()
+        selected: list[dict[str, Any]] = []
+        seen_dates: set[str] = set()
+        for row in rows:
+            item = dict(row)
+            day_key = str(item.get("snapshot_time") or "")[:10]
+            if not day_key or day_key in seen_dates:
+                continue
+            selected.append(item)
+            seen_dates.add(day_key)
+        selected.sort(key=lambda item: str(item.get("snapshot_time") or ""))
+        return selected
+
     def _snapshot_plans(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
@@ -3403,16 +3432,48 @@ class DashboardService:
         }
 
     def material_rankings(
-        self, snapshot_time: str = "", allowed_advertiser_ids: set[int] | None = None
+        self,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
     ) -> dict[str, Any]:
         with self.db() as conn:
             target_snapshot = str(snapshot_time or "").strip()
             if not target_snapshot:
-                latest = self._latest_extended_sync_run(conn)
-                if not latest:
-                    return {"snapshot_time": "", "items": [], "meta": None}
-                target_snapshot = str(latest["snapshot_time"])
-                latest_meta = dict(latest)
+                config = self.read_config()
+                normalized = str(range_key or "day").strip().lower()
+                if normalized not in PERFORMANCE_RANGES:
+                    raise ValueError("range must be one of day/yesterday/week/month/custom")
+                if normalized == "custom":
+                    start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
+                else:
+                    start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
+                runs = self._latest_extended_sync_runs_for_window(conn, start_dt, end_dt)
+                if not runs:
+                    return {
+                        "snapshot_time": "",
+                        "items": [],
+                        "meta": None,
+                        "range_key": normalized,
+                        "range_label": range_label,
+                        "query_start_date": start_dt.strftime("%Y-%m-%d"),
+                        "query_end_date": end_dt.strftime("%Y-%m-%d"),
+                        "snapshot_count": 0,
+                    }
+                snapshot_times = [str(item.get("snapshot_time") or "") for item in runs if str(item.get("snapshot_time") or "").strip()]
+                latest_meta = {
+                    "snapshot_time": snapshot_times[-1],
+                    "status": "partial" if any(str(item.get("status") or "") != "ok" for item in runs) else "ok",
+                    "plan_count": sum(int(item.get("plan_count") or 0) for item in runs),
+                    "detail_count": sum(int(item.get("detail_count") or 0) for item in runs),
+                    "product_count": sum(int(item.get("product_count") or 0) for item in runs),
+                    "material_count": sum(int(item.get("material_count") or 0) for item in runs),
+                    "video_count": sum(int(item.get("video_count") or 0) for item in runs),
+                    "error_count": sum(int(item.get("error_count") or 0) for item in runs),
+                    "snapshot_dates": [str(item.get("snapshot_time") or "")[:10] for item in runs],
+                }
             else:
                 latest_meta_row = conn.execute(
                     """
@@ -3424,26 +3485,41 @@ class DashboardService:
                     (target_snapshot,),
                 ).fetchone()
                 latest_meta = dict(latest_meta_row) if latest_meta_row else None
+                snapshot_times = [target_snapshot]
+                normalized = "custom" if snapshot_time else str(range_key or "day").strip().lower()
+                range_label = "指定快照" if snapshot_time else ""
 
+            placeholders = ",".join("?" for _ in snapshot_times)
             rows = conn.execute(
-                """
+                f"""
                 SELECT m.*, COALESCE(v.is_original, 0) AS is_original
                 FROM material_snapshots AS m
                 LEFT JOIN video_origin_flags AS v
                   ON v.snapshot_time = m.snapshot_time
                  AND v.advertiser_id = m.advertiser_id
                  AND v.material_id = m.material_id
-                WHERE m.snapshot_time = ?
-                ORDER BY m.order_count DESC, m.pay_amount DESC, m.roi DESC, m.stat_cost DESC
+                WHERE m.snapshot_time IN ({placeholders})
+                ORDER BY m.snapshot_time DESC, m.order_count DESC, m.pay_amount DESC, m.roi DESC, m.stat_cost DESC
                 """,
-                (target_snapshot,),
+                snapshot_times,
             ).fetchall()
         scoped_rows = [dict(row) for row in rows]
         if allowed_advertiser_ids is not None:
             allowed = {int(item) for item in allowed_advertiser_ids}
             scoped_rows = [row for row in scoped_rows if int(row.get("advertiser_id", 0) or 0) in allowed]
         items = self._build_material_rankings(scoped_rows)
-        return {"snapshot_time": target_snapshot, "items": items, "meta": latest_meta}
+        payload = {
+            "snapshot_time": str(latest_meta.get("snapshot_time") or "") if latest_meta else target_snapshot,
+            "items": items,
+            "meta": latest_meta,
+            "snapshot_count": len(snapshot_times),
+        }
+        if not target_snapshot:
+            payload["range_key"] = normalized
+            payload["range_label"] = range_label
+            payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")
+            payload["query_end_date"] = end_dt.strftime("%Y-%m-%d")
+        return payload
 
     def get_performance_snapshot(
         self,
@@ -4462,9 +4538,19 @@ async def plan_assets(ad_id: int, snapshot_time: str = "", user: dict[str, Any] 
 
 
 @app.get("/api/material-rankings")
-async def material_rankings(snapshot_time: str = "", user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+async def material_rankings(
+    snapshot_time: str = "",
+    range: str = "day",
+    start_date: str = "",
+    end_date: str = "",
+    user: dict[str, Any] = Depends(require_auth),
+) -> JSONResponse:
     allowed = service.allowed_advertiser_ids_for_user(user)
-    return JSONResponse(service.material_rankings(snapshot_time, allowed))
+    try:
+        payload = service.material_rankings(range, start_date, end_date, snapshot_time, allowed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(payload)
 
 
 @app.get("/api/alert-rules")

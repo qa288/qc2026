@@ -59,7 +59,7 @@ const state = {
   session: null,
   rangePayloads: {},
   planAssetCache: {},
-  materialPayload: null,
+  materialPayloads: {},
   employees: [],
   users: [],
   catalogAccounts: [],
@@ -79,6 +79,7 @@ const state = {
     account: loadRangeFilter("account-range-filter", "day"),
     plan: loadRangeFilter("plan-range-filter", "day"),
     breakdown: loadRangeFilter("breakdown-range-filter", "day"),
+    material: loadRangeFilter("material-range-filter", "day"),
   },
   selectedPlanId: null,
   selectedEmployeeName: null,
@@ -147,6 +148,10 @@ const planDateApply = document.getElementById("planDateApply");
 const breakdownDateStart = document.getElementById("breakdownDateStart");
 const breakdownDateEnd = document.getElementById("breakdownDateEnd");
 const breakdownDateApply = document.getElementById("breakdownDateApply");
+const materialRangeSwitch = document.getElementById("materialRangeSwitch");
+const materialDateStart = document.getElementById("materialDateStart");
+const materialDateEnd = document.getElementById("materialDateEnd");
+const materialDateApply = document.getElementById("materialDateApply");
 const materialSyncMeta = document.getElementById("materialSyncMeta");
 const employeeManagerTable = document.getElementById("employeeManagerTable");
 const employeeForm = document.getElementById("employeeForm");
@@ -197,6 +202,14 @@ const PERFORMANCE_SECTION_CONFIG = {
     startEl: breakdownDateStart,
     endEl: breakdownDateEnd,
     applyEl: breakdownDateApply,
+  },
+  material: {
+    storageKey: "material-range-filter",
+    switchEl: materialRangeSwitch,
+    metaEl: materialSyncMeta,
+    startEl: materialDateStart,
+    endEl: materialDateEnd,
+    applyEl: materialDateApply,
   },
 };
 
@@ -763,6 +776,10 @@ function rangePayload(filter) {
   return state.rangePayloads[performanceFilterKey(filter)] || null;
 }
 
+function materialRangePayload(filter) {
+  return state.materialPayloads[performanceFilterKey(filter)] || null;
+}
+
 function rangeLabel(filter) {
   const normalized = normalizeRangeFilter(filter);
   if (normalized.mode === "custom") {
@@ -1275,7 +1292,7 @@ function clearMaterialDetail() {
 }
 
 function renderMaterialDetail(materialKey) {
-  const rows = state.materialPayload?.items || [];
+  const rows = materialRangePayload(sectionFilter("material"))?.items || [];
   const row = rows.find((item) => item.material_key === materialKey);
   if (!row) return;
   materialDetail.className = "detail-panel";
@@ -1286,9 +1303,9 @@ function renderMaterialDetail(materialKey) {
     </div>
     <div class="detail-stats">
       <div class="detail-stat"><span class="label">素材类型</span><span class="value compact">${escapeHtml(row.material_type || "-")}</span></div>
-      <div class="detail-stat"><span class="label">最近一次素材同步消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
-      <div class="detail-stat"><span class="label">最近一次素材同步支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
-      <div class="detail-stat"><span class="label">最近一次素材同步订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
+      <div class="detail-stat"><span class="label">当前统计消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
+      <div class="detail-stat"><span class="label">当前统计支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
+      <div class="detail-stat"><span class="label">当前统计订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
       <div class="detail-stat"><span class="label">最近一次素材同步 ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
       <div class="detail-stat"><span class="label">覆盖账户数</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
       <div class="detail-stat"><span class="label">覆盖计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
@@ -1383,15 +1400,24 @@ function renderMaterialTable(rows) {
 }
 
 async function fetchMaterialRankings(force = false) {
-  if (!force && state.materialPayload) {
-    return state.materialPayload;
+  const filter = sectionFilter("material");
+  const cacheKey = performanceFilterKey(filter);
+  if (!force && state.materialPayloads[cacheKey]) {
+    return state.materialPayloads[cacheKey];
   }
-  const response = await fetch("/api/material-rankings");
+  const params = new URLSearchParams();
+  params.set("range", filter.mode);
+  if (filter.mode === "custom") {
+    params.set("start_date", filter.start);
+    params.set("end_date", filter.end);
+  }
+  const response = await fetch(`/api/material-rankings?${params.toString()}`);
   if (!response.ok) {
     throw new Error("material rankings fetch failed");
   }
-  state.materialPayload = await response.json();
-  return state.materialPayload;
+  const payload = await response.json();
+  state.materialPayloads[cacheKey] = payload;
+  return payload;
 }
 
 function fillPlanAccountFilter(accountNames) {
@@ -2410,13 +2436,15 @@ async function refreshPerformanceSections(force = false) {
 }
 
 async function refreshMaterialSection(force = false) {
+  syncSectionRangeControls("material");
   const payload = await fetchMaterialRankings(force);
   renderMaterialTable(payload?.items || []);
   syncSelectedMaterial(payload?.items || []);
   const meta = payload?.meta || {};
+  const rangeText = formatDateWindowMeta(payload);
   const syncText = payload?.snapshot_time
-    ? `最近一次明细同步：${payload.snapshot_time} · 素材 ${formatNumber(meta.material_row_count || 0)} 行 · 错误 ${formatNumber(meta.error_count || 0)}`
-    : "素材榜基于最近一次明细同步生成。";
+    ? `${rangeText} · 汇总 ${formatNumber(payload?.snapshot_count || 0)} 个日快照 · 最近明细同步 ${payload.snapshot_time} · 素材 ${formatNumber(meta.material_count || meta.material_row_count || 0)} 行 · 错误 ${formatNumber(meta.error_count || 0)}`
+    : `${rangeText} · 当前时间范围内暂无素材快照`;
   materialSyncMeta.textContent = syncText;
 }
 
@@ -2425,6 +2453,10 @@ async function applyQuickRange(sectionKey, mode) {
   if (current.mode === mode) return;
   setSectionFilter(sectionKey, { mode });
   try {
+    if (sectionKey === "material") {
+      await refreshMaterialSection(true);
+      return;
+    }
     await refreshPerformanceSections(true);
   } catch (error) {
     window.alert(error.message || "切换时间范围失败");
@@ -2446,6 +2478,10 @@ async function applyCustomRange(sectionKey) {
   }
   setSectionFilter(sectionKey, { mode: "custom", start, end });
   try {
+    if (sectionKey === "material") {
+      await refreshMaterialSection(true);
+      return;
+    }
     await refreshPerformanceSections(true);
   } catch (error) {
     window.alert(error.message || "查询时间段失败");
@@ -2479,7 +2515,7 @@ function bindInputs() {
       button.addEventListener("click", async () => {
         const view = button.dataset.view || "overview";
         setActiveView(view);
-        if (view === "materials" && !state.materialPayload) {
+        if (view === "materials") {
           await refreshMaterialSection(true);
         }
         if (view === "ownership") {
@@ -2496,12 +2532,13 @@ function bindInputs() {
   planSearch.addEventListener("input", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
   employeeSearch.addEventListener("input", () => renderEmployeeTable(rangePayload(sectionFilter("breakdown"))?.employees || []));
   productSearch.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
-  materialSearch.addEventListener("input", () => renderMaterialTable(state.materialPayload?.items || []));
+  materialSearch.addEventListener("input", () => renderMaterialTable(materialRangePayload(sectionFilter("material"))?.items || []));
   planAccountFilter.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
 
   bindRangeFilterControls("account");
   bindRangeFilterControls("plan");
   bindRangeFilterControls("breakdown");
+  bindRangeFilterControls("material");
 
   employeeForm?.addEventListener("submit", async (event) => {
     event.preventDefault();

@@ -236,6 +236,20 @@
               <h2>素材效果排行</h2>
             </div>
             <div class="toolbar wide">
+              <div class="range-filter-group">
+                <div class="range-switch" id="materialRangeSwitch">
+                  <button type="button" class="range-button" data-range="day">日</button>
+                  <button type="button" class="range-button" data-range="yesterday">昨日</button>
+                  <button type="button" class="range-button" data-range="week">周</button>
+                  <button type="button" class="range-button" data-range="month">月</button>
+                </div>
+                <div class="date-range-inline custom-date-inline">
+                  <input id="materialDateStart" class="date-input" type="date" />
+                  <span class="date-range-sep">至</span>
+                  <input id="materialDateEnd" class="date-input" type="date" />
+                  <button id="materialDateApply" class="date-apply-button" type="button">查询</button>
+                </div>
+              </div>
               <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材 / 素材ID / 视频ID / 计划 / 账户" />
               <button id="syncExtendedButton" class="button ghost" type="button">刷新素材</button>
             </div>
