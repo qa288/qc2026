@@ -1045,7 +1045,12 @@ function renderAccountTable(accounts) {
     <tbody>
       ${sorted.map((row) => `
         <tr>
-          <td>${escapeHtml(row.advertiser_name)}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.advertiser_name)}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">AID ${escapeHtml(String(row.advertiser_id || "-"))}</span>
+            </div>
+          </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
@@ -1641,10 +1646,9 @@ function renderPlanTable(plans) {
   });
   const columns = [
     { key: "ad_name", label: "计划", sortable: true },
-    { key: "product_name", label: "商品", sortable: true },
+    { key: "product_name", label: "商品 / 主播", sortable: true },
     { key: "marketing_goal_text", label: "营销目标", sortable: true },
     { key: "advertiser_name", label: "账户", sortable: true },
-    { key: "anchor_name", label: "主播", sortable: true },
     { key: "order_count", label: "订单", sortable: true },
     { key: "roi", label: "ROI", sortable: true },
     { key: "roi_goal", label: "目标ROI", sortable: true },
@@ -1664,11 +1668,21 @@ function renderPlanTable(plans) {
     <tbody>
       ${sorted.map((row) => `
         <tr data-plan-id="${row.ad_id}" class="${state.selectedPlanId === row.ad_id ? "active-row" : ""}">
-          <td>${escapeHtml(row.ad_name)}</td>
-          <td>${escapeHtml(row.product_name || "-")}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.ad_name)}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">PID ${escapeHtml(String(row.ad_id || "-"))}</span>
+            </div>
+          </td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.product_name || "-")}</div>
+            <div class="cell-subline">
+              ${row.product_id ? `<span class="cell-subitem mono" title="商品 ID：${escapeHtml(row.product_id)}">GID ${escapeHtml(truncateMiddle(row.product_id, 7, 5))}</span>` : ""}
+              ${row.anchor_name ? `<span class="cell-subitem">主播 ${escapeHtml(row.anchor_name)}</span>` : ""}
+            </div>
+          </td>
           <td>${renderMarketingGoalBadge(row)}</td>
           <td>${escapeHtml(row.advertiser_name)}</td>
-          <td>${escapeHtml(row.anchor_name || "-")}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
           <td class="mono">${formatRate(row.roi_goal)}</td>

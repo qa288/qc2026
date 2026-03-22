@@ -979,10 +979,10 @@ body {
 }
 
 .section-range-meta {
-  margin: -6px 0 12px;
+  margin: -4px 0 10px;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .search-input,
@@ -991,8 +991,8 @@ body {
 .rule-form input,
 .rule-form select {
   width: 100%;
-  padding: 12px 14px;
-  border-radius: 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.72);
   font: inherit;
@@ -1052,7 +1052,7 @@ body {
 
 .table-shell {
   overflow: auto;
-  border-radius: 18px;
+  border-radius: 16px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.54);
 }
@@ -1068,11 +1068,11 @@ body {
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 980px;
+  min-width: 920px;
 }
 
 .data-table.compact {
-  min-width: 860px;
+  min-width: 800px;
 }
 
 .data-table thead th {
@@ -1081,7 +1081,7 @@ body {
   z-index: 2;
   background: var(--panel-strong);
   text-align: left;
-  padding: 14px 16px;
+  padding: 12px 14px;
   font-size: 12px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -1092,9 +1092,9 @@ body {
 }
 
 .data-table tbody td {
-  padding: 14px 16px;
+  padding: 12px 14px;
   border-bottom: 1px solid rgba(77, 57, 36, 0.08);
-  font-size: 14px;
+  font-size: 13px;
   vertical-align: top;
 }
 
