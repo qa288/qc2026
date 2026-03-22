@@ -277,7 +277,8 @@ class DashboardService:
         self._sync_lock = asyncio.Lock()
         self._detail_sync_lock = asyncio.Lock()
         self._templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
-        self._range_cache: dict[str, dict[str, Any]] = {}
+        self._performance_cache: dict[str, dict[str, Any]] = {}
+        self._material_cache: dict[str, dict[str, Any]] = {}
 
     @property
     def templates(self) -> Jinja2Templates:
@@ -3671,7 +3672,7 @@ class DashboardService:
         allowed_advertiser_ids: set[int] | None = None,
     ) -> dict[str, Any]:
         cache_key = build_material_cache_key(range_key, start_date, end_date, snapshot_time, allowed_advertiser_ids)
-        cached = self._range_cache.get(cache_key)
+        cached = self._material_cache.get(cache_key)
         now_ts = time.time()
         if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
             return cached["payload"]
@@ -3770,7 +3771,7 @@ class DashboardService:
             payload["range_label"] = range_label
             payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")
             payload["query_end_date"] = end_dt.strftime("%Y-%m-%d")
-        self._range_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+        self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
         return payload
 
     def get_performance_snapshot(
@@ -3785,7 +3786,7 @@ class DashboardService:
         if normalized not in PERFORMANCE_RANGES:
             raise ValueError("range must be one of day/yesterday/week/month/custom")
         cache_key = build_performance_cache_key(normalized, start_date, end_date)
-        cached = self._range_cache.get(cache_key)
+        cached = self._performance_cache.get(cache_key)
         now_ts = time.time()
         if not force_refresh and cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
             return self._apply_account_scope(cached["payload"], allowed_advertiser_ids)
@@ -3809,7 +3810,7 @@ class DashboardService:
             payload["accounts"],
             payload["plans"],
         )
-        self._range_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+        self._performance_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
         return self._apply_account_scope(payload, allowed_advertiser_ids)
 
     def public_employee_rankings(
@@ -4379,7 +4380,7 @@ class DashboardService:
         self.persist_snapshot(payload)
         self.evaluate_alerts(payload)
         self.cleanup_history()
-        self._range_cache.clear()
+        self._performance_cache.clear()
         return payload
 
     def collect_extended_and_store(self) -> dict[str, Any]:
@@ -4388,7 +4389,7 @@ class DashboardService:
             return payload
         self.persist_extended_snapshot(payload)
         self.cleanup_history()
-        self._range_cache.clear()
+        self._material_cache.clear()
         try:
             self.material_rankings("day")
         except Exception:
