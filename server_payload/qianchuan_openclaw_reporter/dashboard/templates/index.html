@@ -260,7 +260,7 @@
             <div>
               <h2>归属规则</h2>
             </div>
-            <div class="meta-block compact single-line">
+            <div class="meta-block compact single-line" id="ownershipHeadMeta">
               <span>先维护归属人，再配置关键词和人工绑定；公开页与后台员工排名都使用这里的规则。</span>
             </div>
           </div>
@@ -271,6 +271,7 @@
                   <h3>归属人列表</h3>
                 </div>
               </div>
+              <div class="ownership-step-note">步骤 1：先创建归属人，再继续维护命名规则和人工绑定。</div>
               <div class="table-shell tall">
                 <table id="employeeManagerTable" class="data-table compact"></table>
               </div>
@@ -283,6 +284,7 @@
                 </div>
                 <div id="employeeEditorStatus" class="section-range-meta compact-inline">先选择或创建归属人。</div>
               </div>
+              <div id="ownershipReadonlyBanner" class="readonly-banner hidden">当前账号为只读角色，可查看规则和命中结果，但不能修改归属配置。</div>
 
               <form id="employeeForm" class="ownership-form-grid">
                 <label>
@@ -310,6 +312,7 @@
                       <h3>关键词规则</h3>
                     </div>
                   </div>
+                  <div class="ownership-step-note">步骤 2：给归属人配置多个关键词，支持匹配账户、计划、商品、素材。</div>
                   <form id="keywordForm" class="ownership-inline-form">
                     <label class="wide-field">
                       <span>关键词</span>
@@ -346,6 +349,7 @@
                       <h3>命中预览与人工绑定</h3>
                     </div>
                   </div>
+                  <div class="ownership-step-note">步骤 3：先预览关键词命中，再把具体对象人工绑定到当前归属人，覆盖自动归属。</div>
                   <form id="matchPreviewForm" class="ownership-inline-form">
                     <label class="wide-field">
                       <span>关键词预览</span>
@@ -377,6 +381,26 @@
                   </div>
                 </section>
               </div>
+
+              <section class="ownership-card">
+                <div class="subpanel-head">
+                  <div>
+                    <h3>未归属池</h3>
+                  </div>
+                  <div class="ownership-inline-actions">
+                    <select id="unassignedScopeSelect" class="select-input compact">
+                      <option value="all">全部对象</option>
+                      <option value="plan">只看计划</option>
+                      <option value="product">只看商品</option>
+                      <option value="account">只看账户</option>
+                    </select>
+                  </div>
+                </div>
+                <div id="unassignedMeta" class="section-range-meta compact-inline">按计划页当前时间范围查看未命中归属规则的数据，可直接人工修正。</div>
+                <div class="table-shell">
+                  <table id="unassignedTable" class="data-table compact"></table>
+                </div>
+              </section>
             </section>
           </div>
         </section>
@@ -475,6 +499,12 @@
                   <button type="submit" form="ruleForm" id="ruleFormSubmitButton" class="button primary">新增规则</button>
                   <button type="button" id="ruleFormCancelButton" class="button ghost hidden">取消编辑</button>
                 </div>
+              </div>
+              <div class="signal-template-strip" id="ruleTemplateStrip">
+                <button type="button" class="signal-template-button" data-entity="account_balance" data-metric="account_balance" data-operator="lte" data-threshold="500" data-note="账户余额不足，及时处理">账户余额</button>
+                <button type="button" class="signal-template-button" data-entity="shared_wallet" data-metric="wallet_balance" data-operator="lte" data-threshold="1000" data-note="共享钱包余额不足，及时处理">共享钱包</button>
+                <button type="button" class="signal-template-button" data-entity="plan" data-metric="stat_cost" data-operator="gte" data-threshold="1000" data-min-spend="0" data-note="计划消耗过快，及时复核">计划消耗</button>
+                <button type="button" class="signal-template-button" data-entity="burst_plan" data-metric="burst_order_count" data-operator="gte" data-threshold="10" data-note="计划短时爆单，及时放量或复核">爆单计划</button>
               </div>
               <div id="ruleFormHint" class="signal-form-hint">先选对象，再设阈值；余额、共享钱包和爆单规则会自动收起无关字段。</div>
               <form id="ruleForm" class="signal-compact-form">

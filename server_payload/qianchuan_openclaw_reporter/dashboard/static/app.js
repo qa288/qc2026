@@ -66,6 +66,8 @@ const state = {
   employeeBindings: {},
   userScopes: {},
   matchPreview: null,
+  unassignedPool: null,
+  unassignedScope: "all",
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
   employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
@@ -149,6 +151,8 @@ const employeeManagerTable = document.getElementById("employeeManagerTable");
 const employeeForm = document.getElementById("employeeForm");
 const employeeFormReset = document.getElementById("employeeFormReset");
 const employeeEditorStatus = document.getElementById("employeeEditorStatus");
+const ownershipHeadMeta = document.getElementById("ownershipHeadMeta");
+const ownershipReadonlyBanner = document.getElementById("ownershipReadonlyBanner");
 const keywordForm = document.getElementById("keywordForm");
 const keywordTable = document.getElementById("keywordTable");
 const matchPreviewForm = document.getElementById("matchPreviewForm");
@@ -157,6 +161,9 @@ const matchScopeSelect = document.getElementById("matchScopeSelect");
 const matchPreviewMeta = document.getElementById("matchPreviewMeta");
 const matchPreviewTable = document.getElementById("matchPreviewTable");
 const bindingTable = document.getElementById("bindingTable");
+const unassignedScopeSelect = document.getElementById("unassignedScopeSelect");
+const unassignedMeta = document.getElementById("unassignedMeta");
+const unassignedTable = document.getElementById("unassignedTable");
 const userTable = document.getElementById("userTable");
 const userForm = document.getElementById("userForm");
 const userFormReset = document.getElementById("userFormReset");
@@ -164,6 +171,7 @@ const userEditorStatus = document.getElementById("userEditorStatus");
 const scopeAccountList = document.getElementById("scopeAccountList");
 const saveUserScopesButton = document.getElementById("saveUserScopesButton");
 const scopeEditorMeta = document.getElementById("scopeEditorMeta");
+const ruleTemplateButtons = Array.from(document.querySelectorAll(".signal-template-button"));
 const PERFORMANCE_SECTION_CONFIG = {
   account: {
     storageKey: "account-range-filter",
@@ -1736,6 +1744,38 @@ function isAdmin() {
   return state.session?.role === "admin";
 }
 
+function setFormReadOnly(formEl, readOnly) {
+  if (!formEl) return;
+  formEl.querySelectorAll("input, select, textarea, button").forEach((field) => {
+    if (field.type === "hidden") return;
+    field.disabled = Boolean(readOnly);
+  });
+}
+
+function applyRoleViewPolicy() {
+  const admin = isAdmin();
+  const accessTab = viewTabs?.querySelector('[data-view="access"]');
+  if (accessTab) {
+    accessTab.classList.toggle("hidden", !admin);
+  }
+  if (!admin && state.activeView === "access") {
+    setActiveView("overview");
+  }
+  ownershipReadonlyBanner?.classList.toggle("hidden", admin);
+  if (ownershipHeadMeta) {
+    ownershipHeadMeta.innerHTML = admin
+      ? "<span>先维护归属人，再配置关键词和人工绑定；公开页与后台员工排名都使用这里的规则。</span>"
+      : "<span>当前账号可查看归属结果与命中情况；归属人、关键词和人工绑定由管理员维护。</span>";
+  }
+  setFormReadOnly(employeeForm, !admin);
+  setFormReadOnly(keywordForm, !admin);
+  matchPreviewForm?.querySelectorAll("button").forEach((button) => {
+    button.disabled = false;
+  });
+  employeeFormReset && (employeeFormReset.disabled = !admin);
+  userFormReset && (userFormReset.disabled = !admin);
+}
+
 function selectedEmployeeRecord() {
   return state.employees.find((item) => Number(item.id) === Number(state.selectedEmployeeId)) || null;
 }
@@ -1749,7 +1789,9 @@ function resetEmployeeFormState() {
   if (employeeForm) employeeForm.reset();
   const enabledInput = employeeForm?.querySelector('input[name="enabled"]');
   if (enabledInput) enabledInput.checked = true;
-  employeeEditorStatus.textContent = "新建归属人后，再继续配置关键词和人工绑定。";
+  employeeEditorStatus.textContent = isAdmin()
+    ? "新建归属人后，再继续配置关键词和人工绑定。"
+    : "当前账号只读，可查看归属结果与命中明细。";
   keywordTable.innerHTML = '<tbody><tr><td colspan="6" class="empty-cell">先选择归属人，再维护关键词。</td></tr></tbody>';
   bindingTable.innerHTML = '<tbody><tr><td colspan="5" class="empty-cell">先选择归属人，再维护人工绑定。</td></tr></tbody>';
 }
@@ -1760,8 +1802,8 @@ function fillEmployeeForm(employee) {
   employeeForm.querySelector('input[name="note"]').value = employee?.note || "";
   employeeForm.querySelector('input[name="enabled"]').checked = Boolean(employee?.enabled);
   employeeEditorStatus.textContent = employee
-    ? `当前编辑：${employee.display_name} · 关键词 ${formatNumber(employee.keyword_count || 0)} · 绑定 ${formatNumber(employee.binding_count || 0)}`
-    : "新建归属人后，再继续配置关键词和人工绑定。";
+    ? `${isAdmin() ? "当前编辑" : "当前查看"}：${employee.display_name} · 关键词 ${formatNumber(employee.keyword_count || 0)} · 绑定 ${formatNumber(employee.binding_count || 0)}`
+    : (isAdmin() ? "新建归属人后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。");
 }
 
 function renderEmployeeManagerTable() {
@@ -1814,7 +1856,7 @@ function renderKeywordTable() {
           <td class="mono">${formatNumber(item.priority)}</td>
           <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
           <td>
-            ${isAdmin() ? `<button type="button" class="button ghost delete-keyword" data-id="${item.id}">删除</button>` : ""}
+            ${isAdmin() ? `<button type="button" class="button ghost delete-keyword" data-id="${item.id}">删除</button>` : '<span class="detail-sub">只读</span>'}
           </td>
         </tr>
       `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属人还没有关键词。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属人。</td></tr>'}
@@ -1853,7 +1895,7 @@ function renderBindingTable() {
           <td>${escapeHtml(item.object_label || "--")}</td>
           <td class="mono">${escapeHtml(item.object_key)}</td>
           <td>${escapeHtml(item.note || "--")}</td>
-          <td>${isAdmin() ? `<button type="button" class="button ghost delete-binding" data-id="${item.id}">删除</button>` : ""}</td>
+          <td>${isAdmin() ? `<button type="button" class="button ghost delete-binding" data-id="${item.id}">删除</button>` : '<span class="detail-sub">只读</span>'}</td>
         </tr>
       `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属人还没有人工绑定。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属人。</td></tr>'}
     </tbody>
@@ -1922,7 +1964,7 @@ function renderMatchPreview() {
           <td>${escapeHtml(row.object_label || "--")}<br /><span class="detail-sub mono">${escapeHtml(row.object_key || "--")}</span></td>
           <td>${escapeHtml([row.account_name, row.plan_name].filter(Boolean).join(" / ") || "--")}</td>
           <td>
-            ${employee && isAdmin() ? `<button type="button" class="button ghost bind-preview" data-type="${escapeHtml(row.object_type)}" data-key="${escapeHtml(row.object_key)}" data-label="${escapeHtml(row.object_label)}">绑定到当前归属人</button>` : '<span class="detail-sub">先选择归属人</span>'}
+            ${employee && isAdmin() ? `<button type="button" class="button ghost bind-preview" data-type="${escapeHtml(row.object_type)}" data-key="${escapeHtml(row.object_key)}" data-label="${escapeHtml(row.object_label)}">绑定到当前归属人</button>` : employee ? '<span class="detail-sub">当前账号只读</span>' : '<span class="detail-sub">先选择归属人</span>'}
           </td>
         </tr>
       `).join("") : '<tr><td colspan="4" class="empty-cell">输入关键词并预览后，这里会展示命中的账户、计划、商品和素材。</td></tr>'}
@@ -1951,6 +1993,126 @@ function renderMatchPreview() {
       await fetchEmployees(true);
       fillEmployeeForm(selectedEmployeeRecord());
       renderEmployeeManagerTable();
+    });
+  });
+}
+
+async function fetchUnassignedPool(force = false) {
+  const filter = sectionFilter("plan");
+  const params = new URLSearchParams({ range: filter.mode, scope: state.unassignedScope || "all" });
+  if (filter.mode === "custom") {
+    params.set("start_date", filter.start);
+    params.set("end_date", filter.end);
+  }
+  if (!force && state.unassignedPool && state.unassignedPool.cacheKey === params.toString()) {
+    return state.unassignedPool;
+  }
+  const response = await fetch(`/api/unassigned-candidates?${params.toString()}`);
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(() => ({}));
+    throw new Error(errorPayload.detail || "未归属池加载失败");
+  }
+  const payload = await response.json();
+  state.unassignedPool = { ...payload, cacheKey: params.toString() };
+  return state.unassignedPool;
+}
+
+async function bindUnassignedCandidate(option) {
+  const employee = selectedEmployeeRecord();
+  if (!employee) {
+    window.alert("请先选择归属人");
+    return;
+  }
+  const response = await fetch(`/api/employees/${employee.id}/bindings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      object_type: option.object_type,
+      object_key: option.object_key,
+      object_label: option.object_label,
+      note: "由未归属池一键绑定",
+    }),
+  });
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(() => ({}));
+    window.alert(errorPayload.detail || "绑定失败");
+    return;
+  }
+  await fetchEmployeeBindings(employee.id, true);
+  await fetchEmployees(true);
+  fillEmployeeForm(selectedEmployeeRecord());
+  renderEmployeeManagerTable();
+  await fetchDashboard();
+  if (state.activeView === "ownership") {
+    await ensureOwnershipData(true);
+  }
+}
+
+function renderUnassignedTable() {
+  const employee = selectedEmployeeRecord();
+  const items = state.unassignedPool?.items || [];
+  const rangeText = state.unassignedPool?.range_label || rangeLabel(sectionFilter("plan"));
+  unassignedMeta.textContent = `按计划页当前时间范围查看未命中归属规则的数据 · ${rangeText} · 未归属计划 ${formatNumber(state.unassignedPool?.total_plan_count || 0)} 条 · 当前对象 ${formatNumber(state.unassignedPool?.item_count || 0)} 条`;
+  unassignedTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>对象</th>
+        <th>账户 / 代表计划</th>
+        <th>消耗</th>
+        <th>支付</th>
+        <th>订单</th>
+        <th>ROI</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${items.length ? items.map((row, index) => `
+        <tr>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.object_label || "--")}</div>
+            <div class="cell-subline">
+              <span class="cell-subitem">${escapeHtml(row.object_type_label || "--")}</span>
+              <span class="cell-subitem mono">${escapeHtml(row.object_key || "--")}</span>
+            </div>
+          </td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.advertiser_name || "-")}</div>
+            <div class="cell-subline">
+              <span class="cell-subitem">${escapeHtml(row.plan_name || "暂无代表计划")}</span>
+              ${row.product_name ? `<span class="cell-subitem">${escapeHtml(row.product_name)}</span>` : ""}
+            </div>
+          </td>
+          <td class="mono">${formatMoney(row.stat_cost)}</td>
+          <td class="mono">${formatMoney(row.pay_amount)}</td>
+          <td class="mono">${formatNumber(row.order_count)}</td>
+          <td class="mono">${formatRate(row.roi)}</td>
+          <td>
+            <div class="inline-button-row">
+              ${row.binding_options?.length && employee && isAdmin()
+                ? row.binding_options.map((option, optionIndex) => `
+                  <button
+                    type="button"
+                    class="button ghost bind-unassigned"
+                    data-row-index="${index}"
+                    data-option-index="${optionIndex}"
+                  >${escapeHtml(option.action_label || "绑定")}</button>
+                `).join("")
+                : employee
+                  ? '<span class="detail-sub">当前账号只读</span>'
+                  : '<span class="detail-sub">先选择归属人</span>'}
+            </div>
+          </td>
+        </tr>
+      `).join("") : '<tr><td colspan="7" class="empty-cell">当前时间范围内没有未归属对象。</td></tr>'}
+    </tbody>
+  `;
+
+  unassignedTable.querySelectorAll(".bind-unassigned").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = items[Number(button.dataset.rowIndex)];
+      const option = row?.binding_options?.[Number(button.dataset.optionIndex)];
+      if (!option) return;
+      await bindUnassignedCandidate(option);
     });
   });
 }
@@ -2011,6 +2173,8 @@ async function ensureOwnershipData(force = false) {
   } else {
     resetEmployeeFormState();
   }
+  await fetchUnassignedPool(force);
+  renderUnassignedTable();
   renderMatchPreview();
 }
 
@@ -2225,6 +2389,10 @@ async function refreshPerformanceSections(force = false) {
   });
   await Promise.all([...uniqueFilters.values()].map((filter) => fetchPerformance(filter, force)));
   renderPerformanceSections();
+  if (state.activeView === "ownership") {
+    await fetchUnassignedPool(true);
+    renderUnassignedTable();
+  }
 }
 
 async function refreshMaterialSection(force = false) {
@@ -2410,12 +2578,44 @@ function bindInputs() {
     renderMatchPreview();
   });
 
+  unassignedScopeSelect?.addEventListener("change", async () => {
+    state.unassignedScope = String(unassignedScopeSelect.value || "all");
+    try {
+      await fetchUnassignedPool(true);
+      renderUnassignedTable();
+    } catch (error) {
+      window.alert(error.message || "未归属池加载失败");
+    }
+  });
+
   ruleForm?.querySelector('select[name="entity_type"]')?.addEventListener("change", () => {
     syncRuleFormFields();
   });
 
   ruleFormCancelButton?.addEventListener("click", () => {
     resetRuleFormState();
+  });
+
+  ruleTemplateButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const entityType = String(button.dataset.entity || "plan");
+      const metric = String(button.dataset.metric || "");
+      const operator = String(button.dataset.operator || "gte");
+      const threshold = String(button.dataset.threshold || "");
+      const minSpend = String(button.dataset.minSpend || "0");
+      const note = String(button.dataset.note || "");
+      ruleForm.querySelector('select[name="entity_type"]').value = entityType;
+      syncRuleFormFields();
+      ruleForm.querySelector('select[name="metric"]').value = metric || ruleForm.querySelector('select[name="metric"]').value;
+      ruleForm.querySelector('select[name="operator"]').value = operator;
+      ruleForm.querySelector('input[name="threshold"]').value = threshold;
+      ruleForm.querySelector('input[name="min_spend"]').value = minSpend;
+      ruleForm.querySelector('input[name="note"]').value = note;
+      ruleForm.querySelector('input[name="target_id"]').value = "";
+      if (ruleFormHint) {
+        ruleFormHint.textContent = `已套用 ${button.textContent.trim()} 模板，可继续补充具体对象和阈值。`;
+      }
+    });
   });
 
   notificationForm.addEventListener("submit", async (event) => {
@@ -2579,6 +2779,7 @@ async function fetchDashboard() {
 
 async function render(payload) {
   const latest = payload.latest;
+  applyRoleViewPolicy();
   renderOverviewHero(latest);
   renderKpis(latest);
   renderSystemCards(latest, payload.extendedSync || latest?.extendedSync, payload.tokenInfo || {});

@@ -1,7 +1,7 @@
 const PUBLIC_RANGE_LABELS = {
   day: "今日",
   week: "近 7 天",
-  month: "当月",
+  month: "近 30 天",
   custom: "自定义时间段",
 };
 
@@ -21,6 +21,7 @@ const publicSortKey = document.getElementById("publicSortKey");
 const publicSortDir = document.getElementById("publicSortDir");
 const publicRangeMeta = document.getElementById("publicRangeMeta");
 const publicEmployeeTable = document.getElementById("publicEmployeeTable");
+const publicSummaryStrip = document.getElementById("publicSummaryStrip");
 
 function publicFormatMoney(value) {
   return Number(value || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -92,6 +93,8 @@ function renderPublicTable(items) {
           <td>${publicFormatMoney(item.pay_amount)}</td>
           <td>${publicFormatNumber(item.order_count)}</td>
           <td>${publicFormatRate(item.roi)}</td>
+          <td>${publicFormatNumber(item.plan_count || 0)}</td>
+          <td>${publicFormatNumber(item.advertiser_count || 0)}</td>
         </tr>
       `;
     })
@@ -105,9 +108,41 @@ function renderPublicTable(items) {
         <th>支付</th>
         <th>订单</th>
         <th>ROI</th>
+        <th>计划数</th>
+        <th>账户数</th>
       </tr>
     </thead>
-    <tbody>${rows || '<tr><td colspan="6" class="empty-cell">当前时间范围内暂无数据</td></tr>'}</tbody>
+    <tbody>${rows || '<tr><td colspan="8" class="empty-cell">当前时间范围内暂无数据</td></tr>'}</tbody>
+  `;
+}
+
+function renderPublicSummary(items) {
+  if (!publicSummaryStrip) return;
+  const top = items[0] || null;
+  const totalSpend = items.reduce((sum, item) => sum + Number(item.stat_cost || 0), 0);
+  const totalPay = items.reduce((sum, item) => sum + Number(item.pay_amount || 0), 0);
+  const totalOrders = items.reduce((sum, item) => sum + Number(item.order_count || 0), 0);
+  publicSummaryStrip.innerHTML = `
+    <article class="public-summary-card">
+      <span>归属人数</span>
+      <strong>${publicFormatNumber(items.length)}</strong>
+      <small>当前时间范围内进入榜单的人数</small>
+    </article>
+    <article class="public-summary-card">
+      <span>榜首归属人</span>
+      <strong>${top?.employee_name || "--"}</strong>
+      <small>${top ? `当前消耗 ${publicFormatMoney(top.stat_cost)}` : "等待数据"}</small>
+    </article>
+    <article class="public-summary-card">
+      <span>总消耗</span>
+      <strong>${publicFormatMoney(totalSpend)}</strong>
+      <small>总支付 ${publicFormatMoney(totalPay)}</small>
+    </article>
+    <article class="public-summary-card">
+      <span>总订单</span>
+      <strong>${publicFormatNumber(totalOrders)}</strong>
+      <small>按归属人聚合后对比当前区间表现</small>
+    </article>
   `;
 }
 
@@ -115,10 +150,14 @@ async function refreshPublicView() {
   try {
     const payload = await loadPublicRankings();
     publicRangeMeta.textContent = `统计范围：${payload.range_label || PUBLIC_RANGE_LABELS[publicState.range]} · ${payload.query_start_date || "--"} 至 ${payload.query_end_date || "--"} · 更新于 ${payload.updated_at || "--"}`;
+    renderPublicSummary(payload.items || []);
     renderPublicTable(payload.items || []);
   } catch (error) {
     publicRangeMeta.textContent = error.message || "公开榜加载失败";
-    publicEmployeeTable.innerHTML = '<tbody><tr><td colspan="6" class="empty-cell">公开榜加载失败</td></tr></tbody>';
+    if (publicSummaryStrip) {
+      publicSummaryStrip.innerHTML = "";
+    }
+    publicEmployeeTable.innerHTML = '<tbody><tr><td colspan="8" class="empty-cell">公开榜加载失败</td></tr></tbody>';
   }
 }
 

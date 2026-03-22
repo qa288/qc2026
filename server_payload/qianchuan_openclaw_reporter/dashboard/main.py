@@ -3508,6 +3508,202 @@ class DashboardService:
             "items": items,
         }
 
+    def _build_unassigned_candidates(self, plans: list[dict[str, Any]], scope: str) -> list[dict[str, Any]]:
+        scope_value = str(scope or "all").strip().lower()
+        if scope_value not in {"all", "account", "plan", "product"}:
+            raise ValueError("scope must be one of all/account/plan/product")
+
+        items: list[dict[str, Any]] = []
+
+        if scope_value in {"all", "plan"}:
+            for row in plans:
+                stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
+                pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+                order_count = int(float(row.get("order_count", 0.0) or 0.0))
+                product_key = self._product_key(row)
+                binding_options = [
+                    {
+                        "object_type": "plan",
+                        "object_key": str(row.get("ad_id") or ""),
+                        "object_label": str(row.get("ad_name") or "").strip(),
+                        "action_label": "绑定计划",
+                    },
+                    {
+                        "object_type": "account",
+                        "object_key": str(row.get("advertiser_id") or ""),
+                        "object_label": str(row.get("advertiser_name") or "").strip(),
+                        "action_label": "绑定账户",
+                    },
+                ]
+                if product_key:
+                    binding_options.append(
+                        {
+                            "object_type": "product",
+                            "object_key": product_key,
+                            "object_label": str(row.get("product_name") or row.get("product_id") or "").strip(),
+                            "action_label": "绑定商品",
+                        }
+                    )
+                items.append(
+                    {
+                        "object_type": "plan",
+                        "object_type_label": "计划",
+                        "object_key": str(row.get("ad_id") or ""),
+                        "object_label": str(row.get("ad_name") or "").strip() or f"计划 {row.get('ad_id') or '-'}",
+                        "advertiser_name": str(row.get("advertiser_name") or "").strip(),
+                        "plan_name": str(row.get("ad_name") or "").strip(),
+                        "product_name": str(row.get("product_name") or "").strip(),
+                        "stat_cost": stat_cost,
+                        "pay_amount": pay_amount,
+                        "order_count": order_count,
+                        "roi": round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
+                        "plan_count": 1,
+                        "binding_options": binding_options,
+                    }
+                )
+
+        if scope_value in {"all", "product"}:
+            product_groups: dict[str, dict[str, Any]] = {}
+            for row in plans:
+                product_key = self._product_key(row)
+                if not product_key:
+                    continue
+                group = product_groups.setdefault(
+                    product_key,
+                    {
+                        "object_type": "product",
+                        "object_type_label": "商品",
+                        "object_key": product_key,
+                        "object_label": str(row.get("product_name") or row.get("product_id") or "").strip() or product_key,
+                        "advertiser_name": str(row.get("advertiser_name") or "").strip(),
+                        "plan_name": "",
+                        "product_name": str(row.get("product_name") or "").strip(),
+                        "stat_cost": 0.0,
+                        "pay_amount": 0.0,
+                        "order_count": 0,
+                        "plan_count": 0,
+                        "top_plan_name": "",
+                        "top_plan_orders": -1,
+                        "top_plan_pay_amount": -1.0,
+                    },
+                )
+                stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
+                pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+                order_count = int(float(row.get("order_count", 0.0) or 0.0))
+                group["stat_cost"] = round(group["stat_cost"] + stat_cost, 2)
+                group["pay_amount"] = round(group["pay_amount"] + pay_amount, 2)
+                group["order_count"] += order_count
+                group["plan_count"] += 1
+                if order_count > group["top_plan_orders"] or (
+                    order_count == group["top_plan_orders"] and pay_amount > group["top_plan_pay_amount"]
+                ):
+                    group["top_plan_name"] = str(row.get("ad_name") or "").strip()
+                    group["top_plan_orders"] = order_count
+                    group["top_plan_pay_amount"] = pay_amount
+
+            for group in product_groups.values():
+                group["roi"] = round(group["pay_amount"] / group["stat_cost"], 2) if group["stat_cost"] > 0 else 0.0
+                group["plan_name"] = group["top_plan_name"]
+                group["binding_options"] = [
+                    {
+                        "object_type": "product",
+                        "object_key": group["object_key"],
+                        "object_label": group["object_label"],
+                        "action_label": "绑定商品",
+                    }
+                ]
+                items.append(group)
+
+        if scope_value in {"all", "account"}:
+            account_groups: dict[int, dict[str, Any]] = {}
+            for row in plans:
+                advertiser_id = int(row.get("advertiser_id", 0) or 0)
+                if not advertiser_id:
+                    continue
+                group = account_groups.setdefault(
+                    advertiser_id,
+                    {
+                        "object_type": "account",
+                        "object_type_label": "账户",
+                        "object_key": str(advertiser_id),
+                        "object_label": str(row.get("advertiser_name") or "").strip() or str(advertiser_id),
+                        "advertiser_name": str(row.get("advertiser_name") or "").strip(),
+                        "plan_name": "",
+                        "product_name": "",
+                        "stat_cost": 0.0,
+                        "pay_amount": 0.0,
+                        "order_count": 0,
+                        "plan_count": 0,
+                        "top_plan_name": "",
+                        "top_plan_orders": -1,
+                        "top_plan_pay_amount": -1.0,
+                    },
+                )
+                stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
+                pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+                order_count = int(float(row.get("order_count", 0.0) or 0.0))
+                group["stat_cost"] = round(group["stat_cost"] + stat_cost, 2)
+                group["pay_amount"] = round(group["pay_amount"] + pay_amount, 2)
+                group["order_count"] += order_count
+                group["plan_count"] += 1
+                if order_count > group["top_plan_orders"] or (
+                    order_count == group["top_plan_orders"] and pay_amount > group["top_plan_pay_amount"]
+                ):
+                    group["top_plan_name"] = str(row.get("ad_name") or "").strip()
+                    group["top_plan_orders"] = order_count
+                    group["top_plan_pay_amount"] = pay_amount
+
+            for group in account_groups.values():
+                group["roi"] = round(group["pay_amount"] / group["stat_cost"], 2) if group["stat_cost"] > 0 else 0.0
+                group["plan_name"] = group["top_plan_name"]
+                group["binding_options"] = [
+                    {
+                        "object_type": "account",
+                        "object_key": group["object_key"],
+                        "object_label": group["object_label"],
+                        "action_label": "绑定账户",
+                    }
+                ]
+                items.append(group)
+
+        sort_order = {"plan": 0, "product": 1, "account": 2}
+        items.sort(
+            key=lambda item: (
+                -float(item.get("stat_cost", 0.0) or 0.0),
+                -float(item.get("order_count", 0.0) or 0.0),
+                -float(item.get("pay_amount", 0.0) or 0.0),
+                sort_order.get(str(item.get("object_type") or ""), 9),
+                str(item.get("object_label") or ""),
+            )
+        )
+        return items
+
+    def unassigned_candidates(
+        self,
+        range_key: str,
+        start_date: str = "",
+        end_date: str = "",
+        scope: str = "all",
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> dict[str, Any]:
+        payload = self.get_performance_snapshot(range_key, start_date, end_date, allowed_advertiser_ids=allowed_advertiser_ids)
+        plans = [
+            dict(item)
+            for item in payload.get("plans", [])
+            if str(item.get("employee_source") or "").strip() == "unassigned"
+        ]
+        items = self._build_unassigned_candidates(plans, scope)
+        return {
+            "range_key": payload.get("range_key", range_key),
+            "range_label": payload.get("range_label", ""),
+            "query_start_date": payload.get("query_start_date", ""),
+            "query_end_date": payload.get("query_end_date", ""),
+            "scope": scope,
+            "total_plan_count": len(plans),
+            "item_count": len(items),
+            "items": items,
+        }
+
     def summary_history(self, limit: int = 144) -> list[dict[str, Any]]:
         with self.db() as conn:
             rows = conn.execute(
@@ -3904,6 +4100,29 @@ async def public_employee_rankings(
 ) -> JSONResponse:
     try:
         payload = await asyncio.to_thread(service.public_employee_rankings, range, start_date, end_date, sort_key, sort_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(payload)
+
+
+@app.get("/api/unassigned-candidates")
+async def unassigned_candidates(
+    range: str = "day",
+    start_date: str = "",
+    end_date: str = "",
+    scope: str = "all",
+    user: dict[str, Any] = Depends(require_auth),
+) -> JSONResponse:
+    allowed = service.allowed_advertiser_ids_for_user(user)
+    try:
+        payload = await asyncio.to_thread(
+            service.unassigned_candidates,
+            range,
+            start_date,
+            end_date,
+            scope,
+            allowed,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(payload)

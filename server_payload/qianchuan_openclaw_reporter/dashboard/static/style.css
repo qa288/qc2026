@@ -1533,6 +1533,29 @@ body {
   line-height: 1.5;
 }
 
+.signal-template-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.signal-template-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(22, 119, 255, 0.14);
+  background: rgba(248, 251, 255, 0.96);
+  color: var(--brand);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.signal-template-button:hover {
+  background: rgba(22, 119, 255, 0.08);
+}
+
 .signal-compact-form {
   display: grid;
   gap: 12px;
@@ -2224,6 +2247,41 @@ body {
   margin-bottom: 16px;
 }
 
+.public-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.public-summary-card {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(22, 119, 255, 0.08);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 24px rgba(17, 73, 150, 0.06);
+}
+
+.public-summary-card span {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.public-summary-card strong {
+  font-size: 24px;
+  line-height: 1.15;
+}
+
+.public-summary-card small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .public-header-copy h1 {
   margin: 10px 0 6px;
   font-size: 34px;
@@ -2438,6 +2496,10 @@ body {
     padding: 16px;
   }
 
+  .public-summary-strip {
+    grid-template-columns: 1fr;
+  }
+
   .login-intro,
   .login-card {
     padding: 26px 22px;
@@ -2503,6 +2565,29 @@ body {
   margin: 0;
 }
 
+.readonly-banner {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(245, 158, 11, 0.16);
+  background: rgba(245, 158, 11, 0.08);
+  color: #8a5500;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ownership-step-note {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ownership-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ownership-layout,
 .access-layout {
   display: grid;
@@ -2556,6 +2641,16 @@ body {
   color: var(--text);
 }
 
+.ownership-form-grid input:disabled,
+.ownership-form-grid select:disabled,
+.ownership-inline-form input:disabled,
+.ownership-inline-form select:disabled,
+.ownership-form-grid button:disabled,
+.ownership-inline-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .ownership-form-actions {
   display: flex;
   align-items: end;
@@ -2605,6 +2700,12 @@ body {
   color: rgba(48, 72, 98, 0.72);
 }
 
+.inline-button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 @media (max-width: 1180px) {
   .ownership-layout,
   .access-layout,
@@ -2619,5 +2720,9 @@ body {
 
   .scope-checklist {
     grid-template-columns: 1fr;
+  }
+
+  .public-summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
