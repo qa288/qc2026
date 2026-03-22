@@ -1476,13 +1476,13 @@ body {
 
 .signal-console {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1.65fr) minmax(300px, 0.95fr);
   gap: 14px;
   align-items: start;
 }
 
 .signal-config-card {
-  padding: 14px;
+  padding: 14px 14px 15px;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid rgba(22, 119, 255, 0.08);
@@ -1526,6 +1526,10 @@ body {
   line-height: 1.5;
 }
 
+.signal-form-hint.compact {
+  padding: 10px 12px;
+}
+
 .signal-template-strip {
   display: flex;
   flex-wrap: wrap;
@@ -1560,11 +1564,16 @@ body {
 }
 
 .signal-form-row-notify {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: 1fr;
 }
 
-.signal-form-row-rule {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+.signal-form-row-main {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(240px, 1.2fr);
+}
+
+.signal-form-row-aux {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  align-items: end;
 }
 
 .signal-compact-form label {
@@ -2379,8 +2388,9 @@ body {
   }
 
   .signal-form-row-notify,
-  .signal-form-row-rule {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .signal-form-row-main,
+  .signal-form-row-aux {
+    grid-template-columns: 1fr;
   }
 
   .summary-metric-row {
@@ -2531,7 +2541,8 @@ body {
   }
 
   .signal-form-row-notify,
-  .signal-form-row-rule {
+  .signal-form-row-main,
+  .signal-form-row-aux {
     grid-template-columns: 1fr;
   }
 }
@@ -2569,10 +2580,7 @@ body {
 }
 
 .ownership-step-note {
-  margin: -2px 0 10px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
+  display: none;
 }
 
 .ownership-inline-actions {
@@ -2584,8 +2592,8 @@ body {
 .ownership-layout,
 .access-layout {
   display: grid;
-  grid-template-columns: minmax(300px, 0.82fr) minmax(0, 1.68fr);
-  gap: 18px;
+  grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.72fr);
+  gap: 14px;
   align-items: start;
 }
 
@@ -2597,14 +2605,14 @@ body {
   border: 1px solid rgba(13, 42, 77, 0.08);
   background: rgba(255, 255, 255, 0.96);
   border-radius: 18px;
-  padding: 18px 18px 16px;
+  padding: 16px 16px 15px;
   box-shadow: 0 12px 34px rgba(18, 42, 67, 0.06);
 }
 
 .ownership-editor-card,
 .access-editor-card {
   display: grid;
-  gap: 14px;
+  gap: 12px;
 }
 
 .ownership-form-grid {
@@ -2653,7 +2661,7 @@ body {
 .ownership-dual-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  gap: 14px;
 }
 
 .ownership-inline-form {
@@ -2661,7 +2669,7 @@ body {
   grid-template-columns: minmax(0, 1.8fr) repeat(3, minmax(0, 1fr)) auto;
   gap: 12px;
   align-items: end;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .scope-checklist {
@@ -2700,6 +2708,7 @@ body {
 }
 
 @media (max-width: 1180px) {
+  .signal-console,
   .ownership-layout,
   .access-layout,
   .ownership-dual-grid {
@@ -2707,7 +2716,9 @@ body {
   }
 
   .ownership-form-grid,
-  .ownership-inline-form {
+  .ownership-inline-form,
+  .signal-form-row-main,
+  .signal-form-row-aux {
     grid-template-columns: 1fr;
   }
 

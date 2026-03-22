@@ -662,7 +662,7 @@ function renderNotificationSettings(settings) {
       <span class="pill">${escapeHtml(targetInfo.label)}</span>
       <span class="pill">${settings?.alert_enabled ? `告警 ${formatNumber(settings?.alert_batch_size || 6)} 条` : "告警关闭"}</span>
     </div>
-    <p class="notify-inline-copy">${escapeHtml(targetInfo.detail)} ${settings?.alert_enabled ? `当前按每批 ${formatNumber(settings?.alert_batch_size || 6)} 条发送阈值告警。` : "当前先只保留页面内提醒，外发可后续开启。"} </p>
+    <p class="notify-inline-copy">${escapeHtml(targetInfo.detail)} ${settings?.alert_enabled ? `当前每批发送 ${formatNumber(settings?.alert_batch_size || 6)} 条阈值告警。` : "当前只保留页面内提醒，外发可后续开启。"} </p>
   `;
 }
 
@@ -1799,8 +1799,8 @@ function applyRoleViewPolicy() {
   ownershipReadonlyBanner?.classList.toggle("hidden", admin);
   if (ownershipHeadMeta) {
     ownershipHeadMeta.innerHTML = admin
-      ? "<span>先维护归属人，再配置关键词和人工绑定；公开页与后台归属人排名都使用这里的规则。</span>"
-      : "<span>当前账号可查看归属结果与命中情况；归属人、关键词和人工绑定由管理员维护。</span>";
+      ? "<span>归属人、关键词和人工绑定会直接影响公开页与后台排名。</span>"
+      : "<span>当前账号可查看归属结果与命中情况，规则由管理员维护。</span>";
   }
   setFormReadOnly(employeeForm, !admin);
   setFormReadOnly(keywordForm, !admin);

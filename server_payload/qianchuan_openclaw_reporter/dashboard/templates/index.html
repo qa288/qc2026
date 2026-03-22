@@ -54,7 +54,7 @@
               <button type="button" class="view-tab" data-view="materials">素材</button>
               <button type="button" class="view-tab" data-view="ownership">归属规则</button>
               <button type="button" class="view-tab" data-view="access">权限</button>
-              <button type="button" class="view-tab" data-view="signals">通知规则</button>
+              <button type="button" class="view-tab" data-view="signals">预警规则</button>
             </div>
           </div>
         </div>
@@ -275,7 +275,7 @@
               <h2>归属规则</h2>
             </div>
             <div class="meta-block compact single-line" id="ownershipHeadMeta">
-              <span>先维护归属人，再配置关键词和人工绑定；公开页与后台归属人排名都使用这里的规则。</span>
+              <span>这里定义公开页和后台的归属人口径，关键词命中和人工绑定都会计入排名。</span>
             </div>
           </div>
           <div class="ownership-layout">
@@ -284,8 +284,8 @@
                 <div>
                   <h3>归属人列表</h3>
                 </div>
+                <div class="section-range-meta compact-inline">公开页默认只展示这里启用的归属人。</div>
               </div>
-              <div class="ownership-step-note">步骤 1：先创建归属人，再继续维护命名规则和人工绑定。</div>
               <div class="table-shell tall">
                 <table id="employeeManagerTable" class="data-table compact"></table>
               </div>
@@ -325,8 +325,8 @@
                     <div>
                       <h3>关键词规则</h3>
                     </div>
+                    <div class="section-range-meta compact-inline">账户 / 计划 / 商品 / 素材</div>
                   </div>
-                  <div class="ownership-step-note">步骤 2：给归属人配置多个关键词，支持匹配账户、计划、商品、素材。</div>
                   <form id="keywordForm" class="ownership-inline-form">
                     <label class="wide-field">
                       <span>关键词</span>
@@ -362,8 +362,8 @@
                     <div>
                       <h3>命中预览与人工绑定</h3>
                     </div>
+                    <div class="section-range-meta compact-inline">先预览命中，再人工覆盖。</div>
                   </div>
-                  <div class="ownership-step-note">步骤 3：先预览关键词命中，再把具体对象人工绑定到当前归属人，覆盖自动归属。</div>
                   <form id="matchPreviewForm" class="ownership-inline-form">
                     <label class="wide-field">
                       <span>关键词预览</span>
@@ -428,7 +428,7 @@
               <h2>账号与权限</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>管理员可以创建运营账号，并按账户范围授权；运营与老板共用工作台，但只看被分配的账户数据。</span>
+              <span>运营和老板共用工作台，管理员只需要维护账号和账户范围。</span>
             </div>
           </div>
           <div class="access-layout">
@@ -437,6 +437,7 @@
                 <div>
                   <h3>后台账号</h3>
                 </div>
+                <div class="section-range-meta compact-inline">运营只看被分配的账户。</div>
               </div>
               <div class="table-shell tall">
                 <table id="userTable" class="data-table compact"></table>
@@ -499,7 +500,10 @@
         <section class="panel signal-panel">
           <div class="panel-head signal-panel-head">
             <div>
-              <h2>预警中心</h2>
+              <h2>预警规则</h2>
+            </div>
+            <div class="meta-block compact single-line">
+              <span>先定义阈值和监控对象，再决定是否外发到通知通道。</span>
             </div>
           </div>
           <div id="signalOverview" class="signal-summary-strip"></div>
@@ -518,13 +522,13 @@
               <div class="signal-template-strip" id="ruleTemplateStrip">
                 <button type="button" class="signal-template-button" data-entity="account_balance" data-metric="account_balance" data-operator="lte" data-threshold="500" data-note="账户余额不足，及时处理">账户余额</button>
                 <button type="button" class="signal-template-button" data-entity="shared_wallet" data-metric="wallet_balance" data-operator="lte" data-threshold="1000" data-note="共享钱包余额不足，及时处理">共享钱包</button>
-                <button type="button" class="signal-template-button" data-entity="plan" data-metric="stat_cost" data-operator="gte" data-threshold="1000" data-min-spend="0" data-note="计划消耗过快，及时复核">计划消耗</button>
-                <button type="button" class="signal-template-button" data-entity="burst_plan" data-metric="burst_order_count" data-operator="gte" data-threshold="10" data-note="计划短时爆单，及时放量或复核">爆单计划</button>
+                  <button type="button" class="signal-template-button" data-entity="plan" data-metric="stat_cost" data-operator="gte" data-threshold="1000" data-min-spend="0" data-note="计划消耗过快，及时复核">计划消耗</button>
+                  <button type="button" class="signal-template-button" data-entity="burst_plan" data-metric="burst_order_count" data-operator="gte" data-threshold="10" data-note="计划短时爆单，及时放量或复核">爆单计划</button>
               </div>
-              <div id="ruleFormHint" class="signal-form-hint">先选对象，再设阈值；余额、共享钱包和爆单规则会自动收起无关字段。</div>
+              <div id="ruleFormHint" class="signal-form-hint">先选对象和指标，再填阈值。余额、共享钱包和爆单规则会自动收起无关字段。</div>
               <form id="ruleForm" class="signal-compact-form">
                 <input name="rule_id" type="hidden" />
-                <div class="signal-form-row signal-form-row-rule">
+                <div class="signal-form-row signal-form-row-main">
                   <label>
                     <span>对象</span>
                     <select name="entity_type" required>
@@ -540,13 +544,13 @@
                     <select name="metric" required>
                     </select>
                   </label>
-                  <label class="wide-field">
+                  <label>
                     <span id="ruleTargetLabel">限定对象</span>
                     <input name="target_id" id="ruleTargetInput" type="text" list="ruleTargetOptions" placeholder="留空表示全部生效" />
                     <datalist id="ruleTargetOptions"></datalist>
                   </label>
                 </div>
-                <div class="signal-form-row signal-form-row-rule">
+                <div class="signal-form-row signal-form-row-aux">
                   <label>
                     <span>比较</span>
                     <select name="operator" required>
@@ -564,7 +568,7 @@
                     <span>冷却分钟</span>
                     <input name="cooldown_minutes" type="number" step="1" value="60" />
                   </label>
-                  <label class="wide-field" id="ruleMinSpendField">
+                  <label id="ruleMinSpendField">
                     <span>最低消耗</span>
                     <input name="min_spend" type="number" step="0.01" value="0" />
                   </label>
@@ -577,16 +581,21 @@
                     <span>立即启用</span>
                   </label>
                 </div>
+                <label class="wide-field">
+                  <span>备注</span>
+                  <input name="note" type="text" placeholder="例如：ROI 低于 1.2 立即复核" />
+                </label>
               </form>
             </section>
 
             <section class="signal-config-card signal-notify-card">
               <div class="signal-config-head">
                 <div>
-                  <h3>通知通道</h3>
+                  <h3>通知出口</h3>
                 </div>
                 <button type="submit" form="notificationForm" class="button primary">保存通知</button>
               </div>
+              <div class="signal-form-hint compact">这里只控制阈值告警是否外发，不处理定时报表。</div>
               <div id="notificationStatus" class="notify-inline-status"></div>
               <form id="notificationForm" class="signal-compact-form">
                 <div class="signal-form-row signal-form-row-notify">
@@ -604,13 +613,13 @@
                       <option value="dingtalk">DingTalk</option>
                     </select>
                   </label>
-                  <label>
-                    <span>账号</span>
-                    <input name="account" type="text" placeholder="default" />
-                  </label>
                   <label class="wide-field">
                     <span>目标</span>
                     <input name="target" type="text" placeholder="open_id、chat_id 或群目标值" />
+                  </label>
+                  <label>
+                    <span>账号</span>
+                    <input name="account" type="text" placeholder="default" />
                   </label>
                   <label class="toggle-chip">
                     <input name="alert_enabled" type="checkbox" />
