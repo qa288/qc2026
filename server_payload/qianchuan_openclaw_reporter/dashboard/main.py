@@ -4970,14 +4970,21 @@ async def performance_data(
 
 @app.post("/api/sync")
 async def manual_sync(_auth: None = Depends(require_auth)) -> JSONResponse:
-    result = await service.run_sync(manual=True)
-    return JSONResponse(result)
+    from dashboard.celery_app import celery_app
+
+    task = celery_app.send_task("dashboard.sync")
+    return JSONResponse({"ok": True, "queued": True, "task_id": task.id, "task_name": "dashboard.sync"}, status_code=202)
 
 
 @app.post("/api/sync/extended")
 async def manual_extended_sync(_auth: None = Depends(require_auth)) -> JSONResponse:
-    result = await service.run_detail_sync(manual=True)
-    return JSONResponse(result)
+    from dashboard.celery_app import celery_app
+
+    task = celery_app.send_task("dashboard.detail_sync")
+    return JSONResponse(
+        {"ok": True, "queued": True, "task_id": task.id, "task_name": "dashboard.detail_sync"},
+        status_code=202,
+    )
 
 
 @app.get("/api/system/integrations/ocean-engine/token-latest")

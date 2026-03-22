@@ -2741,11 +2741,19 @@ function bindInputs() {
     syncButton.disabled = true;
     syncButton.textContent = "刷新中...";
     try {
-      await fetch("/api/sync", { method: "POST" });
-      await fetchDashboard();
+      const response = await fetch("/api/sync", { method: "POST" });
+      if (!response.ok) {
+        throw new Error("刷新任务提交失败");
+      }
+      syncButton.textContent = "已加入队列";
+      window.setTimeout(() => {
+        fetchDashboard().catch(() => {});
+      }, 1500);
     } finally {
-      syncButton.disabled = false;
-      syncButton.textContent = "立即刷新";
+      window.setTimeout(() => {
+        syncButton.disabled = false;
+        syncButton.textContent = "立即刷新";
+      }, 1200);
     }
   });
 
@@ -2754,12 +2762,20 @@ function bindInputs() {
       syncExtendedButton.disabled = true;
       syncExtendedButton.textContent = "同步中...";
       try {
-        await fetch("/api/sync/extended", { method: "POST" });
-        await fetchDashboard();
-        await refreshMaterialSection(true);
+        const response = await fetch("/api/sync/extended", { method: "POST" });
+        if (!response.ok) {
+          throw new Error("明细同步任务提交失败");
+        }
+        syncExtendedButton.textContent = "已加入队列";
+        window.setTimeout(() => {
+          fetchDashboard().catch(() => {});
+          refreshMaterialSection(true).catch(() => {});
+        }, 2000);
       } finally {
-        syncExtendedButton.disabled = false;
-        syncExtendedButton.textContent = "刷新素材";
+        window.setTimeout(() => {
+          syncExtendedButton.disabled = false;
+          syncExtendedButton.textContent = "刷新素材";
+        }, 1200);
       }
     });
   }
