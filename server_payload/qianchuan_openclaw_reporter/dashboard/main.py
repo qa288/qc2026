@@ -178,6 +178,28 @@ def build_performance_cache_key(range_key: str, start_date: str = "", end_date: 
     return normalized
 
 
+def build_scope_cache_key(allowed_advertiser_ids: set[int] | None) -> str:
+    if allowed_advertiser_ids is None:
+        return "all"
+    values = sorted(int(item) for item in allowed_advertiser_ids)
+    return ",".join(str(item) for item in values)
+
+
+def build_material_cache_key(
+    range_key: str,
+    start_date: str = "",
+    end_date: str = "",
+    snapshot_time: str = "",
+    allowed_advertiser_ids: set[int] | None = None,
+) -> str:
+    if str(snapshot_time or "").strip():
+        return f"snapshot:{str(snapshot_time).strip()}:{build_scope_cache_key(allowed_advertiser_ids)}"
+    return (
+        f"{build_performance_cache_key(range_key, start_date, end_date)}:"
+        f"{build_scope_cache_key(allowed_advertiser_ids)}"
+    )
+
+
 class AlertRulePayload(BaseModel):
     entity_type: str = Field(pattern="^(account|plan|account_balance|shared_wallet|burst_plan)$")
     metric: str = Field(pattern="^(stat_cost|roi|order_count|pay_amount|account_balance|wallet_balance|burst_order_count)$")
@@ -3648,6 +3670,12 @@ class DashboardService:
         snapshot_time: str = "",
         allowed_advertiser_ids: set[int] | None = None,
     ) -> dict[str, Any]:
+        cache_key = build_material_cache_key(range_key, start_date, end_date, snapshot_time, allowed_advertiser_ids)
+        cached = self._range_cache.get(cache_key)
+        now_ts = time.time()
+        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
+            return cached["payload"]
+
         with self.db() as conn:
             target_snapshot = str(snapshot_time or "").strip()
             if not target_snapshot:
@@ -3701,7 +3729,21 @@ class DashboardService:
             placeholders = ",".join("?" for _ in snapshot_times)
             rows = conn.execute(
                 f"""
-                SELECT m.*, COALESCE(v.is_original, 0) AS is_original
+                SELECT
+                    m.snapshot_time,
+                    m.advertiser_id,
+                    m.advertiser_name,
+                    m.ad_id,
+                    m.ad_name,
+                    m.material_type,
+                    m.material_key,
+                    m.material_id,
+                    m.material_name,
+                    m.video_id,
+                    m.stat_cost,
+                    m.pay_amount,
+                    m.order_count,
+                    COALESCE(v.is_original, 0) AS is_original
                 FROM material_snapshots AS m
                 LEFT JOIN video_origin_flags AS v
                   ON v.snapshot_time = m.snapshot_time
@@ -3728,6 +3770,7 @@ class DashboardService:
             payload["range_label"] = range_label
             payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")
             payload["query_end_date"] = end_dt.strftime("%Y-%m-%d")
+        self._range_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
         return payload
 
     def get_performance_snapshot(
