@@ -1,8 +1,9 @@
 const RANGE_LABELS = {
   day: "今日",
-  week: "近 7 天",
-  month: "近 30 天",
-  custom: "自定义时间段",
+  yesterday: "昨日",
+  week: "本周",
+  month: "本月",
+  custom: "指定日期范围",
 };
 
 const RULE_ENTITY_CONFIG = {
@@ -235,14 +236,19 @@ function derivePresetDateRange(mode) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const start = new Date(today);
-  if (mode === "week") {
-    start.setDate(start.getDate() - 6);
+  const end = new Date(today);
+  if (mode === "yesterday") {
+    start.setDate(start.getDate() - 1);
+    end.setDate(end.getDate() - 1);
+  } else if (mode === "week") {
+    const weekdayOffset = (today.getDay() + 6) % 7;
+    start.setDate(start.getDate() - weekdayOffset);
   } else if (mode === "month") {
-    start.setDate(start.getDate() - 29);
+    start.setDate(1);
   }
   return {
     start: formatDateInputValue(start),
-    end: formatDateInputValue(today),
+    end: formatDateInputValue(end),
   };
 }
 
@@ -744,7 +750,10 @@ function formatDateWindowMeta(payload) {
     return "统计范围：加载中";
   }
   const label = payload.range_label || RANGE_LABELS[payload.range_key] || "当前";
-  if (payload.range_key === "custom" && payload.query_start_date && payload.query_end_date) {
+  if (payload.query_start_date && payload.query_end_date) {
+    if (payload.query_start_date === payload.query_end_date) {
+      return `统计范围：${label} · ${payload.query_start_date}`;
+    }
     return `统计范围：${label} · ${payload.query_start_date} 至 ${payload.query_end_date}`;
   }
   return `统计范围：${label} · ${payload.window_start} - ${payload.window_end}`;
@@ -757,7 +766,7 @@ function rangePayload(filter) {
 function rangeLabel(filter) {
   const normalized = normalizeRangeFilter(filter);
   if (normalized.mode === "custom") {
-    return "所选区间";
+    return "指定日期范围";
   }
   const payload = rangePayload(normalized);
   return payload?.range_label || RANGE_LABELS[normalized.mode] || "当前";
@@ -834,7 +843,7 @@ function renderKpis(latest) {
     ["活跃账户", formatNumber(summary.active_account_count), `总账户 ${formatNumber(summary.account_count)}`],
     ["活跃计划", formatNumber(summary.active_plan_count), `总计划 ${formatNumber(summary.plan_count)}`],
     ["活跃商品", formatNumber(summary.active_product_count), `总商品 ${formatNumber(summary.product_count)}`],
-    ["活跃员工", formatNumber(summary.active_employee_count), `总员工 ${formatNumber(summary.employee_count)}`],
+    ["活跃归属人", formatNumber(summary.active_employee_count), `总归属人 ${formatNumber(summary.employee_count)}`],
   ];
   kpiGrid.innerHTML = cards.map(([label, value, sub]) => `
     <article class="kpi-card">
@@ -885,7 +894,7 @@ function renderOverviewHero(latest) {
       <div class="overview-foot-stat"><span>活跃账户</span><strong class="mono">${formatNumber(summary.active_account_count)}</strong></div>
       <div class="overview-foot-stat"><span>活跃计划</span><strong class="mono">${formatNumber(summary.active_plan_count)}</strong></div>
       <div class="overview-foot-stat"><span>活跃商品</span><strong class="mono">${formatNumber(summary.active_product_count)}</strong></div>
-      <div class="overview-foot-stat"><span>活跃员工</span><strong class="mono">${formatNumber(summary.active_employee_count)}</strong></div>
+      <div class="overview-foot-stat"><span>活跃归属人</span><strong class="mono">${formatNumber(summary.active_employee_count)}</strong></div>
     </div>
   `;
 }
@@ -1060,7 +1069,7 @@ function renderEmployeeDetail(employeeName) {
   employeeDetail.className = "detail-panel";
   employeeDetail.innerHTML = `
     <div class="detail-stats">
-      <div class="detail-stat detail-stat-wide"><span class="label">员工主体</span><span class="value compact">${escapeHtml(row.employee_name)}</span></div>
+      <div class="detail-stat detail-stat-wide"><span class="label">归属人</span><span class="value compact">${escapeHtml(row.employee_name)}</span></div>
       <div class="detail-stat"><span class="label">归属来源</span><span class="value compact">${escapeHtml(employeeSourceLabel(row.employee_source))}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
@@ -1167,7 +1176,7 @@ function renderEmployeeTable(rows) {
     return haystack.includes(query);
   });
   const columns = [
-    { key: "employee_name", label: "员工", sortable: true },
+    { key: "employee_name", label: "归属人", sortable: true },
     { key: "pay_amount", label: "支付", sortable: true },
     { key: "order_count", label: "订单", sortable: true },
     { key: "roi", label: "ROI", sortable: true },
@@ -1223,7 +1232,7 @@ function renderProductTable(rows) {
     { key: "roi", label: "ROI", sortable: true },
     { key: "stat_cost", label: "消耗", sortable: true },
     { key: "advertiser_count", label: "账户数", sortable: true },
-    { key: "employee_count", label: "员工数", sortable: true },
+    { key: "employee_count", label: "归属人数", sortable: true },
     { key: "plan_count", label: "计划数", sortable: true },
   ];
   const sorted = sortRows(visibleRows, state.productSort);
@@ -1764,7 +1773,7 @@ function applyRoleViewPolicy() {
   ownershipReadonlyBanner?.classList.toggle("hidden", admin);
   if (ownershipHeadMeta) {
     ownershipHeadMeta.innerHTML = admin
-      ? "<span>先维护归属人，再配置关键词和人工绑定；公开页与后台员工排名都使用这里的规则。</span>"
+      ? "<span>先维护归属人，再配置关键词和人工绑定；公开页与后台归属人排名都使用这里的规则。</span>"
       : "<span>当前账号可查看归属结果与命中情况；归属人、关键词和人工绑定由管理员维护。</span>";
   }
   setFormReadOnly(employeeForm, !admin);
@@ -2449,10 +2458,6 @@ function bindRangeFilterControls(sectionKey) {
   config.switchEl?.querySelectorAll(".range-button").forEach((button) => {
     button.addEventListener("click", async () => {
       const next = normalizeRangeKey(button.dataset.range);
-      if (next === "custom") {
-        await applyCustomRange(sectionKey);
-        return;
-      }
       await applyQuickRange(sectionKey, next);
     });
   });

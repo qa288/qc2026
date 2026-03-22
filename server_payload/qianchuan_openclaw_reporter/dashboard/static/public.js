@@ -1,8 +1,9 @@
 const PUBLIC_RANGE_LABELS = {
   day: "今日",
-  week: "近 7 天",
-  month: "近 30 天",
-  custom: "自定义时间段",
+  yesterday: "昨日",
+  week: "本周",
+  month: "本月",
+  custom: "指定日期范围",
 };
 
 const publicState = {
@@ -42,18 +43,27 @@ function publicDateValue(date) {
   return `${year}-${month}-${day}`;
 }
 
+function isValidPublicDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
+}
+
 function setPresetRange(mode) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const start = new Date(today);
-  if (mode === "week") {
-    start.setDate(start.getDate() - 6);
+  const end = new Date(today);
+  if (mode === "yesterday") {
+    start.setDate(start.getDate() - 1);
+    end.setDate(end.getDate() - 1);
+  } else if (mode === "week") {
+    const weekdayOffset = (today.getDay() + 6) % 7;
+    start.setDate(start.getDate() - weekdayOffset);
   } else if (mode === "month") {
-    start.setDate(start.getDate() - 29);
+    start.setDate(1);
   }
   publicState.range = mode;
   publicState.start = publicDateValue(start);
-  publicState.end = publicDateValue(today);
+  publicState.end = publicDateValue(end);
   publicDateStart.value = publicState.start;
   publicDateEnd.value = publicState.end;
   syncRangeButtons();
@@ -63,6 +73,10 @@ function syncRangeButtons() {
   publicRangeSwitch.querySelectorAll(".range-button").forEach((button) => {
     button.classList.toggle("active", button.dataset.range === publicState.range);
   });
+  const customInline = publicDateStart?.closest(".custom-date-inline");
+  if (customInline) {
+    customInline.classList.toggle("active", publicState.range === "custom");
+  }
   publicSortDir.textContent = publicState.sortDir === "desc" ? "降序" : "升序";
 }
 
@@ -152,7 +166,13 @@ async function refreshPublicView() {
     const attributionNote = payload.attribution_mode === "configured"
       ? `已启用归属规则 · 已配置 ${publicFormatNumber(payload.configured_employee_count || 0)} 个归属人`
       : "当前未配置归属规则，暂按主播字段兜底";
-    publicRangeMeta.textContent = `统计范围：${payload.range_label || PUBLIC_RANGE_LABELS[publicState.range]} · ${payload.query_start_date || "--"} 至 ${payload.query_end_date || "--"} · ${attributionNote} · 更新于 ${payload.updated_at || "--"}`;
+    const rangeLabel = payload.range_label || PUBLIC_RANGE_LABELS[publicState.range];
+    const dateText = payload.query_start_date && payload.query_end_date
+      ? (payload.query_start_date === payload.query_end_date
+          ? payload.query_start_date
+          : `${payload.query_start_date} 至 ${payload.query_end_date}`)
+      : "--";
+    publicRangeMeta.textContent = `统计范围：${rangeLabel} · ${dateText} · ${attributionNote} · 更新于 ${payload.updated_at || "--"}`;
     renderPublicSummary(payload.items || []);
     renderPublicTable(payload.items || []);
   } catch (error) {
@@ -172,12 +192,27 @@ publicRangeSwitch?.addEventListener("click", (event) => {
 });
 
 publicDateApply?.addEventListener("click", () => {
-  if (!publicDateStart.value || !publicDateEnd.value) return;
+  if (!isValidPublicDate(publicDateStart.value) || !isValidPublicDate(publicDateEnd.value)) {
+    window.alert("请选择完整的开始日期和结束日期");
+    return;
+  }
+  if (publicDateStart.value > publicDateEnd.value) {
+    window.alert("开始日期不能晚于结束日期");
+    return;
+  }
   publicState.range = "custom";
   publicState.start = publicDateStart.value;
   publicState.end = publicDateEnd.value;
   syncRangeButtons();
   refreshPublicView();
+});
+
+[publicDateStart, publicDateEnd].forEach((input) => {
+  input?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    publicDateApply?.click();
+  });
 });
 
 publicSortKey?.addEventListener("change", () => {

@@ -19,7 +19,7 @@
             </div>
             <div class="top-title-row top-title-inline">
               <h1>{{ app_name }}</h1>
-              <p class="hero-copy">账户、计划、商品、员工与素材实时看板。</p>
+              <p class="hero-copy">账户、计划、商品、归属人与素材实时看板。</p>
             </div>
           </div>
 
@@ -111,11 +111,11 @@
               <div class="range-filter-group">
                 <div class="range-switch" id="accountRangeSwitch">
                   <button type="button" class="range-button" data-range="day">日</button>
+                  <button type="button" class="range-button" data-range="yesterday">昨日</button>
                   <button type="button" class="range-button" data-range="week">周</button>
                   <button type="button" class="range-button" data-range="month">月</button>
                 </div>
                 <div class="date-range-inline custom-date-inline">
-                  <span class="date-range-label">自定义</span>
                   <input id="accountDateStart" class="date-input" type="date" />
                   <span class="date-range-sep">至</span>
                   <input id="accountDateEnd" class="date-input" type="date" />
@@ -136,17 +136,17 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h2>商品与员工排名</h2>
+              <h2>商品与归属人排名</h2>
             </div>
             <div class="toolbar">
               <div class="range-filter-group">
                 <div class="range-switch" id="breakdownRangeSwitch">
                   <button type="button" class="range-button" data-range="day">日</button>
+                  <button type="button" class="range-button" data-range="yesterday">昨日</button>
                   <button type="button" class="range-button" data-range="week">周</button>
                   <button type="button" class="range-button" data-range="month">月</button>
                 </div>
                 <div class="date-range-inline custom-date-inline">
-                  <span class="date-range-label">自定义</span>
                   <input id="breakdownDateStart" class="date-input" type="date" />
                   <span class="date-range-sep">至</span>
                   <input id="breakdownDateEnd" class="date-input" type="date" />
@@ -160,7 +160,7 @@
             <div class="rank-panel">
               <div class="rank-panel-head">
                 <div>
-                  <h3>员工排名</h3>
+                  <h3>归属人排名</h3>
                 </div>
                 <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索归属人 / 代表计划" />
               </div>
@@ -197,11 +197,11 @@
               <div class="range-filter-group">
                 <div class="range-switch" id="planRangeSwitch">
                   <button type="button" class="range-button" data-range="day">日</button>
+                  <button type="button" class="range-button" data-range="yesterday">昨日</button>
                   <button type="button" class="range-button" data-range="week">周</button>
                   <button type="button" class="range-button" data-range="month">月</button>
                 </div>
                 <div class="date-range-inline custom-date-inline">
-                  <span class="date-range-label">自定义</span>
                   <input id="planDateStart" class="date-input" type="date" />
                   <span class="date-range-sep">至</span>
                   <input id="planDateEnd" class="date-input" type="date" />
@@ -261,7 +261,7 @@
               <h2>归属规则</h2>
             </div>
             <div class="meta-block compact single-line" id="ownershipHeadMeta">
-              <span>先维护归属人，再配置关键词和人工绑定；公开页与后台员工排名都使用这里的规则。</span>
+              <span>先维护归属人，再配置关键词和人工绑定；公开页与后台归属人排名都使用这里的规则。</span>
             </div>
           </div>
           <div class="ownership-layout">

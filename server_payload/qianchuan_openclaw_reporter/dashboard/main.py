@@ -63,7 +63,7 @@ DASHBOARD_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "replace-me")
 RANGE_CACHE_SECONDS = int(os.environ.get("RANGE_CACHE_SECONDS", "55"))
-PERFORMANCE_RANGES = {"day", "week", "month", "custom"}
+PERFORMANCE_RANGES = {"day", "yesterday", "week", "month", "custom"}
 DETAIL_SYNC_INTERVAL_MINUTES = int(os.environ.get("DETAIL_SYNC_INTERVAL_MINUTES", "10"))
 ENABLE_IN_PROCESS_SCHEDULER = os.environ.get("ENABLE_IN_PROCESS_SCHEDULER", "0") == "1"
 ROLE_ADMIN = "admin"
@@ -120,16 +120,24 @@ def normalize_summary_times(value: str) -> str:
 def build_performance_window(range_key: str, tz_name: str) -> tuple[datetime, datetime, str]:
     tz = ZoneInfo(tz_name)
     now = datetime.now(tz)
-    if range_key == "week":
-        start_dt = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=tz) - timedelta(days=6)
-        label = "近 7 天"
+    today_start = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=tz)
+    if range_key == "yesterday":
+        start_dt = today_start - timedelta(days=1)
+        end_dt = today_start - timedelta(seconds=1)
+        label = "昨日"
+    elif range_key == "week":
+        start_dt = today_start - timedelta(days=today_start.weekday())
+        end_dt = now
+        label = "本周"
     elif range_key == "month":
-        start_dt = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=tz) - timedelta(days=29)
-        label = "近 30 天"
+        start_dt = datetime(now.year, now.month, 1, 0, 0, 0, tzinfo=tz)
+        end_dt = now
+        label = "本月"
     else:
-        start_dt = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=tz)
+        start_dt = today_start
+        end_dt = now
         label = "今日"
-    return start_dt, now, label
+    return start_dt, end_dt, label
 
 
 def _parse_date_input(value: str, field_name: str) -> datetime:
@@ -141,7 +149,7 @@ def _parse_date_input(value: str, field_name: str) -> datetime:
 
 def build_custom_performance_window(start_date: str, end_date: str, tz_name: str) -> tuple[datetime, datetime, str]:
     if not str(start_date or "").strip() or not str(end_date or "").strip():
-        raise ValueError("自定义时间段必须同时提供开始日期和结束日期")
+        raise ValueError("指定日期范围必须同时提供开始日期和结束日期")
 
     start_day = _parse_date_input(start_date, "start_date")
     end_day = _parse_date_input(end_date, "end_date")
@@ -160,7 +168,7 @@ def build_custom_performance_window(start_date: str, end_date: str, tz_name: str
         raise ValueError("开始日期不能晚于当前时间")
     if end_dt > now:
         end_dt = now
-    return start_dt, end_dt, "自定义时间段"
+    return start_dt, end_dt, "指定日期范围"
 
 
 def build_performance_cache_key(range_key: str, start_date: str = "", end_date: str = "") -> str:
@@ -3447,7 +3455,7 @@ class DashboardService:
     ) -> dict[str, Any]:
         normalized = str(range_key or "day").strip().lower()
         if normalized not in PERFORMANCE_RANGES:
-            raise ValueError("range must be one of day/week/month/custom")
+            raise ValueError("range must be one of day/yesterday/week/month/custom")
         cache_key = build_performance_cache_key(normalized, start_date, end_date)
         cached = self._range_cache.get(cache_key)
         now_ts = time.time()

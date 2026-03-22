@@ -181,7 +181,7 @@ body {
 }
 
 .hero h1 {
-  font-size: 24px;
+  font-size: 22px;
   line-height: 1.08;
 }
 
@@ -194,7 +194,7 @@ body {
 .hero-copy {
   max-width: none;
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -538,12 +538,12 @@ body {
 }
 
 .panel h2 {
-  font-size: 28px;
+  font-size: 24px;
 }
 
 .panel h3 {
   margin: 0;
-  font-size: 22px;
+  font-size: 18px;
   font-family: var(--font-display);
   letter-spacing: -0.02em;
 }
@@ -560,7 +560,7 @@ body {
 }
 
 .meta-block.compact {
-  min-width: 260px;
+  min-width: 180px;
 }
 
 .meta-block.single-line {
@@ -934,10 +934,10 @@ body {
 }
 
 .rank-note {
-  margin: 10px 0 14px;
+  margin: 8px 0 10px;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .rank-table-shell {
@@ -955,7 +955,7 @@ body {
 
 .range-button {
   border: 0;
-  min-width: 44px;
+  min-width: 48px;
   height: 36px;
   padding: 0 14px;
   border-radius: 999px;
@@ -1017,13 +1017,6 @@ body {
 .custom-date-inline.active {
   background: rgba(22, 119, 255, 0.08);
   border-color: rgba(22, 119, 255, 0.18);
-}
-
-.date-range-label {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-  flex-shrink: 0;
 }
 
 .date-input {
@@ -1483,13 +1476,13 @@ body {
 
 .signal-console {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.85fr);
+  grid-template-columns: 1fr;
   gap: 14px;
   align-items: start;
 }
 
 .signal-config-card {
-  padding: 16px;
+  padding: 14px;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid rgba(22, 119, 255, 0.08);
@@ -1567,11 +1560,11 @@ body {
 }
 
 .signal-form-row-notify {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .signal-form-row-rule {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .signal-compact-form label {
@@ -2576,10 +2569,10 @@ body {
 }
 
 .ownership-step-note {
-  margin: -4px 0 12px;
+  margin: -2px 0 10px;
   color: var(--muted);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 .ownership-inline-actions {
@@ -2591,7 +2584,7 @@ body {
 .ownership-layout,
 .access-layout {
   display: grid;
-  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.6fr);
+  grid-template-columns: minmax(300px, 0.82fr) minmax(0, 1.68fr);
   gap: 18px;
   align-items: start;
 }
@@ -2611,7 +2604,7 @@ body {
 .ownership-editor-card,
 .access-editor-card {
   display: grid;
-  gap: 18px;
+  gap: 14px;
 }
 
 .ownership-form-grid {

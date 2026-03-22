@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{{ app_name }} 员工榜</title>
+    <title>{{ app_name }} 归属人榜</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <link rel="stylesheet" href="/static/style.css" />
   </head>
@@ -12,7 +12,7 @@
       <header class="public-header">
         <div class="public-header-copy">
           <div class="hero-chip-row">
-            <span class="hero-chip strong">公开员工榜</span>
+            <span class="hero-chip strong">公开归属人榜</span>
             <span class="hero-chip">匿名可访问</span>
             <span class="hero-chip">1 分钟刷新</span>
           </div>
@@ -31,11 +31,11 @@
           <div class="range-filter-group">
             <div class="range-switch" id="publicRangeSwitch">
               <button type="button" class="range-button" data-range="day">日</button>
+              <button type="button" class="range-button" data-range="yesterday">昨日</button>
               <button type="button" class="range-button" data-range="week">周</button>
               <button type="button" class="range-button" data-range="month">月</button>
             </div>
             <div class="date-range-inline custom-date-inline">
-              <span class="date-range-label">自定义</span>
               <input id="publicDateStart" class="date-input" type="date" />
               <span class="date-range-sep">至</span>
               <input id="publicDateEnd" class="date-input" type="date" />
