@@ -406,6 +406,29 @@ class DashboardService:
                     PRIMARY KEY (snapshot_time, ad_id, material_type, material_key)
                 );
 
+                CREATE TABLE IF NOT EXISTS material_rollups (
+                    snapshot_time TEXT NOT NULL,
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    material_key TEXT NOT NULL,
+                    material_id TEXT NOT NULL,
+                    material_name TEXT NOT NULL,
+                    material_type TEXT NOT NULL,
+                    video_id TEXT NOT NULL DEFAULT '',
+                    stat_cost REAL NOT NULL DEFAULT 0,
+                    pay_amount REAL NOT NULL DEFAULT 0,
+                    order_count INTEGER NOT NULL DEFAULT 0,
+                    plan_count INTEGER NOT NULL DEFAULT 0,
+                    advertiser_count INTEGER NOT NULL DEFAULT 0,
+                    plan_ids_json TEXT NOT NULL DEFAULT '[]',
+                    advertiser_ids_json TEXT NOT NULL DEFAULT '[]',
+                    is_original INTEGER NOT NULL DEFAULT 0,
+                    top_plan_name TEXT NOT NULL DEFAULT '',
+                    top_account_name TEXT NOT NULL DEFAULT '',
+                    roi REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (snapshot_time, material_key)
+                );
+
                 CREATE TABLE IF NOT EXISTS video_origin_flags (
                     snapshot_time TEXT NOT NULL,
                     advertiser_id BIGINT NOT NULL,
@@ -610,6 +633,9 @@ class DashboardService:
 
                 CREATE INDEX IF NOT EXISTS idx_material_snapshots_material_time
                 ON material_snapshots (material_id, snapshot_time);
+
+                CREATE INDEX IF NOT EXISTS idx_material_rollups_snapshot_time
+                ON material_rollups (snapshot_time);
 
                 CREATE INDEX IF NOT EXISTS idx_video_origin_flags_material_time
                 ON video_origin_flags (material_id, snapshot_time);
@@ -2122,7 +2148,7 @@ class DashboardService:
         rows.sort(key=lambda item: (-item["pay_amount"], -item["order_count"], -item["roi"], -item["stat_cost"], item["employee_name"]))
         return rows
 
-    def _build_material_rankings(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _group_material_rows(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
             material_key = str(row.get("material_key") or "").strip()
@@ -2168,6 +2194,9 @@ class DashboardService:
                 group["top_plan_pay_amount"] = pay_amount
                 group["top_account_name"] = str(row.get("advertiser_name") or "").strip()
 
+        return groups
+
+    def _material_rankings_from_groups(self, groups: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         material_rows: list[dict[str, Any]] = []
         for group in groups.values():
             roi = round(group["pay_amount"] / group["stat_cost"], 2) if group["stat_cost"] > 0 else 0.0
@@ -2199,6 +2228,124 @@ class DashboardService:
             )
         )
         return material_rows
+
+    def _build_material_rankings(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self._material_rankings_from_groups(self._group_material_rows(rows))
+
+    def _build_material_rollup_rows(
+        self,
+        snapshot_time: str,
+        window_start: str,
+        window_end: str,
+        rows: list[dict[str, Any]],
+    ) -> list[tuple[Any, ...]]:
+        groups = self._group_material_rows(rows)
+        rollups: list[tuple[Any, ...]] = []
+        for group in groups.values():
+            stat_cost = round(float(group["stat_cost"] or 0.0), 2)
+            pay_amount = round(float(group["pay_amount"] or 0.0), 2)
+            order_count = int(group["order_count"] or 0)
+            plan_ids = sorted(int(item) for item in group["plan_ids"] if int(item or 0))
+            advertiser_ids = sorted(int(item) for item in group["advertiser_ids"] if int(item or 0))
+            roi = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            rollups.append(
+                (
+                    snapshot_time,
+                    window_start,
+                    window_end,
+                    str(group["material_key"] or ""),
+                    str(group["material_id"] or ""),
+                    str(group["material_name"] or ""),
+                    str(group["material_type"] or ""),
+                    str(group["video_id"] or ""),
+                    stat_cost,
+                    pay_amount,
+                    order_count,
+                    len(plan_ids),
+                    len(advertiser_ids),
+                    json.dumps(plan_ids, ensure_ascii=False),
+                    json.dumps(advertiser_ids, ensure_ascii=False),
+                    1 if bool(group["is_original"]) else 0,
+                    str(group["top_plan_name"] or ""),
+                    str(group["top_account_name"] or ""),
+                    roi,
+                )
+            )
+        return rollups
+
+    def _aggregate_material_rollups(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        groups: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            material_key = str(row.get("material_key") or "").strip()
+            if not material_key:
+                continue
+            plan_ids = {int(item) for item in json.loads(str(row.get("plan_ids_json") or "[]")) if int(item or 0)}
+            advertiser_ids = {int(item) for item in json.loads(str(row.get("advertiser_ids_json") or "[]")) if int(item or 0)}
+            group = groups.get(material_key)
+            if group is None:
+                group = dict(row)
+                group["stat_cost"] = 0.0
+                group["pay_amount"] = 0.0
+                group["order_count"] = 0
+                group["plan_ids"] = set()
+                group["advertiser_ids"] = set()
+                group["_top_plan_orders"] = -1
+                group["_top_plan_pay_amount"] = -1.0
+                groups[material_key] = group
+            stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+            order_count = int(float(row.get("order_count", 0.0) or 0.0))
+            group["stat_cost"] = round(float(group["stat_cost"] or 0.0) + stat_cost, 2)
+            group["pay_amount"] = round(float(group["pay_amount"] or 0.0) + pay_amount, 2)
+            group["order_count"] = int(group["order_count"] or 0) + order_count
+            group["plan_ids"].update(plan_ids)
+            group["advertiser_ids"].update(advertiser_ids)
+            group["is_original"] = bool(group.get("is_original")) or bool(row.get("is_original"))
+            if (
+                order_count > int(group.get("_top_plan_orders", -1))
+                or (
+                    order_count == int(group.get("_top_plan_orders", -1))
+                    and pay_amount > float(group.get("_top_plan_pay_amount", -1.0))
+                )
+            ):
+                group["top_plan_name"] = str(row.get("top_plan_name") or "")
+                group["top_account_name"] = str(row.get("top_account_name") or "")
+                group["_top_plan_orders"] = order_count
+                group["_top_plan_pay_amount"] = pay_amount
+
+        rankings: list[dict[str, Any]] = []
+        for group in groups.values():
+            stat_cost = round(float(group.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(group.get("pay_amount", 0.0) or 0.0), 2)
+            order_count = int(group.get("order_count", 0) or 0)
+            rankings.append(
+                {
+                    "material_key": str(group.get("material_key") or ""),
+                    "material_id": str(group.get("material_id") or ""),
+                    "material_name": str(group.get("material_name") or "") or "未命名素材",
+                    "material_type": str(group.get("material_type") or "") or "OTHER",
+                    "video_id": str(group.get("video_id") or ""),
+                    "stat_cost": stat_cost,
+                    "pay_amount": pay_amount,
+                    "order_count": order_count,
+                    "plan_count": len(group["plan_ids"]),
+                    "advertiser_count": len(group["advertiser_ids"]),
+                    "is_original": bool(group.get("is_original")),
+                    "top_plan_name": str(group.get("top_plan_name") or ""),
+                    "top_account_name": str(group.get("top_account_name") or ""),
+                    "roi": round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
+                }
+            )
+        rankings.sort(
+            key=lambda item: (
+                -int(item["order_count"]),
+                -float(item["pay_amount"]),
+                -float(item["roi"]),
+                -float(item["stat_cost"]),
+                str(item["material_name"]),
+            )
+        )
+        return rankings
 
     def _rankings_bundle(
         self, summary: dict[str, Any], accounts: list[dict[str, Any]], plans: list[dict[str, Any]]
@@ -3309,10 +3456,46 @@ class DashboardService:
     def persist_extended_snapshot(self, payload: dict[str, Any]) -> None:
         if payload.get("skipped"):
             return
+        original_material_keys: set[tuple[int, str]] = {
+            (int(row[1]), str(row[2]))
+            for row in payload["video_flag_rows"]
+            if int(row[3] or 0) == 1
+        }
+        material_source_rows: list[dict[str, Any]] = []
+        for row in payload["material_rows"]:
+            advertiser_id = int(row[3])
+            material_id = str(row[9] or "")
+            material_source_rows.append(
+                {
+                    "snapshot_time": row[0],
+                    "window_start": row[1],
+                    "window_end": row[2],
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": row[4],
+                    "ad_id": int(row[5]),
+                    "ad_name": row[6],
+                    "material_type": row[7],
+                    "material_key": row[8],
+                    "material_id": material_id,
+                    "material_name": row[10],
+                    "video_id": row[11],
+                    "stat_cost": row[14],
+                    "pay_amount": row[15],
+                    "order_count": row[16],
+                    "is_original": (advertiser_id, material_id) in original_material_keys,
+                }
+            )
+        material_rollup_rows = self._build_material_rollup_rows(
+            payload["snapshot_time"],
+            payload["window_start"],
+            payload["window_end"],
+            material_source_rows,
+        )
         with self.db() as conn:
             conn.execute("DELETE FROM plan_detail_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
             conn.execute("DELETE FROM product_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
             conn.execute("DELETE FROM material_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
+            conn.execute("DELETE FROM material_rollups WHERE snapshot_time = ?", (payload["snapshot_time"],))
             conn.execute("DELETE FROM video_origin_flags WHERE snapshot_time = ?", (payload["snapshot_time"],))
             if payload["detail_rows"]:
                 conn.executemany(
@@ -3349,6 +3532,18 @@ class DashboardService:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     payload["material_rows"],
+                )
+            if material_rollup_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO material_rollups (
+                        snapshot_time, window_start, window_end, material_key, material_id,
+                        material_name, material_type, video_id, stat_cost, pay_amount,
+                        order_count, plan_count, advertiser_count, plan_ids_json,
+                        advertiser_ids_json, is_original, top_plan_name, top_account_name, roi
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    material_rollup_rows,
                 )
             if payload["video_flag_rows"]:
                 conn.executemany(
@@ -3409,6 +3604,7 @@ class DashboardService:
             conn.execute("DELETE FROM plan_detail_snapshots WHERE snapshot_time < ?", (cutoff,))
             conn.execute("DELETE FROM product_snapshots WHERE snapshot_time < ?", (cutoff,))
             conn.execute("DELETE FROM material_snapshots WHERE snapshot_time < ?", (cutoff,))
+            conn.execute("DELETE FROM material_rollups WHERE snapshot_time < ?", (cutoff,))
             conn.execute("DELETE FROM video_origin_flags WHERE snapshot_time < ?", (cutoff,))
             conn.execute("DELETE FROM extended_sync_runs WHERE snapshot_time < ?", (cutoff,))
 
@@ -3728,38 +3924,61 @@ class DashboardService:
                 range_label = "指定快照" if snapshot_time else ""
 
             placeholders = ",".join("?" for _ in snapshot_times)
-            rows = conn.execute(
+            rollup_rows = conn.execute(
                 f"""
                 SELECT
-                    m.snapshot_time,
-                    m.advertiser_id,
-                    m.advertiser_name,
-                    m.ad_id,
-                    m.ad_name,
-                    m.material_type,
-                    m.material_key,
-                    m.material_id,
-                    m.material_name,
-                    m.video_id,
-                    m.stat_cost,
-                    m.pay_amount,
-                    m.order_count,
-                    COALESCE(v.is_original, 0) AS is_original
-                FROM material_snapshots AS m
-                LEFT JOIN video_origin_flags AS v
-                  ON v.snapshot_time = m.snapshot_time
-                 AND v.advertiser_id = m.advertiser_id
-                 AND v.material_id = m.material_id
-                WHERE m.snapshot_time IN ({placeholders})
-                ORDER BY m.snapshot_time DESC, m.order_count DESC, m.pay_amount DESC, m.roi DESC, m.stat_cost DESC
+                    *
+                FROM material_rollups
+                WHERE snapshot_time IN ({placeholders})
+                ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC
                 """,
                 snapshot_times,
             ).fetchall()
-        scoped_rows = [dict(row) for row in rows]
-        if allowed_advertiser_ids is not None:
-            allowed = {int(item) for item in allowed_advertiser_ids}
-            scoped_rows = [row for row in scoped_rows if int(row.get("advertiser_id", 0) or 0) in allowed]
-        items = self._build_material_rankings(scoped_rows)
+            fallback_rows: list[Any] = []
+            if len(rollup_rows) == 0:
+                fallback_rows = conn.execute(
+                    f"""
+                    SELECT
+                        m.snapshot_time,
+                        m.advertiser_id,
+                        m.advertiser_name,
+                        m.ad_id,
+                        m.ad_name,
+                        m.material_type,
+                        m.material_key,
+                        m.material_id,
+                        m.material_name,
+                        m.video_id,
+                        m.stat_cost,
+                        m.pay_amount,
+                        m.order_count,
+                        COALESCE(v.is_original, 0) AS is_original
+                    FROM material_snapshots AS m
+                    LEFT JOIN video_origin_flags AS v
+                      ON v.snapshot_time = m.snapshot_time
+                     AND v.advertiser_id = m.advertiser_id
+                     AND v.material_id = m.material_id
+                    WHERE m.snapshot_time IN ({placeholders})
+                    ORDER BY m.snapshot_time DESC, m.order_count DESC, m.pay_amount DESC, m.roi DESC, m.stat_cost DESC
+                    """,
+                    snapshot_times,
+                ).fetchall()
+        if rollup_rows:
+            scoped_rollup_rows = [dict(row) for row in rollup_rows]
+            if allowed_advertiser_ids is not None:
+                allowed = {int(item) for item in allowed_advertiser_ids}
+                scoped_rollup_rows = [
+                    row
+                    for row in scoped_rollup_rows
+                    if any(int(item) in allowed for item in json.loads(str(row.get("advertiser_ids_json") or "[]")))
+                ]
+            items = self._aggregate_material_rollups(scoped_rollup_rows)
+        else:
+            scoped_rows = [dict(row) for row in fallback_rows]
+            if allowed_advertiser_ids is not None:
+                allowed = {int(item) for item in allowed_advertiser_ids}
+                scoped_rows = [row for row in scoped_rows if int(row.get("advertiser_id", 0) or 0) in allowed]
+            items = self._build_material_rankings(scoped_rows)
         payload = {
             "snapshot_time": str(latest_meta.get("snapshot_time") or "") if latest_meta else target_snapshot,
             "items": items,
