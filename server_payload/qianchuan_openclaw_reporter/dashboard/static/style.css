@@ -937,6 +937,18 @@ body {
   max-height: 460px;
 }
 
+.inline-feedback[data-tone="success"] {
+  color: #157347;
+}
+
+.inline-feedback[data-tone="warn"] {
+  color: #b26a00;
+}
+
+.inline-feedback[data-tone="neutral"] {
+  color: var(--muted);
+}
+
 .range-switch {
   display: inline-flex;
   padding: 4px;
@@ -2650,6 +2662,11 @@ body {
   display: flex;
   align-items: end;
   gap: 10px;
+}
+
+.ownership-actions-end {
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
 .ownership-dual-grid {

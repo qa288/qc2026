@@ -291,7 +291,7 @@
                 <div>
                   <h3>归属人配置</h3>
                 </div>
-                <div id="employeeEditorStatus" class="section-range-meta compact-inline">先选择或创建归属人。</div>
+                <div id="employeeEditorStatus" class="section-range-meta compact-inline inline-feedback">先选择或创建归属人。</div>
               </div>
               <div id="ownershipReadonlyBanner" class="readonly-banner hidden">当前账号为只读角色，可查看规则和命中结果，但不能修改归属配置。</div>
 
@@ -347,6 +347,7 @@
                     </label>
                     <button type="submit" class="button primary">新增关键词</button>
                   </form>
+                  <div id="keywordStatus" class="section-range-meta compact-inline inline-feedback">选择归属人后，再添加关键词。</div>
                   <div class="table-shell">
                     <table id="keywordTable" class="data-table compact"></table>
                   </div>
@@ -376,7 +377,7 @@
                     </label>
                     <button type="submit" class="button ghost">预览命中</button>
                   </form>
-                  <div id="matchPreviewMeta" class="section-range-meta compact-inline">先选择归属人，再预览命中结果。</div>
+                  <div id="matchPreviewMeta" class="section-range-meta compact-inline inline-feedback">先选择归属人，再预览命中结果。</div>
                   <div class="table-shell">
                     <table id="matchPreviewTable" class="data-table compact"></table>
                   </div>
@@ -444,7 +445,7 @@
                 <div>
                   <h3>账号配置</h3>
                 </div>
-                <div id="userEditorStatus" class="section-range-meta compact-inline">管理员可配置运营账号和账户范围。</div>
+                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">管理员可配置运营账号和账户范围。</div>
               </div>
               <form id="userForm" class="ownership-form-grid">
                 <label>
@@ -481,10 +482,12 @@
                   <div>
                     <h3>账户范围</h3>
                   </div>
+                </div>
+                <div id="scopeEditorMeta" class="section-range-meta compact-inline inline-feedback">管理员默认拥有全量权限；运营默认无数据，需勾选账户范围。</div>
+                <div id="scopeAccountList" class="scope-checklist"></div>
+                <div class="ownership-form-actions ownership-actions-end">
                   <button type="button" id="saveUserScopesButton" class="button primary">保存账户范围</button>
                 </div>
-                <div id="scopeEditorMeta" class="section-range-meta compact-inline">管理员默认拥有全量权限；运营默认无数据，需勾选账户范围。</div>
-                <div id="scopeAccountList" class="scope-checklist"></div>
               </section>
             </section>
           </div>

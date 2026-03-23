@@ -160,6 +160,7 @@ const employeeEditorStatus = document.getElementById("employeeEditorStatus");
 const ownershipHeadMeta = document.getElementById("ownershipHeadMeta");
 const ownershipReadonlyBanner = document.getElementById("ownershipReadonlyBanner");
 const keywordForm = document.getElementById("keywordForm");
+const keywordStatus = document.getElementById("keywordStatus");
 const keywordTable = document.getElementById("keywordTable");
 const matchPreviewForm = document.getElementById("matchPreviewForm");
 const matchKeywordInput = document.getElementById("matchKeywordInput");
@@ -387,6 +388,16 @@ function operatorLabel(operator) {
     lte: "<=",
   };
   return labels[operator] || operator;
+}
+
+function setInlineFeedback(element, text, tone = "neutral") {
+  if (!element) return;
+  element.textContent = text;
+  element.dataset.tone = tone;
+}
+
+function focusFirstInput(form, selector) {
+  form?.querySelector(selector)?.focus();
 }
 
 function entityLabel(entityType) {
@@ -1834,11 +1845,15 @@ function resetEmployeeFormState() {
   if (employeeForm) employeeForm.reset();
   const enabledInput = employeeForm?.querySelector('input[name="enabled"]');
   if (enabledInput) enabledInput.checked = true;
-  employeeEditorStatus.textContent = isAdmin()
-    ? "新建归属人后，再继续配置关键词和人工绑定。"
-    : "当前账号只读，可查看归属结果与命中明细。";
+  setInlineFeedback(
+    employeeEditorStatus,
+    isAdmin() ? "新建归属人后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。",
+    "neutral",
+  );
+  setInlineFeedback(keywordStatus, "选择归属人后，再添加关键词。", "neutral");
   keywordTable.innerHTML = '<tbody><tr><td colspan="6" class="empty-cell">先选择归属人，再维护关键词。</td></tr></tbody>';
   bindingTable.innerHTML = '<tbody><tr><td colspan="5" class="empty-cell">先选择归属人，再维护人工绑定。</td></tr></tbody>';
+  if (isAdmin()) focusFirstInput(employeeForm, 'input[name="display_name"]');
 }
 
 function fillEmployeeForm(employee) {
@@ -1846,9 +1861,18 @@ function fillEmployeeForm(employee) {
   employeeForm.querySelector('input[name="display_name"]').value = employee?.display_name || "";
   employeeForm.querySelector('input[name="note"]').value = employee?.note || "";
   employeeForm.querySelector('input[name="enabled"]').checked = Boolean(employee?.enabled);
-  employeeEditorStatus.textContent = employee
-    ? `${isAdmin() ? "当前编辑" : "当前查看"}：${employee.display_name} · 关键词 ${formatNumber(employee.keyword_count || 0)} · 绑定 ${formatNumber(employee.binding_count || 0)}`
-    : (isAdmin() ? "新建归属人后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。");
+  setInlineFeedback(
+    employeeEditorStatus,
+    employee
+      ? `${isAdmin() ? "当前编辑" : "当前查看"}：${employee.display_name} · 关键词 ${formatNumber(employee.keyword_count || 0)} · 绑定 ${formatNumber(employee.binding_count || 0)}`
+      : (isAdmin() ? "新建归属人后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。"),
+    "neutral",
+  );
+  setInlineFeedback(
+    keywordStatus,
+    employee ? `正在为 ${employee.display_name} 维护关键词。` : "选择归属人后，再添加关键词。",
+    "neutral",
+  );
 }
 
 function renderEmployeeManagerTable() {
@@ -1915,6 +1939,8 @@ function renderKeywordTable() {
         await fetchEmployees(true);
         fillEmployeeForm(selectedEmployeeRecord());
         renderEmployeeManagerTable();
+        await fetchDashboard();
+        setInlineFeedback(keywordStatus, `已删除关键词，${employee.display_name} 的归属规则已刷新。`, "success");
       }
     });
   });
@@ -1953,6 +1979,8 @@ function renderBindingTable() {
         await fetchEmployees(true);
         fillEmployeeForm(selectedEmployeeRecord());
         renderEmployeeManagerTable();
+        await fetchDashboard();
+        setInlineFeedback(matchPreviewMeta, `已删除人工绑定，${employee.display_name} 的归属结果已刷新。`, "success");
       }
     });
   });
@@ -1990,9 +2018,13 @@ function flattenMatchPreview(preview) {
 function renderMatchPreview() {
   const employee = selectedEmployeeRecord();
   const rows = flattenMatchPreview(state.matchPreview);
-  matchPreviewMeta.textContent = employee
-    ? `当前归属人：${employee.display_name} · 预览命中后可直接人工绑定。`
-    : "先选择归属人，再预览命中结果。";
+  setInlineFeedback(
+    matchPreviewMeta,
+    employee
+      ? `当前归属人：${employee.display_name} · 当前命中 ${formatNumber(rows.length)} 条，可直接人工绑定。`
+      : "先选择归属人，再预览命中结果。",
+    "neutral",
+  );
   matchPreviewTable.innerHTML = `
     <thead>
       <tr>
@@ -2038,6 +2070,8 @@ function renderMatchPreview() {
       await fetchEmployees(true);
       fillEmployeeForm(selectedEmployeeRecord());
       renderEmployeeManagerTable();
+      await fetchDashboard();
+      setInlineFeedback(matchPreviewMeta, `已绑定到 ${employee.display_name}，榜单会按新归属刷新。`, "success");
     });
   });
 }
@@ -2091,6 +2125,7 @@ async function bindUnassignedCandidate(option) {
   if (state.activeView === "ownership") {
     await ensureOwnershipData(true);
   }
+  setInlineFeedback(matchPreviewMeta, `已绑定到 ${employee.display_name}，未归属池已刷新。`, "success");
 }
 
 function renderUnassignedTable() {
@@ -2234,13 +2269,18 @@ function resetUserFormState() {
   if (userForm) userForm.reset();
   const enabledInput = userForm?.querySelector('input[name="enabled"]');
   if (enabledInput) enabledInput.checked = true;
-  userEditorStatus.textContent = isAdmin()
-    ? "创建运营账号后，再勾选允许访问的账户范围。"
-    : "只有管理员可以配置后台账号。";
-  scopeEditorMeta.textContent = isAdmin()
-    ? "管理员默认全量可见；运营需要明确勾选账户范围。"
-    : "当前账号无权修改账户范围。";
+  setInlineFeedback(
+    userEditorStatus,
+    isAdmin() ? "创建运营账号后，再勾选允许访问的账户范围。" : "只有管理员可以配置后台账号。",
+    "neutral",
+  );
+  setInlineFeedback(
+    scopeEditorMeta,
+    isAdmin() ? "管理员默认全量可见；运营需要明确勾选账户范围。" : "当前账号无权修改账户范围。",
+    "neutral",
+  );
   renderScopeChecklist();
+  if (isAdmin()) focusFirstInput(userForm, 'input[name="username"]');
 }
 
 function fillUserForm(user) {
@@ -2250,9 +2290,11 @@ function fillUserForm(user) {
   userForm.querySelector('select[name="role"]').value = user?.role || "operator";
   userForm.querySelector('input[name="password"]').value = "";
   userForm.querySelector('input[name="enabled"]').checked = Boolean(user?.enabled);
-  userEditorStatus.textContent = user
-    ? `当前编辑：${user.username} · ${user.role === "admin" ? "管理员" : "运营"}`
-    : "创建运营账号后，再勾选允许访问的账户范围。";
+  setInlineFeedback(
+    userEditorStatus,
+    user ? `当前编辑：${user.username} · ${user.role === "admin" ? "管理员" : "运营"}` : "创建运营账号后，再勾选允许访问的账户范围。",
+    "neutral",
+  );
 }
 
 function renderUserTable() {
@@ -2364,6 +2406,9 @@ async function selectUserManager(userId) {
     state.selectedUserScopeIds = [];
   }
   renderScopeChecklist();
+  if (isAdmin() && user && user.role !== "admin") {
+    scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
+  }
 }
 
 async function ensureAccessData(force = false) {
@@ -2574,9 +2619,13 @@ function bindInputs() {
     await fetchEmployees(true);
     if (item?.id) {
       await selectEmployeeManager(Number(item.id));
+      setInlineFeedback(employeeEditorStatus, `已保存归属人：${item.display_name || payload.display_name}。`, "success");
+      setInlineFeedback(keywordStatus, "可以继续添加关键词，或先预览命中结果。", "success");
+      focusFirstInput(keywordForm, 'input[name="keyword"]');
     } else {
       await ensureOwnershipData(true);
     }
+    await fetchDashboard();
   });
 
   employeeFormReset?.addEventListener("click", () => {
@@ -2615,6 +2664,10 @@ function bindInputs() {
     await fetchEmployees(true);
     fillEmployeeForm(selectedEmployeeRecord());
     renderEmployeeManagerTable();
+    await fetchDashboard();
+    setInlineFeedback(keywordStatus, `已新增关键词“${payload.keyword}”。`, "success");
+    setInlineFeedback(matchPreviewMeta, "可继续预览命中，或等待榜单按新规则刷新。", "success");
+    focusFirstInput(keywordForm, 'input[name="keyword"]');
   });
 
   matchPreviewForm?.addEventListener("submit", async (event) => {
@@ -2804,6 +2857,11 @@ function bindInputs() {
     await fetchUsers(true);
     if (item?.id) {
       await selectUserManager(Number(item.id));
+      setInlineFeedback(userEditorStatus, `已保存账号：${item.username || payload.username}。`, "success");
+      if (item.role !== "admin") {
+        setInlineFeedback(scopeEditorMeta, "下一步勾选该账号允许访问的账户范围。", "success");
+        scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
+      }
     } else {
       await ensureAccessData(true);
     }
@@ -2836,6 +2894,7 @@ function bindInputs() {
     state.userScopes[state.selectedUserId] = payload.advertiser_ids || [];
     state.selectedUserScopeIds = state.userScopes[state.selectedUserId];
     renderScopeChecklist();
+    setInlineFeedback(scopeEditorMeta, `已保存账户范围，共 ${formatNumber(state.selectedUserScopeIds.length)} 个账户。`, "success");
   });
 
   resetRuleFormState();
