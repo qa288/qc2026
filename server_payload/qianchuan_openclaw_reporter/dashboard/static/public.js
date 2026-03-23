@@ -14,12 +14,19 @@ const publicState = {
   sortDir: "desc",
 };
 
+const PUBLIC_SORTABLE_COLUMNS = [
+  { key: "stat_cost", label: "消耗", sortable: true },
+  { key: "pay_amount", label: "支付", sortable: true },
+  { key: "order_count", label: "订单", sortable: true },
+  { key: "roi", label: "ROI", sortable: true },
+  { key: "plan_count", label: "计划数", sortable: true },
+  { key: "advertiser_count", label: "账户数", sortable: true },
+];
+
 const publicRangeSwitch = document.getElementById("publicRangeSwitch");
 const publicDateStart = document.getElementById("publicDateStart");
 const publicDateEnd = document.getElementById("publicDateEnd");
 const publicDateApply = document.getElementById("publicDateApply");
-const publicSortKey = document.getElementById("publicSortKey");
-const publicSortDir = document.getElementById("publicSortDir");
 const publicRangeMeta = document.getElementById("publicRangeMeta");
 const publicEmployeeTable = document.getElementById("publicEmployeeTable");
 const publicSummaryStrip = document.getElementById("publicSummaryStrip");
@@ -77,7 +84,6 @@ function syncRangeButtons() {
   if (customInline) {
     customInline.classList.toggle("active", publicState.range === "custom");
   }
-  publicSortDir.textContent = publicState.sortDir === "desc" ? "降序" : "升序";
 }
 
 async function loadPublicRankings() {
@@ -97,6 +103,10 @@ async function loadPublicRankings() {
 }
 
 function renderPublicTable(items) {
+  const sortHint = (key) => {
+    if (publicState.sortKey !== key) return "↕";
+    return publicState.sortDir === "desc" ? "↓" : "↑";
+  };
   const rows = items
     .map((item, index) => {
       return `
@@ -118,16 +128,25 @@ function renderPublicTable(items) {
       <tr>
         <th>排名</th>
         <th>归属人</th>
-        <th>消耗</th>
-        <th>支付</th>
-        <th>订单</th>
-        <th>ROI</th>
-        <th>计划数</th>
-        <th>账户数</th>
+        ${PUBLIC_SORTABLE_COLUMNS.map((column) => `
+          <th data-key="${column.key}" data-sort-hint="${sortHint(column.key)}" class="th-sort">${column.label}</th>
+        `).join("")}
       </tr>
     </thead>
     <tbody>${rows || '<tr><td colspan="8" class="empty-cell">当前时间范围内暂无数据</td></tr>'}</tbody>
   `;
+  publicEmployeeTable.querySelectorAll("th[data-key]").forEach((header) => {
+    header.addEventListener("click", () => {
+      const key = header.dataset.key || "stat_cost";
+      if (publicState.sortKey === key) {
+        publicState.sortDir = publicState.sortDir === "desc" ? "asc" : "desc";
+      } else {
+        publicState.sortKey = key;
+        publicState.sortDir = "desc";
+      }
+      refreshPublicView();
+    });
+  });
 }
 
 function renderPublicSummary(items, rangeLabel) {
@@ -213,17 +232,6 @@ publicDateApply?.addEventListener("click", () => {
     event.preventDefault();
     publicDateApply?.click();
   });
-});
-
-publicSortKey?.addEventListener("change", () => {
-  publicState.sortKey = publicSortKey.value || "stat_cost";
-  refreshPublicView();
-});
-
-publicSortDir?.addEventListener("click", () => {
-  publicState.sortDir = publicState.sortDir === "desc" ? "asc" : "desc";
-  syncRangeButtons();
-  refreshPublicView();
 });
 
 setPresetRange("day");
