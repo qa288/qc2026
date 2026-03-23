@@ -100,10 +100,10 @@ body {
 .top-meta-pill {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   max-width: 430px;
-  padding: 8px 10px;
+  padding: 7px 9px;
   border-radius: 999px;
   background: rgba(248, 251, 255, 0.94);
   border: 1px solid rgba(22, 119, 255, 0.08);
@@ -118,14 +118,14 @@ body {
 }
 
 .top-meta-pill strong {
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.2;
   white-space: nowrap;
 }
 
 .top-meta-pill-sub {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
@@ -246,7 +246,8 @@ body {
 .button {
   border: 0;
   border-radius: 999px;
-  padding: 9px 15px;
+  padding: 8px 13px;
+  font-size: 13px;
   font-weight: 700;
   font-family: inherit;
   cursor: pointer;
@@ -879,26 +880,28 @@ body {
 
 .toolbar {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
   flex-wrap: wrap;
 }
 
 .toolbar.wide {
-  min-width: 440px;
+  min-width: 0;
   justify-content: flex-end;
 }
 
 .toolbar.wide .range-filter-group {
   margin-right: auto;
+  flex: 1 1 420px;
 }
 
 .range-filter-group {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .workspace-grid {
@@ -926,11 +929,12 @@ body {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
 }
 
 .rank-search {
-  max-width: 260px;
+  flex: 0 1 220px;
+  max-width: 220px;
 }
 
 .rank-table-shell {
@@ -951,7 +955,7 @@ body {
 
 .range-switch {
   display: inline-flex;
-  padding: 4px;
+  padding: 3px;
   border-radius: 999px;
   background: rgba(20, 59, 47, 0.08);
   border: 1px solid rgba(77, 57, 36, 0.1);
@@ -960,14 +964,14 @@ body {
 
 .range-button {
   border: 0;
-  min-width: 48px;
-  height: 36px;
-  padding: 0 14px;
+  min-width: 44px;
+  height: 32px;
+  padding: 0 12px;
   border-radius: 999px;
   background: transparent;
   color: var(--muted);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   cursor: pointer;
   transition: background 160ms ease, color 160ms ease, transform 160ms ease;
@@ -984,7 +988,7 @@ body {
 }
 
 .section-range-meta {
-  margin: -4px 0 10px;
+  margin: -2px 0 8px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
@@ -996,7 +1000,7 @@ body {
 .rule-form input,
 .rule-form select {
   width: 100%;
-  padding: 10px 12px;
+  padding: 9px 12px;
   border-radius: 12px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.72);
@@ -1004,16 +1008,29 @@ body {
   color: var(--ink);
 }
 
+.toolbar > .search-input,
+.toolbar.wide > .search-input {
+  flex: 0 1 240px;
+  min-width: 190px;
+  width: auto;
+}
+
+.toolbar > .select-input,
+.toolbar.wide > .select-input {
+  flex: 0 0 156px;
+  width: auto;
+}
+
 .date-range-inline {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   flex-wrap: wrap;
 }
 
 .custom-date-inline {
-  padding: 4px 8px;
+  padding: 3px 6px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.76);
   border: 1px solid rgba(77, 57, 36, 0.1);
@@ -1025,7 +1042,7 @@ body {
 }
 
 .date-input {
-  width: 146px;
+  width: 132px;
   min-width: 0;
 }
 
@@ -1036,15 +1053,15 @@ body {
 }
 
 .date-apply-button {
-  min-width: 68px;
-  height: 36px;
-  padding: 0 14px;
+  min-width: 58px;
+  height: 32px;
+  padding: 0 12px;
   border: 0;
   border-radius: 999px;
   background: rgba(22, 119, 255, 0.1);
   color: var(--brand);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   cursor: pointer;
   transition: background 160ms ease, transform 160ms ease;
@@ -1716,18 +1733,18 @@ body {
 .view-tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .view-tab {
-  height: 36px;
-  padding: 0 14px;
+  height: 34px;
+  padding: 0 12px;
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
   color: #5c6777;
   font: inherit;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
@@ -1854,7 +1871,8 @@ body {
 }
 
 .hero-actions .button {
-  padding: 9px 14px;
+  padding: 7px 12px;
+  font-size: 12px;
 }
 
 .hero-meta-card,
@@ -1909,10 +1927,6 @@ body {
   color: #768396;
 }
 
-.toolbar {
-  gap: 12px;
-}
-
 .search-input,
 .date-input,
 .select-input,
@@ -1920,8 +1934,8 @@ body {
 .notify-form select,
 .rule-form input,
 .rule-form select {
-  min-height: 44px;
-  padding: 10px 14px;
+  min-height: 40px;
+  padding: 8px 12px;
   border-radius: 12px;
   border: 1px solid rgba(22, 119, 255, 0.12);
   background: #ffffff;
@@ -1946,8 +1960,8 @@ body {
 }
 
 .range-button {
-  min-width: 48px;
-  height: 34px;
+  min-width: 44px;
+  height: 32px;
 }
 
 .range-button.active {
@@ -2022,7 +2036,7 @@ body {
 
 .detail-panel.empty,
 .alert-stream.empty {
-  min-height: 160px;
+  min-height: 132px;
   background: rgba(248, 251, 255, 0.92);
   border-color: rgba(22, 119, 255, 0.14);
 }
@@ -2431,6 +2445,15 @@ body {
     flex-wrap: wrap;
   }
 
+  .toolbar > .search-input,
+  .toolbar.wide > .search-input,
+  .toolbar > .select-input,
+  .toolbar.wide > .select-input {
+    width: 100%;
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
   .range-filter-group {
     width: 100%;
   }
@@ -2568,7 +2591,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .subpanel-head h3 {

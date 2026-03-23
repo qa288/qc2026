@@ -1253,7 +1253,7 @@ function breakdownEntityLabel(payload) {
 }
 
 function breakdownSearchPlaceholder(payload) {
-  return "搜索运营账号 / 用户名 / 代表计划";
+  return "搜索运营 / 用户名 / 计划";
 }
 
 function breakdownDetailEmptyCopy(payload) {
@@ -2496,9 +2496,9 @@ function syncAccessRolePanels() {
   }
   if (!isAdmin()) return;
   if (!user) {
-    setInlineFeedback(scopeEditorMeta, "先选择后台账号，再配置账户范围。", "neutral");
-    setInlineFeedback(operatorKeywordStatus, "先选择一个运营账号，再配置关键词。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "先选择一个运营账号，再查看命中素材列表。", "neutral");
+    setInlineFeedback(scopeEditorMeta, "先选账号，再配置账户范围。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "先选运营账号，再配置关键词。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "先选运营账号，再查看命中素材。", "neutral");
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
     return;
@@ -2551,7 +2551,7 @@ function applyRoleViewPolicy() {
   }
   if (ownershipTab) {
     ownershipTab.classList.toggle("hidden", !admin);
-    ownershipTab.textContent = "归属规则";
+    ownershipTab.textContent = "高级归属";
   }
   if (signalsTab) {
     signalsTab.classList.toggle("hidden", !admin);
@@ -2600,7 +2600,7 @@ function applyRoleViewPolicy() {
     materialsPanelTitle.textContent = operator ? "我的素材" : "素材效果排行";
   }
   if (materialSearch) {
-    materialSearch.placeholder = operator ? "搜索素材 / 账户 / 计划" : "搜索素材 / 账户 / 计划 / 视频ID";
+    materialSearch.placeholder = "搜索素材 / 计划 / 账户";
   }
   if (heroCopy) {
     heroCopy.textContent = admin
@@ -2627,8 +2627,8 @@ function applyRoleViewPolicy() {
   ownershipReadonlyBanner?.classList.toggle("hidden", admin);
   if (ownershipHeadMeta) {
     ownershipHeadMeta.innerHTML = admin
-      ? "<span>关键词和人工绑定会直接影响后台团队排名与素材归属。</span>"
-      : "<span>当前账号可查看归属结果与命中情况，规则由管理员维护。</span>";
+      ? "<span>维护高级关键词归属、人工绑定和未归属修正。</span>"
+      : "<span>当前账号只读，规则由管理员维护。</span>";
   }
   setFormReadOnly(employeeForm, !admin);
   setFormReadOnly(keywordForm, !admin);
@@ -2657,7 +2657,7 @@ function resetEmployeeFormState() {
     isAdmin() ? "新建归属主体后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。",
     "neutral",
   );
-  setInlineFeedback(keywordStatus, "选择归属主体后，再添加关键词。", "neutral");
+  setInlineFeedback(keywordStatus, "先选归属主体，再加关键词。", "neutral");
   keywordTable.innerHTML = '<tbody><tr><td colspan="6" class="empty-cell">先选择归属主体，再维护关键词。</td></tr></tbody>';
   bindingTable.innerHTML = '<tbody><tr><td colspan="5" class="empty-cell">先选择归属主体，再维护人工绑定。</td></tr></tbody>';
   if (isAdmin()) focusFirstInput(employeeForm, 'input[name="display_name"]');
@@ -2677,7 +2677,7 @@ function fillEmployeeForm(employee) {
   );
   setInlineFeedback(
     keywordStatus,
-    employee ? `正在为 ${employee.display_name} 维护关键词。` : "选择归属主体后，再添加关键词。",
+    employee ? `正在为 ${employee.display_name} 维护关键词。` : "先选归属主体，再加关键词。",
     "neutral",
   );
 }
@@ -2735,7 +2735,7 @@ function renderKeywordTable() {
             ${isAdmin() ? `<button type="button" class="button ghost delete-keyword" data-id="${item.id}">删除</button>` : '<span class="detail-sub">只读</span>'}
           </td>
         </tr>
-      `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属主体还没有关键词。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属主体。</td></tr>'}
+      `).join("") : '<tr><td colspan="5" class="empty-cell">当前还没有关键词。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属主体。</td></tr>'}
     </tbody>
   `;
   keywordTable.querySelectorAll(".delete-keyword").forEach((button) => {
@@ -2775,7 +2775,7 @@ function renderBindingTable() {
           <td>${escapeHtml(item.note || "--")}</td>
           <td>${isAdmin() ? `<button type="button" class="button ghost delete-binding" data-id="${item.id}">删除</button>` : '<span class="detail-sub">只读</span>'}</td>
         </tr>
-      `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属主体还没有人工绑定。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属主体。</td></tr>'}
+      `).join("") : '<tr><td colspan="5" class="empty-cell">当前还没有人工绑定。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属主体。</td></tr>'}
     </tbody>
   `;
   bindingTable.querySelectorAll(".delete-binding").forEach((button) => {
@@ -2829,7 +2829,7 @@ function renderMatchPreview() {
     matchPreviewMeta,
     employee
       ? `当前归属主体：${employee.display_name} · 当前命中 ${formatNumber(rows.length)} 条，可直接人工绑定。`
-      : "先选择归属主体，再预览命中结果。",
+      : "先选归属主体，再预览命中。",
     "neutral",
   );
   matchPreviewTable.innerHTML = `
@@ -2942,7 +2942,7 @@ function renderUnassignedTable() {
   if (!state.employees.length) {
     unassignedMeta.textContent = "当前还没有归属主体。请先创建归属主体，再配置关键词或人工绑定；未归属池会基于这些规则生成。";
   } else {
-    unassignedMeta.textContent = `按计划页当前时间范围查看未命中归属规则的数据 · ${rangeText} · 未归属计划 ${formatNumber(state.unassignedPool?.total_plan_count || 0)} 条 · 当前对象 ${formatNumber(state.unassignedPool?.item_count || 0)} 条`;
+    unassignedMeta.textContent = `查看当前时间范围内未命中归属规则的数据 · ${rangeText} · 未归属计划 ${formatNumber(state.unassignedPool?.total_plan_count || 0)} 条 · 当前对象 ${formatNumber(state.unassignedPool?.item_count || 0)} 条`;
   }
   unassignedTable.innerHTML = `
     <thead>
@@ -3093,8 +3093,8 @@ function resetUserFormState() {
     isAdmin() ? "管理员默认全量可见；主管需要明确勾选账户范围。" : "当前账号无权修改账户范围。",
     "neutral",
   );
-  setInlineFeedback(operatorKeywordStatus, "先选择一个运营账号，再配置关键词。", "neutral");
-  setInlineFeedback(operatorMaterialStatus, "先选择一个运营账号，再查看命中素材列表。", "neutral");
+  setInlineFeedback(operatorKeywordStatus, "先选运营账号，再配置关键词。", "neutral");
+  setInlineFeedback(operatorMaterialStatus, "先选运营账号，再查看命中素材。", "neutral");
   renderScopeChecklist();
   renderUserKeywordTable();
   renderUserMatchedMaterialTable();

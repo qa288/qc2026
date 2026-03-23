@@ -19,7 +19,7 @@
             </div>
             <div class="top-title-row top-title-inline">
               <h1>{{ app_name }}</h1>
-              <p class="hero-copy" id="heroCopy">账户、计划、素材、运营账号与预警实时看板。</p>
+              <p class="hero-copy" id="heroCopy">账户、计划、素材与预警看板。</p>
             </div>
           </div>
 
@@ -120,7 +120,7 @@
                   <button id="accountDateApply" class="date-apply-button" type="button">查询</button>
                 </div>
               </div>
-              <input id="accountSearch" class="search-input" type="search" placeholder="搜索账户名" />
+              <input id="accountSearch" class="search-input" type="search" placeholder="搜索账户 / 状态" />
             </div>
           </div>
           <div class="section-range-meta" id="accountRangeMeta">统计范围：加载中</div>
@@ -160,7 +160,7 @@
                 <div>
                   <h3 id="teamPanelTitle">运营账号排名</h3>
                 </div>
-                <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索运营账号 / 代表计划" />
+                <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索运营 / 计划" />
               </div>
               <div class="table-shell rank-table-shell">
                 <table id="employeeTable" class="data-table compact"></table>
@@ -172,7 +172,7 @@
                 <div>
                   <h3>商品排名</h3>
                 </div>
-                <input id="productSearch" class="search-input rank-search" type="search" placeholder="搜索商品 / 代表计划" />
+                <input id="productSearch" class="search-input rank-search" type="search" placeholder="搜索商品 / 计划" />
               </div>
               <div class="table-shell rank-table-shell">
                 <table id="productTable" class="data-table compact"></table>
@@ -204,7 +204,7 @@
                   <button id="planDateApply" class="date-apply-button" type="button">查询</button>
                 </div>
               </div>
-              <input id="planSearch" class="search-input" type="search" placeholder="搜索计划 / 商品 / 账户 / 主播" />
+              <input id="planSearch" class="search-input" type="search" placeholder="搜索计划 / 商品 / 主播" />
               <select id="planAccountFilter" class="select-input">
                 <option value="">全部账户</option>
               </select>
@@ -246,8 +246,8 @@
                   <button id="materialDateApply" class="date-apply-button" type="button">查询</button>
                 </div>
               </div>
-              <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材 / 素材ID / 视频ID / 计划 / 账户" />
-              <button id="syncExtendedButton" class="button ghost" type="button">刷新素材</button>
+              <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材 / 计划 / 账户" />
+              <button id="syncExtendedButton" class="button ghost" type="button">刷新明细</button>
             </div>
           </div>
           <div class="section-range-meta" id="materialSyncMeta">素材榜基于最近一次明细同步生成。</div>
@@ -271,7 +271,7 @@
               <h2>素材上传</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>先按账户或计划搜索目标，再勾选计划并上传视频素材。</span>
+              <span>搜索目标后勾选计划，再上传视频。</span>
             </div>
           </div>
 
@@ -293,9 +293,9 @@
                 </label>
                 <label class="wide-field">
                   <span>关键词</span>
-                  <input id="uploadKeywordInput" name="query" type="search" placeholder="留空表示当前权限范围内全部计划" />
+                  <input id="uploadKeywordInput" name="query" type="search" placeholder="留空表示当前范围全部计划" />
                 </label>
-                <button type="submit" class="button ghost">搜索目标</button>
+                <button type="submit" class="button ghost">查找</button>
               </form>
               <div class="upload-target-toolbar">
                 <label class="toggle-chip">
@@ -347,7 +347,7 @@
               <h2>归属规则</h2>
             </div>
             <div class="meta-block compact single-line" id="ownershipHeadMeta">
-              <span>这里定义后台的关键词归属口径，关键词命中和人工绑定都会计入排名。</span>
+              <span>维护高级关键词归属、人工绑定和未归属修正。</span>
             </div>
           </div>
           <div class="ownership-layout">
@@ -356,7 +356,7 @@
                 <div>
                   <h3>归属主体列表</h3>
                 </div>
-                <div class="section-range-meta compact-inline">启用的归属规则会参与后台团队排名与素材归属。</div>
+                <div class="section-range-meta compact-inline">启用规则会参与团队排名和素材归属。</div>
               </div>
               <div class="table-shell tall">
                 <table id="employeeManagerTable" class="data-table compact"></table>
@@ -424,7 +424,7 @@
                     </label>
                     <button type="submit" class="button primary">新增关键词</button>
                   </form>
-                  <div id="keywordStatus" class="section-range-meta compact-inline inline-feedback">选择归属主体后，再添加关键词。</div>
+                  <div id="keywordStatus" class="section-range-meta compact-inline inline-feedback">先选归属主体，再加关键词。</div>
                   <div class="table-shell">
                     <table id="keywordTable" class="data-table compact"></table>
                   </div>
@@ -454,7 +454,7 @@
                     </label>
                     <button type="submit" class="button ghost">预览命中</button>
                   </form>
-                  <div id="matchPreviewMeta" class="section-range-meta compact-inline inline-feedback">先选择归属主体，再预览命中结果。</div>
+                  <div id="matchPreviewMeta" class="section-range-meta compact-inline inline-feedback">先选归属主体，再预览命中。</div>
                   <div class="table-shell">
                     <table id="matchPreviewTable" class="data-table compact"></table>
                   </div>
@@ -484,7 +484,7 @@
                     </select>
                   </div>
                 </div>
-                <div id="unassignedMeta" class="section-range-meta compact-inline">按计划页当前时间范围查看未命中归属规则的数据，可直接人工修正。</div>
+                <div id="unassignedMeta" class="section-range-meta compact-inline">查看当前时间范围内未命中归属规则的数据，可直接修正。</div>
                 <div class="table-shell">
                   <table id="unassignedTable" class="data-table compact"></table>
                 </div>
@@ -501,7 +501,7 @@
               <h2>账号与权限</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>管理员维护账号、角色、主管账户范围和运营关键词。</span>
+              <span>管理员维护账号、范围和运营关键词。</span>
             </div>
           </div>
           <div class="access-layout">
@@ -510,7 +510,7 @@
                 <div>
                   <h3>后台账号</h3>
                 </div>
-                <div class="section-range-meta compact-inline">主管按账户范围，运营按关键词归属查看数据。</div>
+                <div class="section-range-meta compact-inline">主管按账户范围，运营按关键词查看数据。</div>
               </div>
               <div class="table-shell tall">
                 <table id="userTable" class="data-table compact"></table>
@@ -600,7 +600,7 @@
                 </div>
                 <div id="operatorMaterialStatus" class="section-range-meta compact-inline inline-feedback">点击某个运营账号后，再查看当前关键词命中的素材列表。</div>
                 <div class="ownership-inline-form">
-                  <input id="operatorMaterialSearch" type="search" placeholder="搜索素材 / 账户 / 计划 / 视频ID" />
+                  <input id="operatorMaterialSearch" type="search" placeholder="搜索素材 / 计划 / 账户" />
                 </div>
                 <div class="table-shell">
                   <table id="operatorMaterialTable" class="data-table compact"></table>
@@ -661,7 +661,7 @@
                   </label>
                   <label>
                     <span id="ruleTargetLabel">搜索并选择对象</span>
-                    <input id="ruleTargetSearchInput" type="text" list="ruleTargetOptions" placeholder="输入关键词搜索候选对象，留空表示全部" autocomplete="off" />
+                    <input id="ruleTargetSearchInput" type="text" list="ruleTargetOptions" placeholder="输入关键词搜索对象，留空表示全部" autocomplete="off" />
                     <input name="target_id" id="ruleTargetInput" type="hidden" />
                     <datalist id="ruleTargetOptions"></datalist>
                   </label>
