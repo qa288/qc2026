@@ -1532,6 +1532,16 @@ body {
   line-height: 1.5;
 }
 
+.signal-form-hint[data-tone="success"] {
+  background: rgba(21, 115, 71, 0.08);
+  color: #157347;
+}
+
+.signal-form-hint[data-tone="warn"] {
+  background: rgba(178, 106, 0, 0.09);
+  color: #b26a00;
+}
+
 .signal-form-hint.compact {
   padding: 10px 12px;
 }

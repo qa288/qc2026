@@ -483,6 +483,9 @@ function resetRuleFormState() {
   if (ruleFormSubmitButton) ruleFormSubmitButton.textContent = "新增规则";
   if (ruleFormCancelButton) ruleFormCancelButton.classList.add("hidden");
   syncRuleFormFields();
+  if (ruleFormHint) {
+    ruleFormHint.dataset.tone = "neutral";
+  }
 }
 
 function fillRuleForm(rule) {
@@ -536,6 +539,9 @@ function syncRuleFormFields() {
     const targetLabel = targetOptions.length ? `可选对象 ${formatNumber(targetOptions.length)} 个` : "当前暂无可选对象";
     const minSpendLabel = config.supportsMinSpend ? "支持最低消耗门槛" : "当前对象不使用最低消耗";
     ruleFormHint.textContent = `${modeLabel} · ${config.label}规则 · ${targetLabel} · ${minSpendLabel}`;
+    if (!ruleFormHint.dataset.tone || ruleFormHint.dataset.tone === "neutral") {
+      ruleFormHint.dataset.tone = "neutral";
+    }
   }
 }
 
@@ -1210,10 +1216,10 @@ function renderEmployeeTable(rows) {
   });
   const columns = [
     { key: "employee_name", label: "归属人", sortable: true },
+    { key: "stat_cost", label: "消耗", sortable: true },
     { key: "pay_amount", label: "支付", sortable: true },
     { key: "order_count", label: "订单", sortable: true },
     { key: "roi", label: "ROI", sortable: true },
-    { key: "stat_cost", label: "消耗", sortable: true },
     { key: "advertiser_count", label: "账户数", sortable: true },
     { key: "product_count", label: "商品数", sortable: true },
     { key: "plan_count", label: "计划数", sortable: true },
@@ -1226,10 +1232,10 @@ function renderEmployeeTable(rows) {
       ${sorted.map((row) => `
         <tr data-employee-name="${escapeHtml(row.employee_name)}" class="${state.selectedEmployeeName === row.employee_name ? "active-row" : ""}">
           <td>${escapeHtml(row.employee_name)}</td>
+          <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
-          <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatNumber(row.advertiser_count)}</td>
           <td class="mono">${formatNumber(row.product_count)}</td>
           <td class="mono">${formatNumber(row.plan_count)}</td>
@@ -1260,10 +1266,10 @@ function renderProductTable(rows) {
   });
   const columns = [
     { key: "product_name", label: "商品", sortable: true },
+    { key: "stat_cost", label: "消耗", sortable: true },
     { key: "order_count", label: "订单", sortable: true },
     { key: "pay_amount", label: "支付", sortable: true },
     { key: "roi", label: "ROI", sortable: true },
-    { key: "stat_cost", label: "消耗", sortable: true },
     { key: "advertiser_count", label: "账户数", sortable: true },
     { key: "employee_count", label: "归属人数", sortable: true },
     { key: "plan_count", label: "计划数", sortable: true },
@@ -1276,10 +1282,10 @@ function renderProductTable(rows) {
       ${sorted.map((row) => `
         <tr data-product-key="${escapeHtml(row.product_key)}" class="${state.selectedProductKey === row.product_key ? "active-row" : ""}">
           <td>${escapeHtml(row.product_name)}</td>
+          <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
-          <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatNumber(row.advertiser_count)}</td>
           <td class="mono">${formatNumber(row.employee_count)}</td>
           <td class="mono">${formatNumber(row.plan_count)}</td>
@@ -1370,11 +1376,11 @@ function renderMaterialTable(rows) {
   });
   const columns = [
     { key: "material_name", label: "素材", sortable: true },
+    { key: "stat_cost", label: "消耗", sortable: true },
     { key: "material_type", label: "类型", sortable: true },
     { key: "order_count", label: "订单", sortable: true },
     { key: "pay_amount", label: "支付", sortable: true },
     { key: "roi", label: "ROI", sortable: true },
-    { key: "stat_cost", label: "消耗", sortable: true },
     { key: "plan_count", label: "计划数", sortable: true },
     { key: "advertiser_count", label: "账户数", sortable: true },
   ];
@@ -1391,11 +1397,11 @@ function renderMaterialTable(rows) {
               <span class="cell-subitem" title="视频 ID：${escapeHtml(row.video_id || "-")}">VID ${escapeHtml(truncateMiddle(row.video_id || "-", 8, 6))}</span>
             </div>
           </td>
+          <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td><span class="pill">${escapeHtml(row.material_type || "-")}</span></td>
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
-          <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatNumber(row.plan_count)}</td>
           <td class="mono">${formatNumber(row.advertiser_count)}</td>
         </tr>
@@ -1748,7 +1754,7 @@ function renderRuleTable(rules) {
             <button class="button ghost delete-rule" data-id="${rule.id}">删除</button>
           </td>
         </tr>
-      `).join("") : '<tr><td colspan="8" class="empty-cell">还没有预警规则，先从账户余额、共享钱包、消耗或爆单规则开始。</td></tr>'}
+      `).join("") : '<tr><td colspan="9" class="empty-cell">还没有预警规则，先从账户余额、共享钱包、消耗或爆单规则开始。</td></tr>'}
     </tbody>
   `;
 
@@ -2724,6 +2730,7 @@ function bindInputs() {
       ruleForm.querySelector('input[name="target_id"]').value = "";
       if (ruleFormHint) {
         ruleFormHint.textContent = `已套用 ${button.textContent.trim()} 模板，可继续补充具体对象和阈值。`;
+        ruleFormHint.dataset.tone = "neutral";
       }
     });
   });
@@ -2783,8 +2790,13 @@ function bindInputs() {
       window.alert(errorPayload.detail || "保存规则失败");
       return;
     }
+    const savedLabel = payload.entity_type ? entityLabel(payload.entity_type) : String(form.get("entity_type") || "规则");
     resetRuleFormState();
     await fetchDashboard();
+    if (ruleFormHint) {
+      ruleFormHint.textContent = `已保存${savedLabel}规则。继续新增规则，或到下方列表调整状态。`;
+      ruleFormHint.dataset.tone = "success";
+    }
   });
 
   syncButton.addEventListener("click", async () => {
