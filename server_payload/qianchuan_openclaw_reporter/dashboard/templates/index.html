@@ -133,7 +133,7 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h2>商品与归属人排名</h2>
+              <h2 id="breakdownTitle">商品与团队排名</h2>
             </div>
             <div class="toolbar">
               <div class="range-filter-group">
@@ -157,16 +157,16 @@
             <div class="rank-panel">
               <div class="rank-panel-head">
                 <div>
-                  <h3>归属人排名</h3>
+                  <h3 id="teamPanelTitle">团队排名</h3>
                 </div>
-                <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索归属人 / 代表计划" />
+                <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索运营账号 / 代表计划" />
               </div>
               <div class="table-shell rank-table-shell">
                 <table id="employeeTable" class="data-table compact"></table>
               </div>
-              <div id="employeeDetail" class="detail-panel empty">点击归属人行，查看该归属人当前负责的计划规模和核心表现。</div>
+              <div id="employeeDetail" class="detail-panel empty">点击团队行，查看该运营账号当前负责的计划规模和核心表现。</div>
             </div>
-            <div class="rank-panel">
+            <div class="rank-panel" id="productRankPanel">
               <div class="rank-panel-head">
                 <div>
                   <h3>商品排名</h3>

@@ -111,6 +111,9 @@ const accountSearch = document.getElementById("accountSearch");
 const planSearch = document.getElementById("planSearch");
 const employeeSearch = document.getElementById("employeeSearch");
 const productSearch = document.getElementById("productSearch");
+const breakdownTitle = document.getElementById("breakdownTitle");
+const teamPanelTitle = document.getElementById("teamPanelTitle");
+const productRankPanel = document.getElementById("productRankPanel");
 const materialSearch = document.getElementById("materialSearch");
 const planAccountFilter = document.getElementById("planAccountFilter");
 const notificationForm = document.getElementById("notificationForm");
@@ -944,11 +947,21 @@ function renderAlertSummary(events) {
 
 function renderKpis(latest) {
   const summary = latest?.summary || {};
+  const operatorMode = String(state.session?.role || "") === "operator"
+    || Number(summary.operator_count || 0) > 0
+    || Number(summary.active_operator_count || 0) > 0;
+  const teamLabel = operatorMode ? "运营账号" : "归属人";
+  const activeTeamCount = operatorMode
+    ? formatNumber(summary.active_operator_count)
+    : formatNumber(summary.active_employee_count);
+  const totalTeamCount = operatorMode
+    ? formatNumber(summary.operator_count)
+    : formatNumber(summary.employee_count);
   const cards = [
     ["活跃账户", formatNumber(summary.active_account_count), `总账户 ${formatNumber(summary.account_count)}`],
     ["活跃计划", formatNumber(summary.active_plan_count), `总计划 ${formatNumber(summary.plan_count)}`],
     ["活跃商品", formatNumber(summary.active_product_count), `总商品 ${formatNumber(summary.product_count)}`],
-    ["活跃归属人", formatNumber(summary.active_employee_count), `总归属人 ${formatNumber(summary.employee_count)}`],
+    [`活跃${teamLabel}`, activeTeamCount, `总${teamLabel} ${totalTeamCount}`],
   ];
   kpiGrid.innerHTML = cards.map(([label, value, sub]) => `
     <article class="kpi-card">
@@ -962,6 +975,13 @@ function renderKpis(latest) {
 function renderOverviewHero(latest) {
   if (!overviewHeroCard) return;
   const summary = latest?.summary || {};
+  const operatorMode = String(state.session?.role || "") === "operator"
+    || Number(summary.operator_count || 0) > 0
+    || Number(summary.active_operator_count || 0) > 0;
+  const teamLabel = operatorMode ? "运营账号" : "归属人";
+  const activeTeamCount = operatorMode
+    ? formatNumber(summary.active_operator_count)
+    : formatNumber(summary.active_employee_count);
   const accountFailures = Number(summary.account_failures || 0);
   const planFailures = Number(summary.plan_failures || 0);
   const accountTone = accountFailures ? "danger" : "ok";
@@ -999,9 +1019,36 @@ function renderOverviewHero(latest) {
       <div class="overview-foot-stat"><span>活跃账户</span><strong class="mono">${formatNumber(summary.active_account_count)}</strong></div>
       <div class="overview-foot-stat"><span>活跃计划</span><strong class="mono">${formatNumber(summary.active_plan_count)}</strong></div>
       <div class="overview-foot-stat"><span>活跃商品</span><strong class="mono">${formatNumber(summary.active_product_count)}</strong></div>
-      <div class="overview-foot-stat"><span>活跃归属人</span><strong class="mono">${formatNumber(summary.active_employee_count)}</strong></div>
+      <div class="overview-foot-stat"><span>活跃${escapeHtml(teamLabel)}</span><strong class="mono">${activeTeamCount}</strong></div>
     </div>
   `;
+}
+
+function breakdownUsesOperators(payload) {
+  return String(state.session?.role || "") === "operator"
+    || (Array.isArray(payload?.operators) && payload.operators.length > 0)
+    || Number(payload?.summary?.operator_count || 0) > 0
+    || Number(payload?.summary?.active_operator_count || 0) > 0;
+}
+
+function breakdownRows(payload) {
+  return breakdownUsesOperators(payload) ? (payload?.operators || []) : (payload?.employees || []);
+}
+
+function breakdownEntityName(row) {
+  return String(row?.operator_name || row?.employee_name || "");
+}
+
+function breakdownEntityLabel(payload) {
+  return breakdownUsesOperators(payload) ? "运营账号" : "归属人";
+}
+
+function breakdownSearchPlaceholder(payload) {
+  return breakdownUsesOperators(payload) ? "搜索运营账号 / 用户名 / 代表计划" : "搜索归属人 / 代表计划";
+}
+
+function breakdownDetailEmptyCopy(payload) {
+  return `点击${breakdownEntityLabel(payload)}行，查看该${breakdownEntityLabel(payload)}当前负责的计划规模和核心表现。`;
 }
 
 function renderSystemCards(latest, extendedSync, tokenInfo) {
@@ -1163,7 +1210,7 @@ function renderAccountTable(accounts) {
 
 function clearEmployeeDetail() {
   employeeDetail.className = "detail-panel empty";
-  employeeDetail.textContent = "点击归属人行，查看该归属人当前负责的计划规模和核心表现。";
+  employeeDetail.textContent = breakdownDetailEmptyCopy(rangePayload(sectionFilter("breakdown")));
 }
 
 function clearProductDetail() {
@@ -1173,13 +1220,33 @@ function clearProductDetail() {
 
 function renderEmployeeDetail(employeeName) {
   const breakdownFilter = sectionFilter("breakdown");
-  const rows = rangePayload(breakdownFilter)?.employees || [];
-  const row = rows.find((item) => item.employee_name === employeeName);
+  const payload = rangePayload(breakdownFilter);
+  const rows = breakdownRows(payload);
+  const row = rows.find((item) => breakdownEntityName(item) === employeeName);
   if (!row) return;
+  const operatorMode = breakdownUsesOperators(payload);
+  const entityLabel = breakdownEntityLabel(payload);
   employeeDetail.className = "detail-panel";
+  if (operatorMode) {
+    employeeDetail.innerHTML = `
+      <div class="detail-stats">
+        <div class="detail-stat detail-stat-wide"><span class="label">${escapeHtml(entityLabel)}</span><span class="value compact">${escapeHtml(row.operator_name || "-")}</span></div>
+        <div class="detail-stat"><span class="label">登录账号</span><span class="value compact mono">${escapeHtml(row.operator_username || "-")}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+        <div class="detail-stat"><span class="label">覆盖账户</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
+        <div class="detail-stat"><span class="label">关键词数</span><span class="value mono">${formatNumber(row.keyword_count)}</span></div>
+        <div class="detail-stat"><span class="label">总计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
+        <div class="detail-stat detail-stat-wide"><span class="label">代表计划</span><span class="value compact">${escapeHtml(row.top_plan_name || "暂无代表计划")}</span></div>
+      </div>
+    `;
+    return;
+  }
   employeeDetail.innerHTML = `
     <div class="detail-stats">
-      <div class="detail-stat detail-stat-wide"><span class="label">归属人</span><span class="value compact">${escapeHtml(row.employee_name)}</span></div>
+      <div class="detail-stat detail-stat-wide"><span class="label">${escapeHtml(entityLabel)}</span><span class="value compact">${escapeHtml(row.employee_name)}</span></div>
       <div class="detail-stat"><span class="label">归属来源</span><span class="value compact">${escapeHtml(employeeSourceLabel(row.employee_source))}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
@@ -1240,7 +1307,7 @@ function syncSelectedEmployee(rows) {
     clearEmployeeDetail();
     return;
   }
-  const exists = rows.some((item) => item.employee_name === state.selectedEmployeeName);
+  const exists = rows.some((item) => breakdownEntityName(item) === state.selectedEmployeeName);
   if (!exists) {
     setSelectedEmployee(null);
     return;
@@ -1280,38 +1347,57 @@ function renderProductInteractions(rows) {
 }
 
 function renderEmployeeTable(rows) {
+  const payload = rangePayload(sectionFilter("breakdown"));
+  const operatorMode = breakdownUsesOperators(payload);
+  const entityLabel = breakdownEntityLabel(payload);
   const query = employeeSearch.value.trim().toLowerCase();
   const visibleRows = rows.filter((row) => {
-    const haystack = [row.employee_name, row.top_plan_name].join(" ").toLowerCase();
+    const haystack = operatorMode
+      ? [row.operator_name, row.operator_username, row.top_plan_name].join(" ").toLowerCase()
+      : [row.employee_name, row.top_plan_name].join(" ").toLowerCase();
     return haystack.includes(query);
   });
-  const columns = [
-    { key: "employee_name", label: "归属人", sortable: true },
-    { key: "stat_cost", label: "消耗", sortable: true },
-    { key: "pay_amount", label: "支付", sortable: true },
-    { key: "order_count", label: "订单", sortable: true },
-    { key: "roi", label: "ROI", sortable: true },
-    { key: "advertiser_count", label: "账户数", sortable: true },
-    { key: "product_count", label: "商品数", sortable: true },
-    { key: "plan_count", label: "计划数", sortable: true },
-  ];
+  const columns = operatorMode
+    ? [
+        { key: "operator_name", label: entityLabel, sortable: true },
+        { key: "stat_cost", label: "消耗", sortable: true },
+        { key: "pay_amount", label: "支付", sortable: true },
+        { key: "order_count", label: "订单", sortable: true },
+        { key: "roi", label: "ROI", sortable: true },
+        { key: "advertiser_count", label: "账户数", sortable: true },
+        { key: "keyword_count", label: "关键词数", sortable: true },
+        { key: "plan_count", label: "计划数", sortable: true },
+      ]
+    : [
+        { key: "employee_name", label: entityLabel, sortable: true },
+        { key: "stat_cost", label: "消耗", sortable: true },
+        { key: "pay_amount", label: "支付", sortable: true },
+        { key: "order_count", label: "订单", sortable: true },
+        { key: "roi", label: "ROI", sortable: true },
+        { key: "advertiser_count", label: "账户数", sortable: true },
+        { key: "product_count", label: "商品数", sortable: true },
+        { key: "plan_count", label: "计划数", sortable: true },
+      ];
   const sorted = sortRows(visibleRows, state.employeeSort);
 
   employeeTable.innerHTML = `
     ${makeHeader(columns, state.employeeSort, "employee-sort")}
     <tbody>
-      ${sorted.map((row) => `
-        <tr data-employee-name="${escapeHtml(row.employee_name)}" class="${state.selectedEmployeeName === row.employee_name ? "active-row" : ""}">
-          <td>${escapeHtml(row.employee_name)}</td>
-          <td class="mono">${formatMoney(row.stat_cost)}</td>
-          <td class="mono">${formatMoney(row.pay_amount)}</td>
-          <td class="mono">${formatNumber(row.order_count)}</td>
-          <td class="mono">${formatRate(row.roi)}</td>
-          <td class="mono">${formatNumber(row.advertiser_count)}</td>
-          <td class="mono">${formatNumber(row.product_count)}</td>
-          <td class="mono">${formatNumber(row.plan_count)}</td>
-        </tr>
-      `).join("")}
+      ${sorted.map((row) => {
+        const entityName = breakdownEntityName(row);
+        return `
+          <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
+            <td>${escapeHtml(entityName)}</td>
+            <td class="mono">${formatMoney(row.stat_cost)}</td>
+            <td class="mono">${formatMoney(row.pay_amount)}</td>
+            <td class="mono">${formatNumber(row.order_count)}</td>
+            <td class="mono">${formatRate(row.roi)}</td>
+            <td class="mono">${formatNumber(row.advertiser_count)}</td>
+            <td class="mono">${formatNumber(operatorMode ? row.keyword_count : row.product_count)}</td>
+            <td class="mono">${formatNumber(row.plan_count)}</td>
+          </tr>
+        `;
+      }).join("")}
     </tbody>
   `;
 
@@ -2024,11 +2110,14 @@ function applyRoleViewPolicy() {
   if (materialsTab) {
     materialsTab.textContent = role === "operator" ? "我的素材" : "素材";
   }
+  if (productRankPanel) {
+    productRankPanel.classList.toggle("hidden", role === "operator");
+  }
   if (heroCopy) {
     heroCopy.textContent = admin
-      ? "账户、计划、素材、运营账号与预警管理。"
+      ? "账户、计划、素材、团队排名与预警管理。"
       : role === "supervisor"
-        ? "查看授权账户范围内的账户、计划与素材表现。"
+        ? "查看授权账户范围内的账户、计划、素材与团队表现。"
         : "查看我的素材和团队排名，跟踪当天消耗与归属情况。";
   }
   const allowedViews = admin
@@ -2718,14 +2807,23 @@ function renderPerformanceSections() {
   accountRangeMeta.textContent = formatDateWindowMeta(accountPayload);
   planRangeMeta.textContent = formatDateWindowMeta(planPayload);
   breakdownRangeMeta.textContent = formatDateWindowMeta(breakdownPayload);
+  if (breakdownTitle) {
+    breakdownTitle.textContent = breakdownUsesOperators(breakdownPayload) ? "商品与团队排名" : "商品与归属人排名";
+  }
+  if (teamPanelTitle) {
+    teamPanelTitle.textContent = breakdownUsesOperators(breakdownPayload) ? "团队排名" : "归属人排名";
+  }
+  if (employeeSearch) {
+    employeeSearch.placeholder = breakdownSearchPlaceholder(breakdownPayload);
+  }
 
   renderAccountTable(accountPayload?.accounts || []);
   fillPlanAccountFilter((planPayload?.accounts || []).map((row) => row.advertiser_name));
   renderPlanTable(planPayload?.plans || []);
-  renderEmployeeTable(breakdownPayload?.employees || []);
+  renderEmployeeTable(breakdownRows(breakdownPayload));
   renderProductTable(breakdownPayload?.products || []);
   syncSelectedPlan(planPayload?.plans || []);
-  syncSelectedEmployee(breakdownPayload?.employees || []);
+  syncSelectedEmployee(breakdownRows(breakdownPayload));
   syncSelectedProduct(breakdownPayload?.products || []);
 }
 
@@ -2838,7 +2936,7 @@ function bindInputs() {
 
   accountSearch.addEventListener("input", () => renderAccountTable(rangePayload(sectionFilter("account"))?.accounts || []));
   planSearch.addEventListener("input", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
-  employeeSearch.addEventListener("input", () => renderEmployeeTable(rangePayload(sectionFilter("breakdown"))?.employees || []));
+  employeeSearch.addEventListener("input", () => renderEmployeeTable(breakdownRows(rangePayload(sectionFilter("breakdown")))));
   productSearch.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
   materialSearch.addEventListener("input", () => renderMaterialTable(materialRangePayload(sectionFilter("material"))?.items || []));
   planAccountFilter.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));

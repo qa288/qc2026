@@ -820,7 +820,8 @@ class DashboardService:
     def allowed_advertiser_ids_for_user(self, user: dict[str, Any] | None) -> set[int] | None:
         if not user:
             return None
-        if str(user.get("role") or "") == ROLE_ADMIN:
+        role = str(user.get("role") or "")
+        if role in {ROLE_ADMIN, ROLE_OPERATOR}:
             return None
         with self.db() as conn:
             rows = conn.execute(
@@ -1886,6 +1887,104 @@ class DashboardService:
         bindings = [item for item in bindings if int(item["employee_id"]) in employees]
         return employees, keywords, bindings
 
+    def _active_operator_config(self) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+        with self.db() as conn:
+            users = {
+                int(row["id"]): {
+                    "id": int(row["id"]),
+                    "username": str(row["username"] or "").strip(),
+                    "display_name": str(row["display_name"] or "").strip() or str(row["username"] or "").strip(),
+                }
+                for row in conn.execute(
+                    """
+                    SELECT id, username, display_name
+                    FROM app_users
+                    WHERE role = ? AND enabled = 1
+                    ORDER BY COALESCE(display_name, username) ASC, id ASC
+                    """,
+                    (ROLE_OPERATOR,),
+                ).fetchall()
+            }
+            keywords = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT id, user_id, keyword, enabled
+                    FROM user_keywords
+                    WHERE enabled = 1
+                    ORDER BY LENGTH(keyword) DESC, keyword ASC, id ASC
+                    """
+                ).fetchall()
+            ]
+        keywords = [item for item in keywords if int(item["user_id"]) in users]
+        return users, keywords
+
+    def _match_operator_candidates(
+        self,
+        texts: list[str],
+        operators: dict[int, dict[str, Any]],
+        keywords: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        haystack = self._normalize_match_text(*texts)
+        if not haystack:
+            return []
+        matches: dict[int, dict[str, Any]] = {}
+        for row in keywords:
+            keyword_text = str(row.get("keyword") or "").strip()
+            if not keyword_text or keyword_text.casefold() not in haystack:
+                continue
+            operator_id = int(row["user_id"])
+            operator = operators.get(operator_id)
+            if not operator:
+                continue
+            item = matches.setdefault(
+                operator_id,
+                {
+                    "operator_id": operator_id,
+                    "operator_name": str(operator["display_name"]),
+                    "operator_username": str(operator["username"]),
+                    "matched_keywords": set(),
+                },
+            )
+            item["matched_keywords"].add(keyword_text)
+        return sorted(matches.values(), key=lambda item: (str(item["operator_name"]), int(item["operator_id"])))
+
+    def _matched_operators_for_plan(
+        self,
+        row: dict[str, Any],
+        operators: dict[int, dict[str, Any]],
+        keywords: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return self._match_operator_candidates(
+            [
+                str(row.get("advertiser_name") or "").strip(),
+                str(row.get("ad_name") or "").strip(),
+                str(row.get("product_name") or "").strip(),
+                str(row.get("product_id") or "").strip(),
+                str(row.get("anchor_name") or "").strip(),
+            ],
+            operators,
+            keywords,
+        )
+
+    def _matched_operators_for_material(
+        self,
+        row: dict[str, Any],
+        operators: dict[int, dict[str, Any]],
+        keywords: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return self._match_operator_candidates(
+            [
+                str(row.get("material_name") or "").strip(),
+                str(row.get("material_id") or "").strip(),
+                str(row.get("video_id") or "").strip(),
+                str(row.get("top_plan_name") or "").strip(),
+                str(row.get("top_account_name") or "").strip(),
+            ],
+            operators,
+            keywords,
+        )
+
     def _keyword_candidate(
         self,
         employee: dict[str, Any],
@@ -2278,6 +2377,84 @@ class DashboardService:
         rows.sort(key=lambda item: (-item["pay_amount"], -item["order_count"], -item["roi"], -item["stat_cost"], item["employee_name"]))
         return rows
 
+    def _build_operator_rankings(self, plans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        operators, keywords = self._active_operator_config()
+        if not operators or not keywords:
+            return []
+        groups: dict[int, dict[str, Any]] = {}
+        for row in plans:
+            matches = self._matched_operators_for_plan(row, operators, keywords)
+            if not matches:
+                continue
+            stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+            order_count = int(float(row.get("order_count", 0.0) or 0.0))
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            ad_id = int(row.get("ad_id", 0) or 0)
+            for match in matches:
+                operator_id = int(match["operator_id"])
+                group = groups.setdefault(
+                    operator_id,
+                    {
+                        "operator_id": operator_id,
+                        "operator_name": str(match["operator_name"]),
+                        "operator_username": str(match["operator_username"]),
+                        "stat_cost": 0.0,
+                        "pay_amount": 0.0,
+                        "order_count": 0,
+                        "plan_ids": set(),
+                        "advertiser_ids": set(),
+                        "matched_keywords": set(),
+                        "top_plan_name": "",
+                        "top_plan_orders": -1,
+                        "top_plan_pay_amount": -1.0,
+                    },
+                )
+                group["stat_cost"] = round(group["stat_cost"] + stat_cost, 2)
+                group["pay_amount"] = round(group["pay_amount"] + pay_amount, 2)
+                group["order_count"] += order_count
+                if ad_id:
+                    group["plan_ids"].add(ad_id)
+                if advertiser_id:
+                    group["advertiser_ids"].add(advertiser_id)
+                group["matched_keywords"].update(match["matched_keywords"])
+                if (
+                    order_count > group["top_plan_orders"]
+                    or (order_count == group["top_plan_orders"] and pay_amount > group["top_plan_pay_amount"])
+                ):
+                    group["top_plan_name"] = str(row.get("ad_name") or "").strip()
+                    group["top_plan_orders"] = order_count
+                    group["top_plan_pay_amount"] = pay_amount
+
+        rows: list[dict[str, Any]] = []
+        for group in groups.values():
+            roi = round(group["pay_amount"] / group["stat_cost"], 2) if group["stat_cost"] > 0 else 0.0
+            rows.append(
+                {
+                    "operator_id": group["operator_id"],
+                    "operator_name": group["operator_name"],
+                    "operator_username": group["operator_username"],
+                    "stat_cost": group["stat_cost"],
+                    "pay_amount": group["pay_amount"],
+                    "order_count": group["order_count"],
+                    "plan_count": len(group["plan_ids"]),
+                    "advertiser_count": len(group["advertiser_ids"]),
+                    "keyword_count": len(group["matched_keywords"]),
+                    "top_plan_name": group["top_plan_name"],
+                    "roi": roi,
+                }
+            )
+        rows.sort(
+            key=lambda item: (
+                -float(item["stat_cost"]),
+                -float(item["pay_amount"]),
+                -int(item["order_count"]),
+                -float(item["roi"]),
+                str(item["operator_name"]),
+            )
+        )
+        return rows
+
     def _group_material_rows(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -2342,6 +2519,8 @@ class DashboardService:
                     "order_count": group["order_count"],
                     "plan_count": len(group["plan_ids"]),
                     "advertiser_count": len(group["advertiser_ids"]),
+                    "plan_ids": sorted(int(item) for item in group["plan_ids"] if int(item or 0)),
+                    "advertiser_ids": sorted(int(item) for item in group["advertiser_ids"] if int(item or 0)),
                     "is_original": bool(group["is_original"]),
                     "top_plan_name": group["top_plan_name"],
                     "top_account_name": group["top_account_name"],
@@ -2460,6 +2639,8 @@ class DashboardService:
                     "order_count": order_count,
                     "plan_count": len(group["plan_ids"]),
                     "advertiser_count": len(group["advertiser_ids"]),
+                    "plan_ids": sorted(int(item) for item in group["plan_ids"] if int(item or 0)),
+                    "advertiser_ids": sorted(int(item) for item in group["advertiser_ids"] if int(item or 0)),
                     "is_original": bool(group.get("is_original")),
                     "top_plan_name": str(group.get("top_plan_name") or ""),
                     "top_account_name": str(group.get("top_account_name") or ""),
@@ -2479,14 +2660,17 @@ class DashboardService:
 
     def _rankings_bundle(
         self, summary: dict[str, Any], accounts: list[dict[str, Any]], plans: list[dict[str, Any]]
-    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         products = self._build_product_rankings(plans)
         employees = self._build_employee_rankings(plans)
+        operators = self._build_operator_rankings(plans)
         enriched_summary = dict(summary)
         enriched_summary["product_count"] = len(products)
         enriched_summary["active_product_count"] = sum(1 for item in products if float(item["stat_cost"]) > 0)
         enriched_summary["employee_count"] = len(employees)
         enriched_summary["active_employee_count"] = sum(1 for item in employees if float(item["stat_cost"]) > 0)
+        enriched_summary["operator_count"] = len(operators)
+        enriched_summary["active_operator_count"] = sum(1 for item in operators if float(item["stat_cost"]) > 0)
         enriched_summary["account_count"] = enriched_summary.get("account_count", len(accounts))
         enriched_summary["active_account_count"] = enriched_summary.get(
             "active_account_count",
@@ -2497,7 +2681,7 @@ class DashboardService:
             "active_plan_count",
             sum(1 for item in plans if float(item.get("stat_cost", 0.0) or 0.0) > 0),
         )
-        return enriched_summary, products, employees
+        return enriched_summary, products, employees, operators
 
     @staticmethod
     def _scoped_summary(accounts: list[dict[str, Any]], plans: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2519,6 +2703,90 @@ class DashboardService:
             "account_failures": sum(1 for item in accounts if not bool(item.get("ok", True))),
             "plan_failures": 0,
         }
+
+    def _aggregate_accounts_from_plans(
+        self,
+        plans: list[dict[str, Any]],
+        account_catalog: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        catalog = {int(item.get("advertiser_id", 0) or 0): dict(item) for item in (account_catalog or [])}
+        groups: dict[int, dict[str, Any]] = {}
+        for row in plans:
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            if not advertiser_id:
+                continue
+            base = catalog.get(advertiser_id, {})
+            group = groups.setdefault(
+                advertiser_id,
+                {
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": str(row.get("advertiser_name") or base.get("advertiser_name") or advertiser_id),
+                    "ok": bool(base.get("ok", True)),
+                    "status": str(base.get("status") or ""),
+                    "stat_cost": 0.0,
+                    "pay_amount": 0.0,
+                    "order_count": 0,
+                },
+            )
+            group["stat_cost"] = round(group["stat_cost"] + float(row.get("stat_cost", 0.0) or 0.0), 2)
+            group["pay_amount"] = round(group["pay_amount"] + float(row.get("pay_amount", 0.0) or 0.0), 2)
+            group["order_count"] += int(float(row.get("order_count", 0.0) or 0.0))
+        rows: list[dict[str, Any]] = []
+        for item in groups.values():
+            stat_cost = round(float(item.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(item.get("pay_amount", 0.0) or 0.0), 2)
+            row = dict(item)
+            row["roi"] = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            rows.append(row)
+        rows.sort(key=lambda item: (-float(item.get("stat_cost", 0.0) or 0.0), int(item.get("advertiser_id", 0) or 0)))
+        return rows
+
+    def _filter_plans_for_operator(self, plans: list[dict[str, Any]], user_id: int) -> list[dict[str, Any]]:
+        operators, keywords = self._active_operator_config()
+        if int(user_id or 0) not in operators:
+            return []
+        result: list[dict[str, Any]] = []
+        for row in plans:
+            matches = self._matched_operators_for_plan(row, operators, keywords)
+            if any(int(item["operator_id"]) == int(user_id) for item in matches):
+                result.append(dict(row))
+        return result
+
+    def _filter_material_items_for_operator(self, items: list[dict[str, Any]], user_id: int) -> list[dict[str, Any]]:
+        operators, keywords = self._active_operator_config()
+        if int(user_id or 0) not in operators:
+            return []
+        result: list[dict[str, Any]] = []
+        for row in items:
+            matches = self._matched_operators_for_material(row, operators, keywords)
+            if any(int(item["operator_id"]) == int(user_id) for item in matches):
+                result.append(dict(row))
+        return result
+
+    def _apply_operator_scope(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        user_id = int(user.get("id", 0) or 0)
+        operator_plans = self._filter_plans_for_operator(payload.get("plans", []), user_id)
+        operator_accounts = self._aggregate_accounts_from_plans(operator_plans, payload.get("accounts", []))
+        next_payload = dict(payload)
+        next_payload["accounts"] = operator_accounts
+        next_payload["plans"] = operator_plans
+        next_payload["accountBalances"] = []
+        next_payload["sharedWallets"] = []
+        next_payload["walletRelations"] = []
+        next_payload["summary"], next_payload["products"], next_payload["employees"], _operators = self._rankings_bundle(
+            self._scoped_summary(operator_accounts, operator_plans),
+            operator_accounts,
+            operator_plans,
+        )
+        next_payload["operators"] = payload.get("operators", [])
+        return next_payload
+
+    def _apply_material_scope(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        if str(user.get("role") or "") != ROLE_OPERATOR:
+            return payload
+        next_payload = dict(payload)
+        next_payload["items"] = self._filter_material_items_for_operator(payload.get("items", []), int(user.get("id", 0) or 0))
+        return next_payload
 
     def _apply_account_scope(
         self, payload: dict[str, Any], allowed_advertiser_ids: set[int] | None
@@ -2544,7 +2812,7 @@ class DashboardService:
         next_payload["accountBalances"] = account_balances
         next_payload["walletRelations"] = wallet_relations
         next_payload["sharedWallets"] = shared_wallets
-        next_payload["summary"], next_payload["products"], next_payload["employees"] = self._rankings_bundle(
+        next_payload["summary"], next_payload["products"], next_payload["employees"], next_payload["operators"] = self._rankings_bundle(
             self._scoped_summary(accounts, plans),
             accounts,
             plans,
@@ -3940,7 +4208,7 @@ class DashboardService:
             account_balance_items = self._snapshot_account_balances(conn, snapshot_time)
             shared_wallet_items = self._snapshot_shared_wallets(conn, snapshot_time)
             wallet_relation_items = self._snapshot_wallet_relations(conn, snapshot_time)
-            summary_payload, products, employees = self._rankings_bundle(
+            summary_payload, products, employees, operators = self._rankings_bundle(
                 dict(summary),
                 account_items,
                 plan_items,
@@ -3961,6 +4229,7 @@ class DashboardService:
                 "walletRelations": wallet_relation_items,
                 "products": products,
                 "employees": employees,
+                "operators": operators,
                 "extendedSync": dict(extended_run) if extended_run else None,
             }
             return self._apply_account_scope(payload, allowed_advertiser_ids)
@@ -4225,7 +4494,7 @@ class DashboardService:
             [self._decorate_plan_item(item) for item in payload["plans"]],
             payload["accounts"],
         )
-        payload["summary"], payload["products"], payload["employees"] = self._rankings_bundle(
+        payload["summary"], payload["products"], payload["employees"], payload["operators"] = self._rankings_bundle(
             payload["summary"],
             payload["accounts"],
             payload["plans"],
@@ -5163,6 +5432,9 @@ async def available_accounts(user: dict[str, Any] = Depends(require_auth)) -> JS
 async def dashboard_data(user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
     allowed = service.allowed_advertiser_ids_for_user(user)
     latest = service.latest_snapshot(allowed)
+    if latest and str(user.get("role") or "") == ROLE_OPERATOR:
+        latest = service._apply_operator_scope(latest, user)
+    is_admin = str(user.get("role") or "") == ROLE_ADMIN
     return JSONResponse(
         {
             "session": {
@@ -5177,11 +5449,11 @@ async def dashboard_data(user: dict[str, Any] = Depends(require_auth)) -> JSONRe
             },
             "latest": latest,
             "extendedSync": service.latest_extended_sync(),
-            "tokenInfo": service.latest_token_payload(masked=True),
+            "tokenInfo": service.latest_token_payload(masked=True) if is_admin else None,
             "summaryHistory": service.summary_history(),
-            "notificationSettings": service.get_notification_settings(),
-            "alertRules": service.list_alert_rules(),
-            "alertEvents": service.alert_events(),
+            "notificationSettings": service.get_notification_settings() if is_admin else {},
+            "alertRules": service.list_alert_rules() if is_admin else [],
+            "alertEvents": service.alert_events() if is_admin else [],
             "timezone": TIMEZONE,
         }
     )
@@ -5197,6 +5469,8 @@ async def performance_data(
     try:
         allowed = service.allowed_advertiser_ids_for_user(user)
         payload = await asyncio.to_thread(service.get_performance_snapshot, range, start_date, end_date, False, allowed)
+        if str(user.get("role") or "") == ROLE_OPERATOR:
+            payload = service._apply_operator_scope(payload, user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(payload)
@@ -5239,18 +5513,24 @@ async def exchange_auth_code(
 
 @app.get("/api/accounts/{advertiser_id}/history")
 async def account_history(advertiser_id: int, user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    if str(user.get("role") or "") == ROLE_OPERATOR:
+        raise HTTPException(status_code=403, detail="operator cannot access account history")
     allowed = service.allowed_advertiser_ids_for_user(user)
     return JSONResponse({"items": service.account_history(advertiser_id, allowed_advertiser_ids=allowed)})
 
 
 @app.get("/api/plans/{ad_id}/history")
 async def plan_history(ad_id: int, user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    if str(user.get("role") or "") == ROLE_OPERATOR:
+        raise HTTPException(status_code=403, detail="operator cannot access plan history")
     allowed = service.allowed_advertiser_ids_for_user(user)
     return JSONResponse({"items": service.plan_history(ad_id, allowed_advertiser_ids=allowed)})
 
 
 @app.get("/api/plans/{ad_id}/assets")
 async def plan_assets(ad_id: int, snapshot_time: str = "", user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    if str(user.get("role") or "") == ROLE_OPERATOR:
+        raise HTTPException(status_code=403, detail="operator cannot access plan assets")
     allowed = service.allowed_advertiser_ids_for_user(user)
     return JSONResponse(service.plan_assets(ad_id, snapshot_time, allowed))
 
@@ -5266,6 +5546,7 @@ async def material_rankings(
     allowed = service.allowed_advertiser_ids_for_user(user)
     try:
         payload = service.material_rankings(range, start_date, end_date, snapshot_time, allowed)
+        payload = service._apply_material_scope(payload, user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(payload)
