@@ -128,6 +128,7 @@ const syncButton = document.getElementById("syncButton");
 const syncExtendedButton = document.getElementById("syncExtendedButton");
 const heroStatusText = document.getElementById("heroStatusText");
 const heroStatusHint = document.getElementById("heroStatusHint");
+const heroCopy = document.getElementById("heroCopy");
 const lastSnapshotText = document.getElementById("lastSnapshotText");
 const refreshHintText = document.getElementById("refreshHintText");
 const systemStatusCard = document.getElementById("systemStatusCard");
@@ -1909,17 +1910,55 @@ function setFormReadOnly(formEl, readOnly) {
 
 function applyRoleViewPolicy() {
   const admin = isAdmin();
+  const role = String(state.session?.role || "");
   const accessTab = viewTabs?.querySelector('[data-view="access"]');
+  const ownershipTab = viewTabs?.querySelector('[data-view="ownership"]');
+  const signalsTab = viewTabs?.querySelector('[data-view="signals"]');
+  const accountTab = viewTabs?.querySelector('[data-view="accounts"]');
+  const planTab = viewTabs?.querySelector('[data-view="plans"]');
+  const breakdownTab = viewTabs?.querySelector('[data-view="breakdown"]');
+  const materialsTab = viewTabs?.querySelector('[data-view="materials"]');
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
   }
-  if (!admin && state.activeView === "access") {
-    setActiveView("overview");
+  if (ownershipTab) {
+    ownershipTab.classList.toggle("hidden", !admin);
+  }
+  if (signalsTab) {
+    signalsTab.classList.toggle("hidden", !admin);
+  }
+  if (accountTab) {
+    accountTab.classList.toggle("hidden", role === "operator");
+  }
+  if (planTab) {
+    planTab.classList.toggle("hidden", role === "operator");
+  }
+  if (breakdownTab) {
+    breakdownTab.textContent = role === "operator" ? "团队排名" : "经营拆解";
+  }
+  if (materialsTab) {
+    materialsTab.textContent = role === "operator" ? "我的素材" : "素材";
+  }
+  if (heroCopy) {
+    heroCopy.textContent = admin
+      ? "账户、计划、素材、运营账号与预警管理。"
+      : role === "supervisor"
+        ? "查看授权账户范围内的账户、计划与素材表现。"
+        : "查看我的素材和团队排名，跟踪当天消耗与归属情况。";
+  }
+  const allowedViews = admin
+    ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "ownership", "access", "signals"])
+    : role === "supervisor"
+      ? new Set(["overview", "accounts", "breakdown", "plans", "materials"])
+      : new Set(["overview", "breakdown", "materials"]);
+  if (!allowedViews.has(state.activeView)) {
+    const fallback = allowedViews.has("overview") ? "overview" : Array.from(allowedViews)[0] || "overview";
+    setActiveView(fallback);
   }
   ownershipReadonlyBanner?.classList.toggle("hidden", admin);
   if (ownershipHeadMeta) {
     ownershipHeadMeta.innerHTML = admin
-      ? "<span>归属人、关键词和人工绑定会直接影响公开页与后台排名。</span>"
+      ? "<span>关键词和人工绑定会直接影响后台团队排名与素材归属。</span>"
       : "<span>当前账号可查看归属结果与命中情况，规则由管理员维护。</span>";
   }
   setFormReadOnly(employeeForm, !admin);

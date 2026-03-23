@@ -4783,7 +4783,7 @@ async def healthz() -> dict[str, str]:
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request) -> HTMLResponse:
     if request.session.get("user_id"):
-        return RedirectResponse("/workbench", status_code=302)
+        return RedirectResponse("/", status_code=302)
     return service.templates.TemplateResponse(
         request=request,
         name="login.html",
@@ -4799,7 +4799,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
         request.session["user_id"] = int(user["id"])
         request.session["username"] = str(user["username"])
         request.session["role"] = str(user["role"])
-        return RedirectResponse("/workbench", status_code=302)
+        return RedirectResponse("/", status_code=302)
     return RedirectResponse("/login?error=1", status_code=302)
 
 
@@ -4810,20 +4810,13 @@ async def logout(request: Request) -> RedirectResponse:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def public_index(request: Request) -> HTMLResponse:
-    return service.templates.TemplateResponse(
-        request=request,
-        name="public.html",
-        context={
-            "request": request,
-            "app_name": APP_NAME,
-            "customer_center_id": service.read_config()["customer_center_id"],
-        },
-    )
-
-
-@app.get("/workbench", response_class=HTMLResponse)
-async def index(request: Request, _user: dict[str, Any] = Depends(require_auth)) -> HTMLResponse:
+async def index(request: Request) -> HTMLResponse:
+    if not request.session.get("user_id"):
+        return RedirectResponse("/login", status_code=302)
+    user = service.get_user_by_id(int(request.session["user_id"]))
+    if not user:
+        request.session.clear()
+        return RedirectResponse("/login", status_code=302)
     return service.templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -4835,13 +4828,21 @@ async def index(request: Request, _user: dict[str, Any] = Depends(require_auth))
     )
 
 
-@app.get("/api/public/employee-rankings")
-async def public_employee_rankings(
+@app.get("/workbench", response_class=HTMLResponse)
+async def legacy_workbench(request: Request) -> RedirectResponse:
+    if not request.session.get("user_id"):
+        return RedirectResponse("/login", status_code=302)
+    return RedirectResponse("/", status_code=302)
+
+
+@app.get("/api/operator-rankings")
+async def operator_rankings(
     range: str = "day",
     start_date: str = "",
     end_date: str = "",
     sort_key: str = "stat_cost",
     sort_dir: str = "desc",
+    _user: dict[str, Any] = Depends(require_auth),
 ) -> JSONResponse:
     try:
         payload = await asyncio.to_thread(service.public_employee_rankings, range, start_date, end_date, sort_key, sort_dir)
@@ -5087,7 +5088,7 @@ async def performance_data(
 
 
 @app.post("/api/sync")
-async def manual_sync(_auth: None = Depends(require_auth)) -> JSONResponse:
+async def manual_sync(_auth: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
     from dashboard.celery_app import celery_app
 
     task = celery_app.send_task("dashboard.sync")
@@ -5095,7 +5096,7 @@ async def manual_sync(_auth: None = Depends(require_auth)) -> JSONResponse:
 
 
 @app.post("/api/sync/extended")
-async def manual_extended_sync(_auth: None = Depends(require_auth)) -> JSONResponse:
+async def manual_extended_sync(_auth: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
     from dashboard.celery_app import celery_app
 
     task = celery_app.send_task("dashboard.detail_sync")
@@ -5106,13 +5107,13 @@ async def manual_extended_sync(_auth: None = Depends(require_auth)) -> JSONRespo
 
 
 @app.get("/api/system/integrations/ocean-engine/token-latest")
-async def latest_token(_auth: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+async def latest_token(_auth: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
     return JSONResponse(service.latest_token_payload(masked=False))
 
 
 @app.post("/api/system/integrations/ocean-engine/exchange-auth-code")
 async def exchange_auth_code(
-    payload: AuthCodeExchangePayload, _auth: dict[str, Any] = Depends(require_auth)
+    payload: AuthCodeExchangePayload, _auth: dict[str, Any] = Depends(require_admin)
 ) -> JSONResponse:
     try:
         token_payload = await asyncio.to_thread(service.exchange_auth_code, payload.auth_code)
@@ -5167,7 +5168,7 @@ async def notification_settings(_auth: None = Depends(require_auth)) -> JSONResp
 
 @app.put("/api/notification-settings")
 async def update_notification_settings(
-    payload: NotificationSettingsPayload, _auth: None = Depends(require_auth)
+    payload: NotificationSettingsPayload, _auth: dict[str, Any] = Depends(require_admin)
 ) -> JSONResponse:
     try:
         service.update_notification_settings(payload)
@@ -5177,7 +5178,7 @@ async def update_notification_settings(
 
 
 @app.post("/api/alert-rules")
-async def create_alert_rule(payload: AlertRulePayload, _auth: None = Depends(require_auth)) -> JSONResponse:
+async def create_alert_rule(payload: AlertRulePayload, _auth: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
     try:
         service.create_alert_rule(payload)
     except ValueError as exc:
@@ -5186,7 +5187,9 @@ async def create_alert_rule(payload: AlertRulePayload, _auth: None = Depends(req
 
 
 @app.put("/api/alert-rules/{rule_id}")
-async def update_alert_rule(rule_id: int, payload: AlertRulePayload, _auth: None = Depends(require_auth)) -> JSONResponse:
+async def update_alert_rule(
+    rule_id: int, payload: AlertRulePayload, _auth: dict[str, Any] = Depends(require_admin)
+) -> JSONResponse:
     try:
         service.update_alert_rule(rule_id, payload)
     except ValueError as exc:
@@ -5195,6 +5198,6 @@ async def update_alert_rule(rule_id: int, payload: AlertRulePayload, _auth: None
 
 
 @app.delete("/api/alert-rules/{rule_id}")
-async def delete_alert_rule(rule_id: int, _auth: None = Depends(require_auth)) -> JSONResponse:
+async def delete_alert_rule(rule_id: int, _auth: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
     service.delete_alert_rule(rule_id)
     return JSONResponse({"ok": True})
