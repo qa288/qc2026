@@ -2261,10 +2261,6 @@ class DashboardService:
         return self._match_operator_candidates(
             [
                 str(row.get("material_name") or "").strip(),
-                str(row.get("material_id") or "").strip(),
-                str(row.get("video_id") or "").strip(),
-                str(row.get("top_plan_name") or "").strip(),
-                str(row.get("top_account_name") or "").strip(),
             ],
             operators,
             keywords,
@@ -3126,10 +3122,6 @@ class DashboardService:
                 for item in items
                 if query_text in self._normalize_match_text(
                     str(item.get("material_name") or ""),
-                    str(item.get("material_id") or ""),
-                    str(item.get("video_id") or ""),
-                    str(item.get("top_account_name") or ""),
-                    str(item.get("top_plan_name") or ""),
                 )
             ]
         return {
@@ -3703,9 +3695,28 @@ class DashboardService:
                     (int(user.get("id", 0) or 0),),
                 ).fetchall()
         items = []
-        for row in rows:
+        with self.db() as conn:
+            for row in rows:
+                failed_rows = conn.execute(
+                    """
+                    SELECT original_name, message, status
+                    FROM material_upload_job_files
+                    WHERE job_id = ? AND status IN ('failed', 'partial')
+                    ORDER BY id ASC
+                    LIMIT 5
+                    """,
+                    (int(row["id"]),),
+                ).fetchall()
             item = dict(row)
             item["created_by_label"] = str(item.get("display_name") or item.get("username") or "")
+            item["failed_items"] = [
+                {
+                    "original_name": str(failed_row["original_name"] or ""),
+                    "message": str(failed_row["message"] or ""),
+                    "status": str(failed_row["status"] or ""),
+                }
+                for failed_row in failed_rows
+            ]
             items.append(item)
         return items
 

@@ -530,6 +530,24 @@ body {
   margin-bottom: 18px;
 }
 
+.panel-head-compact {
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.panel-head-compact > :first-child {
+  flex: 0 0 100%;
+}
+
+.head-control-stack {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 100%;
+}
+
 .panel-kicker {
   margin: 0 0 6px;
   color: var(--muted);
@@ -885,6 +903,23 @@ body {
   flex-wrap: wrap;
 }
 
+.toolbar-inline {
+  width: 100%;
+  min-width: 0;
+}
+
+.toolbar-inline-primary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(176px, 228px);
+  gap: 8px 10px;
+  align-items: center;
+}
+
+.toolbar-secondary {
+  width: 100%;
+  justify-content: flex-start;
+}
+
 .toolbar.wide {
   min-width: 0;
   justify-content: flex-end;
@@ -904,6 +939,11 @@ body {
   flex: 1 1 auto;
 }
 
+.toolbar-inline-primary .range-filter-group {
+  grid-column: 1;
+  flex-wrap: nowrap;
+}
+
 .workspace-grid {
   display: grid;
   grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
@@ -911,10 +951,15 @@ body {
   align-items: start;
 }
 
+.rank-grid,
+.rank-stack {
+  display: grid;
+  gap: 18px;
+}
+
 .rank-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
 }
 
 .rank-panel {
@@ -933,8 +978,8 @@ body {
 }
 
 .rank-search {
-  flex: 0 1 220px;
-  max-width: 220px;
+  flex: 0 1 200px;
+  max-width: 200px;
 }
 
 .rank-table-shell {
@@ -964,9 +1009,9 @@ body {
 
 .range-button {
   border: 0;
-  min-width: 44px;
+  min-width: 40px;
   height: 32px;
-  padding: 0 12px;
+  padding: 0 10px;
   border-radius: 999px;
   background: transparent;
   color: var(--muted);
@@ -998,9 +1043,10 @@ body {
 .date-input,
 .select-input,
 .rule-form input,
-.rule-form select {
+.rule-form select,
+.ownership-form-grid textarea {
   width: 100%;
-  padding: 9px 12px;
+  padding: 8px 10px;
   border-radius: 12px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.72);
@@ -1013,6 +1059,14 @@ body {
   flex: 0 1 240px;
   min-width: 190px;
   width: auto;
+}
+
+.toolbar-inline-primary > .search-input {
+  grid-column: 2;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  justify-self: end;
 }
 
 .toolbar > .select-input,
@@ -1029,6 +1083,10 @@ body {
   flex-wrap: wrap;
 }
 
+.toolbar-inline-primary .date-range-inline {
+  flex-wrap: nowrap;
+}
+
 .custom-date-inline {
   padding: 3px 6px;
   border-radius: 999px;
@@ -1042,7 +1100,7 @@ body {
 }
 
 .date-input {
-  width: 132px;
+  width: 110px;
   min-width: 0;
 }
 
@@ -1053,9 +1111,9 @@ body {
 }
 
 .date-apply-button {
-  min-width: 58px;
+  min-width: 52px;
   height: 32px;
-  padding: 0 12px;
+  padding: 0 10px;
   border: 0;
   border-radius: 999px;
   background: rgba(22, 119, 255, 0.1);
@@ -1161,6 +1219,12 @@ body {
   background: rgba(255, 255, 255, 0.56);
 }
 
+.detail-stack {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
 .decision-panel .detail-panel {
   margin-top: 0;
 }
@@ -1169,6 +1233,13 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(340px, 0.75fr);
   gap: 18px;
+  align-items: start;
+}
+
+.upload-stack,
+.access-stack {
+  display: grid;
+  gap: 14px;
   align-items: start;
 }
 
@@ -2445,13 +2516,27 @@ body {
     flex-wrap: wrap;
   }
 
+  .toolbar-inline-primary {
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar-inline-primary .range-filter-group,
+  .toolbar-inline-primary .date-range-inline {
+    flex-wrap: wrap;
+  }
+
   .toolbar > .search-input,
   .toolbar.wide > .search-input,
+  .toolbar-inline-primary > .search-input,
   .toolbar > .select-input,
   .toolbar.wide > .select-input {
     width: 100%;
     min-width: 0;
     flex: 1 1 100%;
+  }
+
+  .toolbar-inline-primary > .search-input {
+    grid-column: 1;
   }
 
   .range-filter-group {
@@ -2695,6 +2780,7 @@ body {
 
 .ownership-form-grid input,
 .ownership-form-grid select,
+.ownership-form-grid textarea,
 .ownership-inline-form input,
 .ownership-inline-form select {
   min-height: 42px;
@@ -2704,6 +2790,14 @@ body {
   padding: 0 12px;
   font-size: 14px;
   color: var(--text);
+}
+
+.ownership-form-grid textarea {
+  min-height: 88px;
+  resize: vertical;
+  padding: 10px 12px;
+  font-family: inherit;
+  line-height: 1.45;
 }
 
 .ownership-form-grid input:disabled,

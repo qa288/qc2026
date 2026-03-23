@@ -106,11 +106,13 @@ const employeeTable = document.getElementById("employeeTable");
 const productTable = document.getElementById("productTable");
 const ruleTable = document.getElementById("ruleTable");
 const planDetail = document.getElementById("planDetail");
+const planDetailStage = document.getElementById("planDetailStage");
 const employeeDetail = document.getElementById("employeeDetail");
 const productDetail = document.getElementById("productDetail");
 const planAssetSummary = document.getElementById("planAssetSummary");
 const materialTable = document.getElementById("materialTable");
 const materialDetail = document.getElementById("materialDetail");
+const materialDetailStage = document.getElementById("materialDetailStage");
 const alertSummary = document.getElementById("alertSummary");
 const accountSearch = document.getElementById("accountSearch");
 const planSearch = document.getElementById("planSearch");
@@ -193,6 +195,7 @@ const userForm = document.getElementById("userForm");
 const userFormReset = document.getElementById("userFormReset");
 const userEditorStatus = document.getElementById("userEditorStatus");
 const uploadPermissionField = document.getElementById("uploadPermissionField");
+const operatorKeywordSeedField = document.getElementById("operatorKeywordSeedField");
 const scopeAccountList = document.getElementById("scopeAccountList");
 const saveUserScopesButton = document.getElementById("saveUserScopesButton");
 const scopeEditorMeta = document.getElementById("scopeEditorMeta");
@@ -202,6 +205,8 @@ const operatorKeywordForm = document.getElementById("operatorKeywordForm");
 const operatorKeywordTable = document.getElementById("operatorKeywordTable");
 const operatorMaterialSection = document.getElementById("operatorMaterialSection");
 const operatorMaterialStatus = document.getElementById("operatorMaterialStatus");
+const toggleOperatorMaterialsButton = document.getElementById("toggleOperatorMaterialsButton");
+const operatorMaterialContent = document.getElementById("operatorMaterialContent");
 const operatorMaterialSearch = document.getElementById("operatorMaterialSearch");
 const operatorMaterialTable = document.getElementById("operatorMaterialTable");
 const uploadSearchForm = document.getElementById("uploadSearchForm");
@@ -438,6 +443,15 @@ function setInlineFeedback(element, text, tone = "neutral") {
 
 function focusFirstInput(form, selector) {
   form?.querySelector(selector)?.focus();
+}
+
+function parseKeywordSeedInput(value) {
+  return [...new Set(
+    String(value || "")
+      .split(/[\n,，、;；]+/)
+      .map((item) => String(item || "").trim())
+      .filter(Boolean),
+  )];
 }
 
 function entityLabel(entityType) {
@@ -940,6 +954,25 @@ function normalizeUploadJobNote(note) {
   return text;
 }
 
+function renderUploadJobNote(item) {
+  const base = normalizeUploadJobNote(item.note);
+  const failedItems = Array.isArray(item.failed_items) ? item.failed_items : [];
+  if (!failedItems.length) {
+    return escapeHtml(base);
+  }
+  const failedNames = failedItems
+    .map((row) => String(row.original_name || "").trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  const summary = failedNames.length ? `失败文件：${failedNames.join("、")}` : "存在失败文件";
+  return `
+    <div class="cell-primary">${escapeHtml(base)}</div>
+    <div class="cell-subline">
+      <span class="cell-subitem">${escapeHtml(summary)}</span>
+    </div>
+  `;
+}
+
 function renderUploadTargetSummary() {
   if (!uploadTargetSummary) return;
   const selected = selectedUploadPlans();
@@ -1041,7 +1074,7 @@ function renderUploadJobTable() {
           <td class="mono">${formatNumber(item.processed_targets || 0)} / ${formatNumber(item.total_targets || 0)}</td>
           <td>${escapeHtml(item.created_by_label || "--")}</td>
           <td>${escapeHtml(item.created_at || "--")}</td>
-          <td>${escapeHtml(normalizeUploadJobNote(item.note))}</td>
+          <td>${renderUploadJobNote(item)}</td>
         </tr>
       `).join("")}
     </tbody>
@@ -1097,7 +1130,7 @@ function renderAlertSummary(events) {
           <span class="summary-chip subtle">平稳</span>
         </div>
         <div class="summary-value">暂无异常</div>
-        <div class="summary-sub">最近没有命中规则，先关注账户和计划变化。</div>
+        <div class="summary-sub">最近没有命中规则。</div>
         <div class="summary-metric-row">
           <div><span>待处理</span><strong class="mono">0</strong></div>
           <div><span>最新状态</span><strong>正常</strong></div>
@@ -1110,9 +1143,9 @@ function renderAlertSummary(events) {
         <div class="summary-sub">当前没有待处理提醒</div>
       </div>
       <div class="alert-summary-card stat">
-        <div class="summary-label">处理节奏</div>
-        <div class="summary-value">观察中</div>
-        <div class="summary-sub">等待新触发</div>
+      <div class="summary-label">状态</div>
+      <div class="summary-value">观察中</div>
+      <div class="summary-sub">等待新触发</div>
       </div>
     `;
     return;
@@ -1130,7 +1163,7 @@ function renderAlertSummary(events) {
         <span class="summary-chip">${latest.status === "pending" ? "优先处理" : "最近已发送"}</span>
         <span class="summary-chip subtle">${escapeHtml(entityLabel(latest.entity_type))}</span>
       </div>
-      <div class="summary-label">当前最值得盯的对象</div>
+      <div class="summary-label">当前重点</div>
       <div class="summary-value compact">${escapeHtml(latest.entity_name)}</div>
       <div class="summary-sub">${escapeHtml(metricLabel(latest.metric))} ${escapeHtml(operatorLabel(latest.operator))} ${escapeHtml(latest.threshold)} · ${escapeHtml(latest.created_at)}</div>
       <div class="summary-metric-row">
@@ -1143,7 +1176,7 @@ function renderAlertSummary(events) {
     <div class="alert-summary-card stat">
       <div class="summary-label">待处理</div>
       <div class="summary-value mono">${formatNumber(pendingCount)}</div>
-      <div class="summary-sub">${pendingCount ? "建议尽快人工复核" : "当前都已处理或已发送"}</div>
+      <div class="summary-sub">${pendingCount ? "建议尽快复核" : "当前无待处理"}</div>
     </div>
     <div class="alert-summary-card stat">
       <div class="summary-label">最近触发</div>
@@ -1187,10 +1220,10 @@ function renderOverviewHero(latest) {
   const planTone = planFailures ? "danger" : "ok";
   const title = operatorMode ? "今日总览" : supervisor ? "范围总览" : "今日投放概况";
   const copy = operatorMode
-    ? "只看你当前关键词命中的素材、团队排名和今日总消耗。"
+    ? "只看当前关键词命中的素材和团队表现。"
     : supervisor
-      ? "只看授权账户范围内的消耗、支付、订单和 ROI。"
-      : "先看消耗、支付、订单和 ROI。";
+      ? "只看授权范围内的账户、计划和素材。"
+      : "先看核心消耗、支付、订单和 ROI。";
   const pillMarkup = admin
     ? `
         <span class="system-pill ${accountTone === "danger" ? "danger" : ""}">${accountFailures ? `账户异常 ${formatNumber(accountFailures)}` : "账户查询正常"}</span>
@@ -1253,7 +1286,7 @@ function breakdownEntityLabel(payload) {
 }
 
 function breakdownSearchPlaceholder(payload) {
-  return "搜索运营 / 用户名 / 计划";
+  return "搜索运营 / 计划";
 }
 
 function breakdownDetailEmptyCopy(payload) {
@@ -1282,7 +1315,7 @@ function renderSystemCards(latest, extendedSync, tokenInfo) {
       <span class="system-pill ${failureTone === "danger" ? "danger" : ""}">${hardAccountFailures || planFailures ? "有异常" : "运行正常"}</span>
     </div>
     <div class="system-card-value">${escapeHtml(latest?.snapshot_time || "等待首次同步")}</div>
-    <div class="system-card-copy">分钟级主快照是总览页基准，账户汇总异常时会自动回退到计划聚合口径。</div>
+    <div class="system-card-copy">总览按分钟级主快照更新，账户汇总异常会自动回退。</div>
     <div class="system-stat-grid">
       <div class="system-stat"><span>账户异常</span><strong class="mono">${formatNumber(hardAccountFailures)}</strong></div>
       <div class="system-stat"><span>计划异常</span><strong class="mono">${formatNumber(planFailures)}</strong></div>
@@ -1297,7 +1330,7 @@ function renderSystemCards(latest, extendedSync, tokenInfo) {
       <span class="system-pill ${detailTone === "warn" ? "warn" : detailTone === "danger" ? "danger" : ""}">${escapeHtml(detailStatus === "ok" ? "完整" : detailStatus === "partial" ? "部分完成" : "未同步")}</span>
     </div>
     <div class="system-card-value">${escapeHtml(extendedSync?.snapshot_time || "等待明细同步")}</div>
-    <div class="system-card-copy">计划详情、商品、素材、首发视频标记按 10 分钟级同步，用于计划侧栏和后续素材排名。</div>
+    <div class="system-card-copy">计划、商品、素材和首发标记按 10 分钟级同步。</div>
     <div class="system-stat-grid">
       <div class="system-stat"><span>计划数</span><strong class="mono">${formatNumber(extendedSync?.plan_count || 0)}</strong></div>
       <div class="system-stat"><span>商品行</span><strong class="mono">${formatNumber(extendedSync?.product_row_count || 0)}</strong></div>
@@ -1427,16 +1460,19 @@ function renderAccountTable(accounts) {
 }
 
 function clearEmployeeDetail() {
+  if (!employeeDetail) return;
   employeeDetail.className = "detail-panel empty";
   employeeDetail.textContent = breakdownDetailEmptyCopy(rangePayload(sectionFilter("breakdown")));
 }
 
 function clearProductDetail() {
+  if (!productDetail) return;
   productDetail.className = "detail-panel empty";
   productDetail.textContent = "点击商品行，查看该商品对应的计划规模、账户覆盖和代表计划。";
 }
 
 function renderEmployeeDetail(employeeName) {
+  if (!employeeDetail) return;
   const breakdownFilter = sectionFilter("breakdown");
   const payload = rangePayload(breakdownFilter);
   const rows = breakdownRows(payload);
@@ -1480,6 +1516,7 @@ function renderEmployeeDetail(employeeName) {
 }
 
 function renderProductDetail(productKey) {
+  if (!productDetail) return;
   const breakdownFilter = sectionFilter("breakdown");
   const rows = rangePayload(breakdownFilter)?.products || [];
   const row = rows.find((item) => item.product_key === productKey);
@@ -1504,6 +1541,7 @@ function renderProductDetail(productKey) {
 
 function setSelectedEmployee(employeeName) {
   state.selectedEmployeeName = employeeName;
+  if (!employeeDetail) return;
   if (!employeeName) {
     clearEmployeeDetail();
     return;
@@ -1513,6 +1551,7 @@ function setSelectedEmployee(employeeName) {
 
 function setSelectedProduct(productKey) {
   state.selectedProductKey = productKey;
+  if (!productDetail) return;
   if (!productKey) {
     clearProductDetail();
     return;
@@ -1521,6 +1560,7 @@ function setSelectedProduct(productKey) {
 }
 
 function syncSelectedEmployee(rows) {
+  if (!employeeDetail) return;
   if (!state.selectedEmployeeName) {
     clearEmployeeDetail();
     return;
@@ -1534,6 +1574,7 @@ function syncSelectedEmployee(rows) {
 }
 
 function syncSelectedProduct(rows) {
+  if (!productDetail) return;
   if (!state.selectedProductKey) {
     clearProductDetail();
     return;
@@ -1547,6 +1588,7 @@ function syncSelectedProduct(rows) {
 }
 
 function renderEmployeeInteractions(rows) {
+  if (!employeeDetail) return;
   employeeTable.querySelectorAll("tbody tr").forEach((rowEl) => {
     rowEl.addEventListener("click", () => {
       setSelectedEmployee(String(rowEl.dataset.employeeName || ""));
@@ -1556,6 +1598,7 @@ function renderEmployeeInteractions(rows) {
 }
 
 function renderProductInteractions(rows) {
+  if (!productDetail) return;
   productTable.querySelectorAll("tbody tr").forEach((rowEl) => {
     rowEl.addEventListener("click", () => {
       setSelectedProduct(String(rowEl.dataset.productKey || ""));
@@ -1640,6 +1683,7 @@ function renderEmployeeTable(rows) {
 }
 
 function renderProductTable(rows) {
+  if (!productTable || productRankPanel?.classList.contains("hidden")) return;
   const query = productSearch.value.trim().toLowerCase();
   const visibleRows = rows.filter((row) => {
     const haystack = [row.product_name, row.product_id, row.top_plan_name, row.top_account_name].join(" ").toLowerCase();
@@ -1696,14 +1740,18 @@ function renderProductTable(rows) {
 }
 
 function clearMaterialDetail() {
+  if (!materialDetail) return;
+  materialDetailStage?.classList.add("hidden");
   materialDetail.className = "detail-panel empty";
   materialDetail.textContent = "点击素材行，查看覆盖范围、代表计划和预览。";
 }
 
 function renderMaterialDetail(materialKey) {
+  if (!materialDetail) return;
   const rows = materialRangePayload(sectionFilter("material"))?.items || [];
   const row = rows.find((item) => item.material_key === materialKey);
   if (!row) return;
+  materialDetailStage?.classList.remove("hidden");
   materialDetail.className = "detail-panel";
   materialDetail.innerHTML = `
     <div class="detail-block-head">
@@ -1714,7 +1762,6 @@ function renderMaterialDetail(materialKey) {
       <button type="button" class="button ghost compact ${canPreviewMaterial(row) ? "" : "disabled"}" data-action="open-material-preview" data-material-key="${escapeHtml(row.material_key)}" ${canPreviewMaterial(row) ? "" : "disabled"}>预览素材</button>
     </div>
     <div class="detail-stats">
-      <div class="detail-stat"><span class="label">素材类型</span><span class="value compact">${escapeHtml(row.material_type || "-")}</span></div>
       <div class="detail-stat"><span class="label">覆盖账户数</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
       <div class="detail-stat"><span class="label">覆盖计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
       <div class="detail-stat"><span class="label">首发视频</span><span class="value compact">${row.is_original ? "是" : "否"}</span></div>
@@ -1728,6 +1775,7 @@ function renderMaterialDetail(materialKey) {
 }
 
 function setSelectedMaterial(materialKey) {
+  if (!materialDetail) return;
   state.selectedMaterialKey = materialKey;
   if (!materialKey) {
     clearMaterialDetail();
@@ -1737,6 +1785,7 @@ function setSelectedMaterial(materialKey) {
 }
 
 function syncSelectedMaterial(rows) {
+  if (!materialDetail) return;
   if (!state.selectedMaterialKey) {
     clearMaterialDetail();
     return;
@@ -1750,12 +1799,14 @@ function syncSelectedMaterial(rows) {
 }
 
 function renderMaterialInteractions(rows) {
-  materialTable.querySelectorAll("tbody tr").forEach((rowEl) => {
-    rowEl.addEventListener("click", () => {
-      setSelectedMaterial(String(rowEl.dataset.materialKey || ""));
-      renderMaterialTable(rows);
+  if (materialDetail) {
+    materialTable.querySelectorAll("tbody tr").forEach((rowEl) => {
+      rowEl.addEventListener("click", () => {
+        setSelectedMaterial(String(rowEl.dataset.materialKey || ""));
+        renderMaterialTable(rows);
+      });
     });
-  });
+  }
   materialTable.querySelectorAll('[data-action="open-material-preview"]').forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -1772,7 +1823,7 @@ function renderMaterialTable(rows) {
     operatorMode
     && !["material_name", "stat_cost", "top_account_name", "top_plan_name"].includes(String(state.materialSort.key || ""))
   ) {
-    state.materialSort = { key: "stat_cost", direction: "desc" };
+    state.materialSort = { key: "stat_cost", dir: "desc" };
     saveSort("material-sort", state.materialSort);
   }
   const query = materialSearch.value.trim().toLowerCase();
@@ -1797,14 +1848,14 @@ function renderMaterialTable(rows) {
         { key: "order_count", label: "订单", sortable: true },
         { key: "plan_count", label: "计划数", sortable: true },
         { key: "advertiser_count", label: "账户数", sortable: true },
-        { key: "material_type", label: "类型", sortable: true },
       ];
   const sorted = sortRows(visibleRows, state.materialSort);
+  const supportsMaterialDetail = Boolean(materialDetail);
   materialTable.innerHTML = `
     ${makeHeader(columns, state.materialSort, "material-sort")}
     <tbody>
       ${sorted.map((row) => `
-        <tr data-material-key="${escapeHtml(row.material_key)}" class="${state.selectedMaterialKey === row.material_key ? "active-row" : ""}">
+        <tr data-material-key="${escapeHtml(row.material_key)}" class="${supportsMaterialDetail && state.selectedMaterialKey === row.material_key ? "active-row" : ""}">
           <td>
             <div class="cell-primary">${escapeHtml(row.material_name || "未命名素材")}</div>
             <div class="cell-subline mono">
@@ -1819,7 +1870,7 @@ function renderMaterialTable(rows) {
               data-action="open-material-preview"
               data-material-key="${escapeHtml(row.material_key)}"
               ${canPreviewMaterial(row) ? "" : "disabled"}
-            >预览</button>
+            >${canPreviewMaterial(row) ? "预览" : "暂无"}</button>
           </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           ${operatorMode
@@ -1833,7 +1884,6 @@ function renderMaterialTable(rows) {
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatNumber(row.plan_count)}</td>
           <td class="mono">${formatNumber(row.advertiser_count)}</td>
-          <td><span class="pill">${escapeHtml(row.material_type || "-")}</span></td>
           `}
         </tr>
       `).join("")}
@@ -1884,6 +1934,7 @@ function fillPlanAccountFilter(accountNames) {
 }
 
 function clearPlanAssetSummary() {
+  if (!planAssetSummary) return;
   planAssetSummary.className = "detail-panel empty";
   planAssetSummary.textContent = "点击计划行，查看该计划最新同步到本地的商品、素材和视频摘要。";
 }
@@ -1909,6 +1960,7 @@ async function fetchPlanAssets(adId) {
 }
 
 function renderPlanAssetSummaryPayload(payload) {
+  if (!planAssetSummary) return;
   const products = payload?.products || [];
   const materials = payload?.materials || [];
   const typeCount = {};
@@ -1993,6 +2045,7 @@ function renderPlanAssetSummaryPayload(payload) {
 }
 
 async function renderPlanAssets(adId) {
+  if (!planAssetSummary) return;
   clearPlanAssetSummary();
   try {
     const payload = await fetchPlanAssets(adId);
@@ -2004,6 +2057,7 @@ async function renderPlanAssets(adId) {
 }
 
 async function renderPlanDetail(adId) {
+  if (!planDetail || !planAssetSummary) return;
   const planFilter = sectionFilter("plan");
   const rows = rangePayload(planFilter)?.plans || [];
   const row = rows.find((item) => item.ad_id === adId);
@@ -2012,6 +2066,7 @@ async function renderPlanDetail(adId) {
   const roiGap = Number(row.roi || 0) - Number(row.roi_goal || 0);
   const payGap = Number(row.pay_amount || 0) - Number(row.stat_cost || 0);
   const currentRangeLabel = rangeLabel(planFilter);
+  planDetailStage?.classList.remove("hidden");
   planDetail.className = "detail-panel";
   planDetail.innerHTML = `
     <div class="detail-block-head">
@@ -2038,12 +2093,15 @@ async function renderPlanDetail(adId) {
 }
 
 function clearPlanDetail() {
+  if (!planDetail || !planAssetSummary) return;
+  planDetailStage?.classList.add("hidden");
   planDetail.className = "detail-panel empty";
   planDetail.textContent = "点击计划行，查看补充配置和异常判断。";
   clearPlanAssetSummary();
 }
 
 function setSelectedPlan(adId) {
+  if (!planDetail || !planAssetSummary) return;
   state.selectedPlanId = adId;
   if (!adId) {
     clearPlanDetail();
@@ -2053,6 +2111,7 @@ function setSelectedPlan(adId) {
 }
 
 function renderPlanInteractions(plans) {
+  if (!planDetail || !planAssetSummary) return;
   planTable.querySelectorAll("tbody tr").forEach((rowEl) => {
     rowEl.addEventListener("click", () => {
       setSelectedPlan(Number(rowEl.dataset.planId));
@@ -2062,6 +2121,7 @@ function renderPlanInteractions(plans) {
 }
 
 function syncSelectedPlan(plans) {
+  if (!planDetail || !planAssetSummary) return;
   if (!state.selectedPlanId) {
     clearPlanDetail();
     return;
@@ -2118,12 +2178,13 @@ function renderPlanTable(plans) {
     return matchQuery && matchAccount;
   });
   const sortedRows = sortRows(rows, state.planSort);
+  const supportsPlanDetail = Boolean(planDetail && planAssetSummary);
 
   planTable.innerHTML = `
     ${makeHeader(columns, state.planSort, "plan-sort")}
     <tbody>
       ${sortedRows.map((row) => `
-        <tr data-plan-id="${row.ad_id}" class="${state.selectedPlanId === row.ad_id ? "active-row" : ""}">
+        <tr data-plan-id="${row.ad_id}" class="${supportsPlanDetail && state.selectedPlanId === row.ad_id ? "active-row" : ""}">
           <td>
             <div class="cell-primary">${escapeHtml(row.ad_name)}</div>
             <div class="cell-subline mono">
@@ -2275,8 +2336,18 @@ function syncUserRoleFields() {
   if (!userForm) return;
   const role = String(userForm.querySelector('select[name="role"]')?.value || "operator");
   const uploadInput = userForm.querySelector('input[name="upload_materials_enabled"]');
+  const keywordSeedInput = userForm.querySelector('textarea[name="keyword_seed"]');
   if (uploadPermissionField) {
     uploadPermissionField.classList.toggle("hidden", role !== "supervisor");
+  }
+  if (operatorKeywordSeedField) {
+    operatorKeywordSeedField.classList.toggle("hidden", role !== "operator");
+  }
+  if (keywordSeedInput) {
+    keywordSeedInput.disabled = role !== "operator";
+    if (role !== "operator") {
+      keywordSeedInput.value = "";
+    }
   }
   if (!uploadInput) return;
   if (role === "admin") {
@@ -2444,13 +2515,7 @@ function renderUserMatchedMaterialTable() {
   const query = String(operatorMaterialSearch?.value || "").trim().toLowerCase();
   const items = selectedUserMatchedMaterials().filter((item) => {
     if (!query) return true;
-    const haystack = [
-      item.material_name,
-      item.material_id,
-      item.video_id,
-      item.top_account_name,
-      item.top_plan_name,
-    ].join(" ").toLowerCase();
+    const haystack = [item.material_name].join(" ").toLowerCase();
     return haystack.includes(query);
   });
   operatorMaterialTable.innerHTML = `
@@ -2495,6 +2560,15 @@ function renderUserMatchedMaterialTable() {
   });
 }
 
+function setOperatorMaterialVisibility(visible) {
+  if (operatorMaterialContent) {
+    operatorMaterialContent.classList.toggle("hidden", !visible);
+  }
+  if (toggleOperatorMaterialsButton) {
+    toggleOperatorMaterialsButton.textContent = visible ? "收起列表" : "显示列表";
+  }
+}
+
 function syncAccessRolePanels() {
   const user = selectedUserRecord();
   const role = String(user?.role || userForm?.querySelector('select[name="role"]')?.value || "");
@@ -2502,26 +2576,29 @@ function syncAccessRolePanels() {
   const isSupervisor = role === "supervisor";
   operatorKeywordSection?.classList.toggle("hidden", !isOperator);
   operatorMaterialSection?.classList.toggle("hidden", !isOperator);
+  if (!isOperator) {
+    setOperatorMaterialVisibility(false);
+  }
   if (scopeAccountList?.closest(".ownership-card")) {
     scopeAccountList.closest(".ownership-card").classList.toggle("hidden", isOperator);
   }
   if (!isAdmin()) return;
   if (!user) {
-    setInlineFeedback(scopeEditorMeta, "先选账号，再配置账户范围。", "neutral");
-    setInlineFeedback(operatorKeywordStatus, "先选运营账号，再配置关键词。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "先选运营账号，再查看命中素材。", "neutral");
+    setInlineFeedback(scopeEditorMeta, "先选账号，再配置范围。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "先选运营账号，再配关键词。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "先选运营账号，再看命中素材。", "neutral");
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
     return;
   }
   if (isSupervisor) {
-    setInlineFeedback(scopeEditorMeta, "主管按账户范围查看全部计划和素材；如需上传，再开启素材上传权限。", "neutral");
+    setInlineFeedback(scopeEditorMeta, "主管按账户范围查看；如需上传，再开启上传权限。", "neutral");
   } else if (isOperator) {
-    setInlineFeedback(scopeEditorMeta, "运营账号不配置账户范围，只根据关键词命中结果查看数据。", "neutral");
-    setInlineFeedback(operatorKeywordStatus, "给运营账号添加关键词后，该账号只看命中这些关键词的数据。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "这里显示该运营账号当前关键词命中的素材结果，可按素材、账户或计划再搜索。", "neutral");
+    setInlineFeedback(scopeEditorMeta, "运营账号不配置账户范围，只看关键词命中结果。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "加关键词后，该账号只看命中这些关键词的数据。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "只按素材名称命中，默认收起。", "neutral");
   } else {
-    setInlineFeedback(scopeEditorMeta, "管理员默认可查看全部账户，不需要单独勾选。", "neutral");
+    setInlineFeedback(scopeEditorMeta, "管理员默认全量可见。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "管理员和主管不使用运营关键词。", "neutral");
     setInlineFeedback(operatorMaterialStatus, "管理员和主管不显示运营命中素材列表。", "neutral");
   }
@@ -2542,7 +2619,6 @@ function applyRoleViewPolicy() {
   const supervisor = isSupervisor();
   const operator = isOperator();
   const accessTab = viewTabs?.querySelector('[data-view="access"]');
-  const ownershipTab = viewTabs?.querySelector('[data-view="ownership"]');
   const signalsTab = viewTabs?.querySelector('[data-view="signals"]');
   const accountTab = viewTabs?.querySelector('[data-view="accounts"]');
   const planTab = viewTabs?.querySelector('[data-view="plans"]');
@@ -2550,7 +2626,7 @@ function applyRoleViewPolicy() {
   const materialsTab = viewTabs?.querySelector('[data-view="materials"]');
   const uploadsTab = viewTabs?.querySelector('[data-view="uploads"]');
   const tabOrder = admin
-    ? ["overview", "accounts", "plans", "materials", "breakdown", "uploads", "access", "ownership", "signals"]
+    ? ["overview", "accounts", "plans", "materials", "breakdown", "uploads", "access", "signals"]
     : supervisor
       ? (canUseUploadModule()
         ? ["overview", "accounts", "plans", "materials", "breakdown", "uploads"]
@@ -2558,14 +2634,11 @@ function applyRoleViewPolicy() {
       : ["overview", "materials", "breakdown"];
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
-    accessTab.textContent = "账号与权限";
-  }
-  if (ownershipTab) {
-    ownershipTab.classList.toggle("hidden", !admin);
-    ownershipTab.textContent = "高级归属";
+    accessTab.textContent = "账号权限";
   }
   if (signalsTab) {
     signalsTab.classList.toggle("hidden", !admin);
+    signalsTab.textContent = "预警";
   }
   if (accountTab) {
     accountTab.classList.toggle("hidden", operator);
@@ -2590,7 +2663,7 @@ function applyRoleViewPolicy() {
     syncExtendedButton.classList.toggle("hidden", !admin);
   }
   if (productRankPanel) {
-    productRankPanel.classList.toggle("hidden", operator);
+    productRankPanel.classList.add("hidden");
   }
   if (overviewBoardGrid) {
     overviewBoardGrid.classList.toggle("hidden", !admin);
@@ -2602,7 +2675,7 @@ function applyRoleViewPolicy() {
     overviewAlertTitle.textContent = admin ? "老板关注" : supervisor ? "范围关注" : "今日重点";
   }
   if (breakdownTitle) {
-    breakdownTitle.textContent = operator ? "团队排名" : "运营账号与商品排名";
+    breakdownTitle.textContent = operator ? "团队排名" : "运营排名";
   }
   if (teamPanelTitle) {
     teamPanelTitle.textContent = operator ? "团队排名" : "运营账号排名";
@@ -2611,17 +2684,17 @@ function applyRoleViewPolicy() {
     materialsPanelTitle.textContent = operator ? "我的素材" : "素材效果排行";
   }
   if (materialSearch) {
-    materialSearch.placeholder = "搜索素材 / 计划 / 账户";
+    materialSearch.placeholder = operator ? "搜索素材名称" : "搜索素材";
   }
   if (heroCopy) {
     heroCopy.textContent = admin
-      ? "账户、计划、素材、运营账号排名、账号与权限、预警和上传任务。"
+      ? "账户、计划、素材、运营账号、上传任务、账号权限和预警。"
       : supervisor
         ? "查看授权账户范围内的账户、计划、素材和运营排名；按需批量上传素材。"
         : "查看我的素材、团队排名和今日总消耗。";
   }
   const allowedViews = admin
-    ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "uploads", "ownership", "access", "signals"])
+    ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "uploads", "access", "signals"])
     : supervisor
       ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials"])
       : new Set(["overview", "breakdown", "materials"]);
@@ -2634,12 +2707,6 @@ function applyRoleViewPolicy() {
   if (!allowedViews.has(state.activeView)) {
     const fallback = allowedViews.has("overview") ? "overview" : Array.from(allowedViews)[0] || "overview";
     setActiveView(fallback);
-  }
-  ownershipReadonlyBanner?.classList.toggle("hidden", admin);
-  if (ownershipHeadMeta) {
-    ownershipHeadMeta.innerHTML = admin
-      ? "<span>维护高级关键词归属、人工绑定和未归属修正。</span>"
-      : "<span>当前账号只读，规则由管理员维护。</span>";
   }
   setFormReadOnly(employeeForm, !admin);
   setFormReadOnly(keywordForm, !admin);
@@ -2940,9 +3007,6 @@ async function bindUnassignedCandidate(option) {
   fillEmployeeForm(selectedEmployeeRecord());
   renderEmployeeManagerTable();
   await fetchDashboard();
-  if (state.activeView === "ownership") {
-    await ensureOwnershipData(true);
-  }
   setInlineFeedback(matchPreviewMeta, `已绑定到 ${employee.display_name}，未归属池已刷新。`, "success");
 }
 
@@ -3093,19 +3157,22 @@ function resetUserFormState() {
   if (enabledInput) enabledInput.checked = true;
   const uploadInput = userForm?.querySelector('input[name="upload_materials_enabled"]');
   if (uploadInput) uploadInput.checked = false;
+  const keywordSeedInput = userForm?.querySelector('textarea[name="keyword_seed"]');
+  if (keywordSeedInput) keywordSeedInput.value = "";
   syncUserRoleFields();
   setInlineFeedback(
     userEditorStatus,
-    isAdmin() ? "创建主管或运营账号后，再配置账户范围；主管可额外开启素材上传权限。" : "只有管理员可以配置后台账号。",
+    isAdmin() ? "新建账号后，再补账户范围或关键词。" : "只有管理员可以配置后台账号。",
     "neutral",
   );
   setInlineFeedback(
     scopeEditorMeta,
-    isAdmin() ? "管理员默认全量可见；主管需要明确勾选账户范围。" : "当前账号无权修改账户范围。",
+    isAdmin() ? "管理员默认全量；主管需要勾选范围。" : "当前账号无权修改账户范围。",
     "neutral",
   );
-  setInlineFeedback(operatorKeywordStatus, "先选运营账号，再配置关键词。", "neutral");
-  setInlineFeedback(operatorMaterialStatus, "先选运营账号，再查看命中素材。", "neutral");
+  setInlineFeedback(operatorKeywordStatus, "先选运营账号，再配关键词。", "neutral");
+  setInlineFeedback(operatorMaterialStatus, "先选运营账号，再看命中素材。", "neutral");
+  setOperatorMaterialVisibility(false);
   renderScopeChecklist();
   renderUserKeywordTable();
   renderUserMatchedMaterialTable();
@@ -3119,12 +3186,14 @@ function fillUserForm(user) {
   userForm.querySelector('input[name="display_name"]').value = user?.display_name || "";
   userForm.querySelector('select[name="role"]').value = user?.role || "operator";
   userForm.querySelector('input[name="password"]').value = "";
+  const keywordSeedInput = userForm.querySelector('textarea[name="keyword_seed"]');
+  if (keywordSeedInput) keywordSeedInput.value = "";
   userForm.querySelector('input[name="enabled"]').checked = Boolean(user?.enabled);
   userForm.querySelector('input[name="upload_materials_enabled"]').checked = Boolean(user?.upload_materials_enabled);
   syncUserRoleFields();
   setInlineFeedback(
     userEditorStatus,
-    user ? `当前编辑：${user.username} · ${roleLabel(user.role)}` : "创建主管或运营账号后，再配置账户范围。",
+    user ? `当前编辑：${user.username} · ${roleLabel(user.role)}` : "新建账号后，再补范围或关键词。",
     "neutral",
   );
   syncAccessRolePanels();
@@ -3243,6 +3312,7 @@ async function selectUserManager(userId) {
   const user = selectedUserRecord();
   fillUserForm(user);
   renderUserTable();
+  setOperatorMaterialVisibility(false);
   if (user?.role === "supervisor") {
     state.selectedUserScopeIds = await fetchUserScopes(userId, true);
   } else {
@@ -3250,7 +3320,7 @@ async function selectUserManager(userId) {
   }
   if (user?.role === "operator") {
     await fetchUserKeywords(userId, true);
-    await fetchUserMatchedMaterials(userId, true);
+    state.userMatchedMaterials[userId] = [];
   }
   renderScopeChecklist();
   renderUserKeywordTable();
@@ -3276,7 +3346,9 @@ async function ensureAccessData(force = false) {
     }
     if (user?.role === "operator" && isAdmin()) {
       await fetchUserKeywords(state.selectedUserId, force);
-      await fetchUserMatchedMaterials(state.selectedUserId, force);
+      if (!state.userMatchedMaterials[state.selectedUserId]) {
+        state.userMatchedMaterials[state.selectedUserId] = [];
+      }
     }
   } else {
     resetUserFormState();
@@ -3284,6 +3356,7 @@ async function ensureAccessData(force = false) {
   renderScopeChecklist();
   renderUserKeywordTable();
   renderUserMatchedMaterialTable();
+  setOperatorMaterialVisibility(false);
   syncAccessRolePanels();
 }
 
@@ -3325,7 +3398,7 @@ function renderPerformanceSections() {
   planRangeMeta.textContent = formatDateWindowMeta(planPayload);
   breakdownRangeMeta.textContent = formatDateWindowMeta(breakdownPayload);
   if (breakdownTitle) {
-    breakdownTitle.textContent = isOperator() ? "团队排名" : "商品与运营账号排名";
+    breakdownTitle.textContent = isOperator() ? "团队排名" : "运营排名";
   }
   if (teamPanelTitle) {
     teamPanelTitle.textContent = isOperator() ? "团队排名" : "运营账号排名";
@@ -3352,10 +3425,6 @@ async function refreshPerformanceSections(force = false) {
   });
   await Promise.all([...uniqueFilters.values()].map((filter) => fetchPerformance(filter, force)));
   renderPerformanceSections();
-  if (state.activeView === "ownership") {
-    await fetchUnassignedPool(true);
-    renderUnassignedTable();
-  }
 }
 
 async function refreshMaterialSection(force = false) {
@@ -3456,9 +3525,6 @@ function bindInputs() {
           await fetchUploadTargets(true);
           await fetchUploadJobs();
         }
-        if (view === "ownership") {
-          await ensureOwnershipData(true);
-        }
         if (view === "access") {
           await ensureAccessData(true);
         }
@@ -3472,6 +3538,14 @@ function bindInputs() {
   productSearch.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
   materialSearch.addEventListener("input", () => renderMaterialTable(materialRangePayload(sectionFilter("material"))?.items || []));
   operatorMaterialSearch?.addEventListener("input", () => renderUserMatchedMaterialTable());
+  toggleOperatorMaterialsButton?.addEventListener("click", async () => {
+    const nextVisible = operatorMaterialContent?.classList.contains("hidden");
+    setOperatorMaterialVisibility(Boolean(nextVisible));
+    if (nextVisible && state.selectedUserId && isAdmin()) {
+      await fetchUserMatchedMaterials(state.selectedUserId, true);
+      renderUserMatchedMaterialTable();
+    }
+  });
   planAccountFilter.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
   uploadSearchForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -3806,6 +3880,7 @@ function bindInputs() {
     event.preventDefault();
     if (!isAdmin()) return;
     const form = new FormData(userForm);
+    const keywordSeeds = parseKeywordSeedInput(form.get("keyword_seed"));
     const payload = {
       username: String(form.get("username") || "").trim(),
       display_name: String(form.get("display_name") || "").trim(),
@@ -3830,13 +3905,37 @@ function bindInputs() {
     await fetchUsers(true);
     if (item?.id) {
       await selectUserManager(Number(item.id));
-      setInlineFeedback(userEditorStatus, `已保存账号：${item.username || payload.username}。`, "success");
+      let addedKeywordCount = 0;
+      if (item.role === "operator" && keywordSeeds.length) {
+        const existingKeywords = new Set(
+          (state.userKeywords[item.id] || []).map((entry) => String(entry.keyword || "").trim().toLowerCase()),
+        );
+        for (const keyword of keywordSeeds) {
+          if (existingKeywords.has(keyword.toLowerCase())) continue;
+          const keywordResponse = await fetch(`/api/users/${item.id}/keywords`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ keyword, enabled: true }),
+          });
+          if (keywordResponse.ok) {
+            addedKeywordCount += 1;
+            existingKeywords.add(keyword.toLowerCase());
+          }
+        }
+        await fetchUserKeywords(item.id, true);
+      }
+      const keywordSuffix = addedKeywordCount ? `，并新增 ${addedKeywordCount} 个关键词` : "";
+      setInlineFeedback(userEditorStatus, `已保存账号：${item.username || payload.username}${keywordSuffix}。`, "success");
       if (item.role === "supervisor") {
-        setInlineFeedback(scopeEditorMeta, "下一步勾选该主管允许访问的账户范围。", "success");
+        setInlineFeedback(scopeEditorMeta, "下一步勾选该主管可见的账户。", "success");
         scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
       } else if (item.role === "operator") {
-        setInlineFeedback(operatorKeywordStatus, "下一步给该运营账号添加关键词。", "success");
-        focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
+        if (addedKeywordCount) {
+          setInlineFeedback(operatorKeywordStatus, "关键词已保存，可继续追加或查看命中素材。", "success");
+        } else {
+          setInlineFeedback(operatorKeywordStatus, "下一步给该运营账号添加关键词。", "success");
+          focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
+        }
       }
     } else {
       await ensureAccessData(true);
@@ -3976,13 +4075,6 @@ async function render(payload) {
       await refreshMaterialSection(true);
     } catch (error) {
       console.error("refreshMaterialSection failed", error);
-    }
-  }
-  if (state.activeView === "ownership") {
-    try {
-      await ensureOwnershipData(true);
-    } catch (error) {
-      console.error("ensureOwnershipData failed", error);
     }
   }
   if (state.activeView === "access") {

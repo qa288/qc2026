@@ -19,7 +19,7 @@
             </div>
             <div class="top-title-row top-title-inline">
               <h1>{{ app_name }}</h1>
-              <p class="hero-copy" id="heroCopy">账户、计划、素材与预警看板。</p>
+              <p class="hero-copy" id="heroCopy">账户、计划、素材、运营与预警。</p>
             </div>
           </div>
 
@@ -49,13 +49,12 @@
             <div class="view-tabs" id="viewTabs">
               <button type="button" class="view-tab active" data-view="overview">总览</button>
               <button type="button" class="view-tab" data-view="accounts">账户</button>
-              <button type="button" class="view-tab" data-view="breakdown">运营排名</button>
               <button type="button" class="view-tab" data-view="plans">计划</button>
               <button type="button" class="view-tab" data-view="materials">素材</button>
-              <button type="button" class="view-tab" data-view="uploads">上传素材</button>
-              <button type="button" class="view-tab" data-view="ownership">归属规则</button>
-              <button type="button" class="view-tab" data-view="access">账号与权限</button>
-              <button type="button" class="view-tab" data-view="signals">预警中心</button>
+              <button type="button" class="view-tab" data-view="breakdown">运营排名</button>
+              <button type="button" class="view-tab" data-view="uploads">批量上传</button>
+              <button type="button" class="view-tab" data-view="access">账号权限</button>
+              <button type="button" class="view-tab" data-view="signals">预警</button>
             </div>
           </div>
         </div>
@@ -83,14 +82,14 @@
               <div class="alert-summary-shell">
                 <div class="alert-section-head">
                   <span>摘要</span>
-                  <span>最近命中与待处理</span>
+                  <span>待处理优先</span>
                 </div>
                 <div id="alertSummary" class="alert-summary"></div>
               </div>
               <div class="alert-stream-shell">
                 <div class="alert-section-head">
                   <span>最近记录</span>
-                  <span>按时间倒序</span>
+                  <span>最新在前</span>
                 </div>
                 <div id="alertStream" class="alert-stream empty">暂无告警记录</div>
               </div>
@@ -101,26 +100,28 @@
 
       <section class="view-section" data-view="accounts">
         <section class="panel">
-          <div class="panel-head">
+          <div class="panel-head panel-head-compact">
             <div>
               <h2>账户表现</h2>
             </div>
-            <div class="toolbar">
-              <div class="range-filter-group">
-                <div class="range-switch" id="accountRangeSwitch">
-                  <button type="button" class="range-button" data-range="day">日</button>
-                  <button type="button" class="range-button" data-range="yesterday">昨日</button>
-                  <button type="button" class="range-button" data-range="week">近7天</button>
-                  <button type="button" class="range-button" data-range="month">近30天</button>
+            <div class="head-control-stack">
+              <div class="toolbar toolbar-inline toolbar-inline-primary">
+                <div class="range-filter-group">
+                  <div class="range-switch" id="accountRangeSwitch">
+                    <button type="button" class="range-button" data-range="day">日</button>
+                    <button type="button" class="range-button" data-range="yesterday">昨日</button>
+                    <button type="button" class="range-button" data-range="week">近7天</button>
+                    <button type="button" class="range-button" data-range="month">近30天</button>
+                  </div>
+                  <div class="date-range-inline custom-date-inline">
+                    <input id="accountDateStart" class="date-input" type="date" />
+                    <span class="date-range-sep">至</span>
+                    <input id="accountDateEnd" class="date-input" type="date" />
+                    <button id="accountDateApply" class="date-apply-button" type="button">查询</button>
+                  </div>
                 </div>
-                <div class="date-range-inline custom-date-inline">
-                  <input id="accountDateStart" class="date-input" type="date" />
-                  <span class="date-range-sep">至</span>
-                  <input id="accountDateEnd" class="date-input" type="date" />
-                  <button id="accountDateApply" class="date-apply-button" type="button">查询</button>
-                </div>
+                <input id="accountSearch" class="search-input" type="search" placeholder="搜索账户" />
               </div>
-              <input id="accountSearch" class="search-input" type="search" placeholder="搜索账户 / 状态" />
             </div>
           </div>
           <div class="section-range-meta" id="accountRangeMeta">统计范围：加载中</div>
@@ -132,52 +133,41 @@
 
       <section class="view-section" data-view="breakdown">
         <section class="panel">
-          <div class="panel-head">
+          <div class="panel-head panel-head-compact">
             <div>
-              <h2 id="breakdownTitle">运营账号与商品排名</h2>
+              <h2 id="breakdownTitle">运营排名</h2>
             </div>
-            <div class="toolbar">
-              <div class="range-filter-group">
-                <div class="range-switch" id="breakdownRangeSwitch">
-                  <button type="button" class="range-button" data-range="day">日</button>
-                  <button type="button" class="range-button" data-range="yesterday">昨日</button>
-                  <button type="button" class="range-button" data-range="week">近7天</button>
-                  <button type="button" class="range-button" data-range="month">近30天</button>
-                </div>
-                <div class="date-range-inline custom-date-inline">
-                  <input id="breakdownDateStart" class="date-input" type="date" />
-                  <span class="date-range-sep">至</span>
-                  <input id="breakdownDateEnd" class="date-input" type="date" />
-                  <button id="breakdownDateApply" class="date-apply-button" type="button">查询</button>
+            <div class="head-control-stack">
+              <div class="toolbar toolbar-inline toolbar-inline-primary">
+                <div class="range-filter-group">
+                  <div class="range-switch" id="breakdownRangeSwitch">
+                    <button type="button" class="range-button" data-range="day">日</button>
+                    <button type="button" class="range-button" data-range="yesterday">昨日</button>
+                    <button type="button" class="range-button" data-range="week">近7天</button>
+                    <button type="button" class="range-button" data-range="month">近30天</button>
+                  </div>
+                  <div class="date-range-inline custom-date-inline">
+                    <input id="breakdownDateStart" class="date-input" type="date" />
+                    <span class="date-range-sep">至</span>
+                    <input id="breakdownDateEnd" class="date-input" type="date" />
+                    <button id="breakdownDateApply" class="date-apply-button" type="button">查询</button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
           <div class="section-range-meta" id="breakdownRangeMeta">统计范围：加载中</div>
-          <div class="rank-grid">
+          <div class="rank-stack">
             <div class="rank-panel">
               <div class="rank-panel-head">
                 <div>
                   <h3 id="teamPanelTitle">运营账号排名</h3>
                 </div>
-                <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索运营 / 计划" />
+                <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索运营" />
               </div>
               <div class="table-shell rank-table-shell">
                 <table id="employeeTable" class="data-table compact"></table>
               </div>
-              <div id="employeeDetail" class="detail-panel empty">点击团队行，查看该运营账号当前负责的计划规模和核心表现。</div>
-            </div>
-            <div class="rank-panel" id="productRankPanel">
-              <div class="rank-panel-head">
-                <div>
-                  <h3>商品排名</h3>
-                </div>
-                <input id="productSearch" class="search-input rank-search" type="search" placeholder="搜索商品 / 计划" />
-              </div>
-              <div class="table-shell rank-table-shell">
-                <table id="productTable" class="data-table compact"></table>
-              </div>
-              <div id="productDetail" class="detail-panel empty">点击商品行，查看该商品对应的计划规模、账户覆盖和代表计划。</div>
             </div>
           </div>
         </section>
@@ -185,81 +175,74 @@
 
       <section class="view-section" data-view="plans">
         <section class="panel decision-panel">
-          <div class="panel-head plan-head">
+          <div class="panel-head panel-head-compact plan-head">
             <div>
               <h2>计划效果明细</h2>
             </div>
-            <div class="toolbar wide">
-              <div class="range-filter-group">
-                <div class="range-switch" id="planRangeSwitch">
-                  <button type="button" class="range-button" data-range="day">日</button>
-                  <button type="button" class="range-button" data-range="yesterday">昨日</button>
-                  <button type="button" class="range-button" data-range="week">近7天</button>
-                  <button type="button" class="range-button" data-range="month">近30天</button>
+            <div class="head-control-stack">
+              <div class="toolbar toolbar-inline toolbar-inline-primary">
+                <div class="range-filter-group">
+                  <div class="range-switch" id="planRangeSwitch">
+                    <button type="button" class="range-button" data-range="day">日</button>
+                    <button type="button" class="range-button" data-range="yesterday">昨日</button>
+                    <button type="button" class="range-button" data-range="week">近7天</button>
+                    <button type="button" class="range-button" data-range="month">近30天</button>
+                  </div>
+                  <div class="date-range-inline custom-date-inline">
+                    <input id="planDateStart" class="date-input" type="date" />
+                    <span class="date-range-sep">至</span>
+                    <input id="planDateEnd" class="date-input" type="date" />
+                    <button id="planDateApply" class="date-apply-button" type="button">查询</button>
+                  </div>
                 </div>
-                <div class="date-range-inline custom-date-inline">
-                  <input id="planDateStart" class="date-input" type="date" />
-                  <span class="date-range-sep">至</span>
-                  <input id="planDateEnd" class="date-input" type="date" />
-                  <button id="planDateApply" class="date-apply-button" type="button">查询</button>
-                </div>
+                <input id="planSearch" class="search-input" type="search" placeholder="搜索计划" />
               </div>
-              <input id="planSearch" class="search-input" type="search" placeholder="搜索计划 / 商品 / 主播" />
-              <select id="planAccountFilter" class="select-input">
-                <option value="">全部账户</option>
-              </select>
+              <div class="toolbar toolbar-secondary">
+                <select id="planAccountFilter" class="select-input">
+                  <option value="">全部账户</option>
+                </select>
+              </div>
             </div>
           </div>
           <div class="section-range-meta" id="planRangeMeta">统计范围：加载中</div>
-          <div class="decision-layout">
-            <div class="decision-main">
-              <div class="table-shell tall">
-                <table id="planTable" class="data-table"></table>
-              </div>
-            </div>
-            <aside class="decision-side">
-              <div id="planDetail" class="detail-panel empty">点击计划行，查看该计划的投放字段、商品信息和当前状态。</div>
-              <div id="planAssetSummary" class="detail-panel empty">点击计划行，查看该计划最新同步到本地的商品、素材和视频摘要。</div>
-            </aside>
+          <div class="table-shell tall">
+            <table id="planTable" class="data-table"></table>
           </div>
         </section>
       </section>
 
       <section class="view-section" data-view="materials">
         <section class="panel">
-          <div class="panel-head">
+          <div class="panel-head panel-head-compact">
             <div>
               <h2 id="materialsPanelTitle">素材效果排行</h2>
             </div>
-            <div class="toolbar wide">
-              <div class="range-filter-group">
-                <div class="range-switch" id="materialRangeSwitch">
-                  <button type="button" class="range-button" data-range="day">日</button>
-                  <button type="button" class="range-button" data-range="yesterday">昨日</button>
-                  <button type="button" class="range-button" data-range="week">近7天</button>
-                  <button type="button" class="range-button" data-range="month">近30天</button>
+            <div class="head-control-stack">
+              <div class="toolbar toolbar-inline toolbar-inline-primary">
+                <div class="range-filter-group">
+                  <div class="range-switch" id="materialRangeSwitch">
+                    <button type="button" class="range-button" data-range="day">日</button>
+                    <button type="button" class="range-button" data-range="yesterday">昨日</button>
+                    <button type="button" class="range-button" data-range="week">近7天</button>
+                    <button type="button" class="range-button" data-range="month">近30天</button>
+                  </div>
+                  <div class="date-range-inline custom-date-inline">
+                    <input id="materialDateStart" class="date-input" type="date" />
+                    <span class="date-range-sep">至</span>
+                    <input id="materialDateEnd" class="date-input" type="date" />
+                    <button id="materialDateApply" class="date-apply-button" type="button">查询</button>
+                  </div>
                 </div>
-                <div class="date-range-inline custom-date-inline">
-                  <input id="materialDateStart" class="date-input" type="date" />
-                  <span class="date-range-sep">至</span>
-                  <input id="materialDateEnd" class="date-input" type="date" />
-                  <button id="materialDateApply" class="date-apply-button" type="button">查询</button>
-                </div>
+                <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材" />
               </div>
-              <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材 / 计划 / 账户" />
-              <button id="syncExtendedButton" class="button ghost" type="button">刷新明细</button>
+              <div class="toolbar toolbar-secondary">
+                <button id="syncExtendedButton" class="button ghost" type="button">刷新明细</button>
+              </div>
             </div>
           </div>
           <div class="section-range-meta" id="materialSyncMeta">素材榜基于最近一次明细同步生成。</div>
-          <div class="decision-layout">
-            <div class="decision-main">
-              <div class="table-shell tall">
-                <table id="materialTable" class="data-table"></table>
-              </div>
-            </div>
-            <aside class="decision-side">
-              <div id="materialDetail" class="detail-panel empty">点击素材行，查看该素材覆盖的账户、计划和当前核心表现。</div>
-            </aside>
+          <div class="table-shell tall">
+            <table id="materialTable" class="data-table"></table>
           </div>
         </section>
       </section>
@@ -275,13 +258,13 @@
             </div>
           </div>
 
-          <div class="upload-layout">
+          <div class="upload-stack">
             <section class="upload-card">
               <div class="subpanel-head">
                 <div>
                   <h3>选择投放目标</h3>
                 </div>
-                <div id="uploadTargetMeta" class="section-range-meta compact-inline inline-feedback">先选择搜索范围并筛选计划。</div>
+                <div id="uploadTargetMeta" class="section-range-meta compact-inline inline-feedback">先筛计划，再勾选。</div>
               </div>
               <form id="uploadSearchForm" class="ownership-inline-form">
                 <label>
@@ -314,7 +297,7 @@
                 <div>
                   <h3>选择视频并创建任务</h3>
                 </div>
-                <div id="uploadJobStatus" class="section-range-meta compact-inline inline-feedback">选择目标计划后，再上传 1 到 50 个视频。</div>
+                <div id="uploadJobStatus" class="section-range-meta compact-inline inline-feedback">选计划后，再传 1 到 50 个视频。</div>
               </div>
               <form id="uploadJobForm" class="upload-form-grid">
                 <label class="wide-field upload-file-picker">
@@ -326,11 +309,14 @@
                   <button id="uploadJobSubmit" type="submit" class="button primary">创建上传任务</button>
                 </div>
               </form>
-              <div class="subpanel-head narrow-top">
+            </section>
+
+            <section class="upload-card">
+              <div class="subpanel-head">
                 <div>
                   <h3>最近任务</h3>
                 </div>
-                <div class="section-range-meta compact-inline">当前只显示你可见的任务。</div>
+                <div class="section-range-meta compact-inline">只显示当前账号可见的任务。</div>
               </div>
               <div class="table-shell">
                 <table id="uploadJobTable" class="data-table compact"></table>
@@ -501,16 +487,16 @@
               <h2>账号与权限</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>管理员维护账号、范围和运营关键词。</span>
+              <span>维护账号、范围、关键词和上传权限。</span>
             </div>
           </div>
-          <div class="access-layout">
+          <div class="access-stack">
             <section class="access-list-card">
               <div class="subpanel-head">
                 <div>
                   <h3>后台账号</h3>
                 </div>
-                <div class="section-range-meta compact-inline">主管按账户范围，运营按关键词查看数据。</div>
+                <div class="section-range-meta compact-inline">主管看账户范围，运营看关键词结果。</div>
               </div>
               <div class="table-shell tall">
                 <table id="userTable" class="data-table compact"></table>
@@ -522,7 +508,7 @@
                 <div>
                   <h3>账号配置</h3>
                 </div>
-                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">管理员可配置主管、运营账号以及素材上传权限。</div>
+                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">管理员可配置账号、角色和上传权限。</div>
               </div>
               <form id="userForm" class="ownership-form-grid">
                 <label>
@@ -545,6 +531,10 @@
                   <span>密码</span>
                   <input name="password" type="password" placeholder="新建必填；编辑时留空表示不改" />
                 </label>
+                <label class="wide-field hidden" id="operatorKeywordSeedField">
+                  <span>运营关键词</span>
+                  <textarea name="keyword_seed" rows="3" placeholder="支持逗号、顿号、分号或换行分隔多个关键词"></textarea>
+                </label>
                 <label class="toggle-chip">
                   <input name="enabled" type="checkbox" checked />
                   <span>启用</span>
@@ -565,7 +555,7 @@
                     <h3>账户范围</h3>
                   </div>
                 </div>
-                <div id="scopeEditorMeta" class="section-range-meta compact-inline inline-feedback">管理员默认拥有全量权限；主管和运营默认无数据，需勾选账户范围。</div>
+                <div id="scopeEditorMeta" class="section-range-meta compact-inline inline-feedback">主管按账户范围查看，运营不在这里配范围。</div>
                 <div id="scopeAccountList" class="scope-checklist"></div>
                 <div class="ownership-form-actions ownership-actions-end">
                   <button type="button" id="saveUserScopesButton" class="button primary">保存账户范围</button>
@@ -578,7 +568,7 @@
                     <h3>运营关键词</h3>
                   </div>
                 </div>
-                <div id="operatorKeywordStatus" class="section-range-meta compact-inline inline-feedback">先选择一个运营账号，再配置关键词。</div>
+                <div id="operatorKeywordStatus" class="section-range-meta compact-inline inline-feedback">先选运营账号，再配关键词。</div>
                 <form id="operatorKeywordForm" class="ownership-inline-form">
                   <input name="keyword" type="text" placeholder="例如：小宇 / 小宇剪辑 / XY" />
                   <label class="toggle-chip">
@@ -597,13 +587,18 @@
                   <div>
                     <h3>命中素材</h3>
                   </div>
+                  <div class="ownership-inline-actions">
+                    <button type="button" id="toggleOperatorMaterialsButton" class="button ghost compact">显示列表</button>
+                  </div>
                 </div>
-                <div id="operatorMaterialStatus" class="section-range-meta compact-inline inline-feedback">点击某个运营账号后，再查看当前关键词命中的素材列表。</div>
-                <div class="ownership-inline-form">
-                  <input id="operatorMaterialSearch" type="search" placeholder="搜索素材 / 计划 / 账户" />
-                </div>
-                <div class="table-shell">
-                  <table id="operatorMaterialTable" class="data-table compact"></table>
+                <div id="operatorMaterialStatus" class="section-range-meta compact-inline inline-feedback">只按素材名称命中，默认收起。</div>
+                <div id="operatorMaterialContent" class="hidden">
+                  <div class="ownership-inline-form simple-inline-form">
+                    <input id="operatorMaterialSearch" type="search" placeholder="搜索素材名称" />
+                  </div>
+                  <div class="table-shell">
+                    <table id="operatorMaterialTable" class="data-table compact"></table>
+                  </div>
                 </div>
               </section>
             </section>
@@ -615,10 +610,10 @@
         <section class="panel signal-panel">
           <div class="panel-head signal-panel-head">
             <div>
-              <h2>预警中心</h2>
+              <h2>预警</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>先定义阈值和监控对象，再决定是否外发到通知通道。</span>
+              <span>先定规则，再决定是否外发。</span>
             </div>
           </div>
           <div id="signalOverview" class="signal-summary-strip"></div>
