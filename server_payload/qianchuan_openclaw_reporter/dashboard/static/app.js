@@ -1154,16 +1154,9 @@ function renderAlertSummary(events) {
 
 function renderKpis(latest) {
   const summary = latest?.summary || {};
-  const operatorMode = String(state.session?.role || "") === "operator"
-    || Number(summary.operator_count || 0) > 0
-    || Number(summary.active_operator_count || 0) > 0;
-  const teamLabel = operatorMode ? "运营账号" : "归属人";
-  const activeTeamCount = operatorMode
-    ? formatNumber(summary.active_operator_count)
-    : formatNumber(summary.active_employee_count);
-  const totalTeamCount = operatorMode
-    ? formatNumber(summary.operator_count)
-    : formatNumber(summary.employee_count);
+  const teamLabel = "运营账号";
+  const activeTeamCount = formatNumber(summary.active_operator_count);
+  const totalTeamCount = formatNumber(summary.operator_count);
   const cards = [
     ["活跃账户", formatNumber(summary.active_account_count), `总账户 ${formatNumber(summary.account_count)}`],
     ["活跃计划", formatNumber(summary.active_plan_count), `总计划 ${formatNumber(summary.plan_count)}`],
@@ -1182,13 +1175,9 @@ function renderKpis(latest) {
 function renderOverviewHero(latest) {
   if (!overviewHeroCard) return;
   const summary = latest?.summary || {};
-  const operatorMode = isOperator()
-    || Number(summary.operator_count || 0) > 0
-    || Number(summary.active_operator_count || 0) > 0;
-  const teamLabel = operatorMode ? "运营账号" : "归属人";
-  const activeTeamCount = operatorMode
-    ? formatNumber(summary.active_operator_count)
-    : formatNumber(summary.active_employee_count);
+  const operatorMode = isOperator();
+  const teamLabel = "运营账号";
+  const activeTeamCount = formatNumber(summary.active_operator_count);
   const accountFailures = Number(summary.account_failures || 0);
   const planFailures = Number(summary.plan_failures || 0);
   const accountTone = accountFailures ? "danger" : "ok";
@@ -1232,14 +1221,11 @@ function renderOverviewHero(latest) {
 }
 
 function breakdownUsesOperators(payload) {
-  return String(state.session?.role || "") === "operator"
-    || (Array.isArray(payload?.operators) && payload.operators.length > 0)
-    || Number(payload?.summary?.operator_count || 0) > 0
-    || Number(payload?.summary?.active_operator_count || 0) > 0;
+  return true;
 }
 
 function breakdownRows(payload) {
-  return breakdownUsesOperators(payload) ? (payload?.operators || []) : (payload?.employees || []);
+  return payload?.operators || [];
 }
 
 function breakdownEntityName(row) {
@@ -1247,11 +1233,11 @@ function breakdownEntityName(row) {
 }
 
 function breakdownEntityLabel(payload) {
-  return breakdownUsesOperators(payload) ? "运营账号" : "归属人";
+  return "运营账号";
 }
 
 function breakdownSearchPlaceholder(payload) {
-  return breakdownUsesOperators(payload) ? "搜索运营账号 / 用户名 / 代表计划" : "搜索归属人 / 代表计划";
+  return "搜索运营账号 / 用户名 / 代表计划";
 }
 
 function breakdownDetailEmptyCopy(payload) {
