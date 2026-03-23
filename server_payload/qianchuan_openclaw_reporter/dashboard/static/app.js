@@ -883,13 +883,17 @@ function formatDateWindowMeta(payload) {
     return "统计范围：加载中";
   }
   const label = payload.range_label || RANGE_LABELS[payload.range_key] || "当前";
+  const backfillHint =
+    payload.history_backfill_pending && Number(payload.missing_history_days || 0) > 0
+      ? ` · 历史补齐中（缺 ${Number(payload.missing_history_days || 0)} 天）`
+      : "";
   if (payload.query_start_date && payload.query_end_date) {
     if (payload.query_start_date === payload.query_end_date) {
-      return `统计范围：${label} · ${payload.query_start_date}`;
+      return `统计范围：${label} · ${payload.query_start_date}${backfillHint}`;
     }
-    return `统计范围：${label} · ${payload.query_start_date} 至 ${payload.query_end_date}`;
+    return `统计范围：${label} · ${payload.query_start_date} 至 ${payload.query_end_date}${backfillHint}`;
   }
-  return `统计范围：${label} · ${payload.window_start} - ${payload.window_end}`;
+  return `统计范围：${label} · ${payload.window_start} - ${payload.window_end}${backfillHint}`;
 }
 
 function rangePayload(filter) {
