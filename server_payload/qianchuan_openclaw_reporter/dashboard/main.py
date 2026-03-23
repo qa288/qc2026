@@ -309,7 +309,7 @@ class DashboardService:
         now_ts = time.time()
         last_ts = float(self._backfill_queue_marks.get(dedupe_key, 0.0) or 0.0)
         if now_ts - last_ts < BACKFILL_QUEUE_DEBOUNCE_SECONDS:
-            return False
+            return True
         from dashboard.celery_app import celery_app
 
         celery_app.send_task(task_name, args=[max(int(days or 1), 1)])
