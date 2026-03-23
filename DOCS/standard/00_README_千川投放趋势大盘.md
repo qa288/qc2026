@@ -62,6 +62,8 @@
 16. [17_运维上线清单.md](/Users/xy/千川/DOCS/standard/17_运维上线清单.md)
 17. [09_待确认技术项.md](/Users/xy/千川/DOCS/standard/09_待确认技术项.md)
 18. [18_公开页与后台重构方案.md](/Users/xy/千川/DOCS/standard/18_公开页与后台重构方案.md)
+19. [19_素材上传与批量投放方案.md](/Users/xy/千川/DOCS/standard/19_素材上传与批量投放方案.md)
+20. [20_角色模型与运营工作台方案.md](/Users/xy/千川/DOCS/standard/20_角色模型与运营工作台方案.md)
 
 ---
 
