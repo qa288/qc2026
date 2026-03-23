@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{{ app_name }} 归属人榜</title>
+    <title>基础数据排行</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <link rel="stylesheet" href="/static/style.css" />
   </head>
@@ -15,8 +15,7 @@
             <span class="hero-chip">匿名可访问</span>
             <span class="hero-chip">1 分钟刷新</span>
           </div>
-          <h1>公开归属人榜</h1>
-          <p>{{ app_name }} · 按归属人汇总排名，默认按消耗降序。</p>
+          <h1>基础数据排行</h1>
         </div>
         <div class="public-header-actions">
           <a class="button ghost" href="/login">工作台登录</a>
@@ -31,8 +30,8 @@
             <div class="range-switch" id="publicRangeSwitch">
               <button type="button" class="range-button" data-range="day">日</button>
               <button type="button" class="range-button" data-range="yesterday">昨日</button>
-              <button type="button" class="range-button" data-range="week">本周</button>
-              <button type="button" class="range-button" data-range="month">本月</button>
+              <button type="button" class="range-button" data-range="week">近7天</button>
+              <button type="button" class="range-button" data-range="month">近30天</button>
             </div>
             <div class="date-range-inline custom-date-inline">
               <input id="publicDateStart" class="date-input" type="date" />

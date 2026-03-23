@@ -126,13 +126,13 @@ def build_performance_window(range_key: str, tz_name: str) -> tuple[datetime, da
         end_dt = today_start - timedelta(seconds=1)
         label = "昨日"
     elif range_key == "week":
-        start_dt = today_start - timedelta(days=today_start.weekday())
+        start_dt = today_start - timedelta(days=6)
         end_dt = now
-        label = "本周"
+        label = "近7天"
     elif range_key == "month":
-        start_dt = datetime(now.year, now.month, 1, 0, 0, 0, tzinfo=tz)
+        start_dt = today_start - timedelta(days=29)
         end_dt = now
-        label = "本月"
+        label = "近30天"
     else:
         start_dt = today_start
         end_dt = now

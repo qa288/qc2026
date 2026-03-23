@@ -1,8 +1,8 @@
 const RANGE_LABELS = {
   day: "今日",
   yesterday: "昨日",
-  week: "本周",
-  month: "本月",
+  week: "近7天",
+  month: "近30天",
   custom: "指定日期范围",
 };
 
@@ -255,10 +255,9 @@ function derivePresetDateRange(mode) {
     start.setDate(start.getDate() - 1);
     end.setDate(end.getDate() - 1);
   } else if (mode === "week") {
-    const weekdayOffset = (today.getDay() + 6) % 7;
-    start.setDate(start.getDate() - weekdayOffset);
+    start.setDate(start.getDate() - 6);
   } else if (mode === "month") {
-    start.setDate(1);
+    start.setDate(start.getDate() - 29);
   }
   return {
     start: formatDateInputValue(start),
