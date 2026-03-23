@@ -144,6 +144,8 @@ const systemStatusCard = document.getElementById("systemStatusCard");
 const detailSyncCard = document.getElementById("detailSyncCard");
 const signalOverview = document.getElementById("signalOverview");
 const overviewHeroCard = document.getElementById("overviewHeroCard");
+const overviewBoardGrid = document.getElementById("overviewBoardGrid");
+const overviewAlertTitle = document.getElementById("overviewAlertTitle");
 const viewTabs = document.getElementById("viewTabs");
 const viewSections = Array.from(document.querySelectorAll(".view-section"));
 const accountRangeSwitch = document.getElementById("accountRangeSwitch");
@@ -166,6 +168,7 @@ const materialDateStart = document.getElementById("materialDateStart");
 const materialDateEnd = document.getElementById("materialDateEnd");
 const materialDateApply = document.getElementById("materialDateApply");
 const materialSyncMeta = document.getElementById("materialSyncMeta");
+const materialsPanelTitle = document.getElementById("materialsPanelTitle");
 const employeeManagerTable = document.getElementById("employeeManagerTable");
 const employeeForm = document.getElementById("employeeForm");
 const employeeFormReset = document.getElementById("employeeFormReset");
@@ -213,6 +216,10 @@ const uploadFileSummary = document.getElementById("uploadFileSummary");
 const uploadJobStatus = document.getElementById("uploadJobStatus");
 const uploadJobSubmit = document.getElementById("uploadJobSubmit");
 const uploadJobTable = document.getElementById("uploadJobTable");
+const materialPreviewModal = document.getElementById("materialPreviewModal");
+const materialPreviewTitle = document.getElementById("materialPreviewTitle");
+const materialPreviewMeta = document.getElementById("materialPreviewMeta");
+const materialPreviewBody = document.getElementById("materialPreviewBody");
 const ruleTemplateButtons = Array.from(document.querySelectorAll(".signal-template-button"));
 const PERFORMANCE_SECTION_CONFIG = {
   account: {
@@ -915,6 +922,15 @@ function uploadScopeLabel(scope) {
   return scope === "account" ? "账户" : "计划";
 }
 
+function normalizeUploadJobNote(note) {
+  const text = String(note || "").trim();
+  if (!text) return "--";
+  if (text.includes("/local/file/video/upload/ permission")) {
+    return "当前应用还没有该广告主的视频上传权限，请先补齐应用授权或接口权限。";
+  }
+  return text;
+}
+
 function renderUploadTargetSummary() {
   if (!uploadTargetSummary) return;
   const selected = selectedUploadPlans();
@@ -986,7 +1002,7 @@ function renderUploadJobTable() {
   if (!uploadJobTable) return;
   const items = state.uploadJobs || [];
   if (!items.length) {
-    uploadJobTable.innerHTML = '<tbody><tr><td colspan="7" class="empty-cell">还没有上传任务。</td></tr></tbody>';
+    uploadJobTable.innerHTML = '<tbody><tr><td colspan="9" class="empty-cell">还没有上传任务。</td></tr></tbody>';
     return;
   }
   uploadJobTable.innerHTML = `
@@ -996,9 +1012,12 @@ function renderUploadJobTable() {
         <th>状态</th>
         <th>范围</th>
         <th class="mono">文件数</th>
+        <th class="mono">已传文件</th>
         <th class="mono">计划数</th>
+        <th class="mono">已处理计划</th>
         <th>创建人</th>
         <th>时间</th>
+        <th>备注</th>
       </tr>
     </thead>
     <tbody>
@@ -1008,9 +1027,12 @@ function renderUploadJobTable() {
           <td>${escapeHtml(item.status || "--")}</td>
           <td>${escapeHtml(uploadScopeLabel(item.scope || "plan"))}</td>
           <td class="mono">${formatNumber(item.total_files)}</td>
+          <td class="mono">${formatNumber(item.success_files || item.uploaded_files || 0)} / ${formatNumber(item.total_files || 0)}</td>
           <td class="mono">${formatNumber(item.total_targets)}</td>
+          <td class="mono">${formatNumber(item.processed_targets || 0)} / ${formatNumber(item.total_targets || 0)}</td>
           <td>${escapeHtml(item.created_by_label || "--")}</td>
           <td>${escapeHtml(item.created_at || "--")}</td>
+          <td>${escapeHtml(normalizeUploadJobNote(item.note))}</td>
         </tr>
       `).join("")}
     </tbody>
@@ -1152,7 +1174,7 @@ function renderKpis(latest) {
 function renderOverviewHero(latest) {
   if (!overviewHeroCard) return;
   const summary = latest?.summary || {};
-  const operatorMode = String(state.session?.role || "") === "operator"
+  const operatorMode = isOperator()
     || Number(summary.operator_count || 0) > 0
     || Number(summary.active_operator_count || 0) > 0;
   const teamLabel = operatorMode ? "运营账号" : "归属人";
@@ -1166,8 +1188,8 @@ function renderOverviewHero(latest) {
   overviewHeroCard.innerHTML = `
     <div class="overview-hero-head">
       <div>
-        <h2>今日投放概况</h2>
-        <p class="overview-hero-copy">先看消耗、支付、订单和 ROI。</p>
+        <h2>${operatorMode && isOperator() ? "今日总览" : "今日投放概况"}</h2>
+        <p class="overview-hero-copy">${operatorMode && isOperator() ? "先看你的总消耗、总支付、总订单和 ROI。" : "先看消耗、支付、订单和 ROI。"}</p>
       </div>
       <div class="overview-hero-pills">
         <span class="system-pill ${accountTone === "danger" ? "danger" : ""}">${accountFailures ? `账户异常 ${formatNumber(accountFailures)}` : "账户查询正常"}</span>
@@ -1657,6 +1679,9 @@ function renderMaterialDetail(materialKey) {
       <h4>素材覆盖与表现</h4>
       <span>补充信息</span>
     </div>
+    <div class="detail-inline-actions">
+      <button type="button" class="button ghost compact ${canPreviewMaterial(row) ? "" : "disabled"}" data-action="open-material-preview" data-material-key="${escapeHtml(row.material_key)}" ${canPreviewMaterial(row) ? "" : "disabled"}>预览素材</button>
+    </div>
     <div class="detail-stats">
       <div class="detail-stat"><span class="label">素材类型</span><span class="value compact">${escapeHtml(row.material_type || "-")}</span></div>
       <div class="detail-stat"><span class="label">当前统计消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
@@ -1669,6 +1694,9 @@ function renderMaterialDetail(materialKey) {
       <div class="detail-stat detail-stat-wide"><span class="label">代表计划 / 账户</span><span class="value compact">${escapeHtml(row.top_plan_name || "-")}<br /><span class="detail-sub">${escapeHtml(row.top_account_name || "-")}</span></span></div>
     </div>
   `;
+  materialDetail.querySelector('[data-action="open-material-preview"]')?.addEventListener("click", () => {
+    openMaterialPreview(row.material_key);
+  });
 }
 
 function setSelectedMaterial(materialKey) {
@@ -1700,6 +1728,14 @@ function renderMaterialInteractions(rows) {
       renderMaterialTable(rows);
     });
   });
+  materialTable.querySelectorAll('[data-action="open-material-preview"]').forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const materialKey = String(button.dataset.materialKey || "");
+      if (!materialKey) return;
+      openMaterialPreview(materialKey);
+    });
+  });
 }
 
 function renderMaterialTable(rows) {
@@ -1710,6 +1746,7 @@ function renderMaterialTable(rows) {
   });
   const columns = [
     { key: "material_name", label: "素材", sortable: true },
+    { key: "preview", label: "预览", sortable: false },
     { key: "stat_cost", label: "消耗", sortable: true },
     { key: "material_type", label: "类型", sortable: true },
     { key: "order_count", label: "订单", sortable: true },
@@ -1730,6 +1767,15 @@ function renderMaterialTable(rows) {
               <span class="cell-subitem" title="素材 ID：${escapeHtml(row.material_id || "-")}">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
               <span class="cell-subitem" title="视频 ID：${escapeHtml(row.video_id || "-")}">VID ${escapeHtml(truncateMiddle(row.video_id || "-", 8, 6))}</span>
             </div>
+          </td>
+          <td>
+            <button
+              type="button"
+              class="button ghost compact"
+              data-action="open-material-preview"
+              data-material-key="${escapeHtml(row.material_key)}"
+              ${canPreviewMaterial(row) ? "" : "disabled"}
+            >预览</button>
           </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td><span class="pill">${escapeHtml(row.material_type || "-")}</span></td>
@@ -2140,6 +2186,14 @@ function isAdmin() {
   return state.session?.role === "admin";
 }
 
+function isSupervisor() {
+  return state.session?.role === "supervisor";
+}
+
+function isOperator() {
+  return state.session?.role === "operator";
+}
+
 function roleLabel(role) {
   if (role === "admin") return "管理员";
   if (role === "supervisor") return "主管";
@@ -2171,6 +2225,69 @@ function syncUserRoleFields() {
 function selectedUserKeywords() {
   if (!state.selectedUserId) return [];
   return state.userKeywords[state.selectedUserId] || [];
+}
+
+function currentMaterialRows() {
+  return materialRangePayload(sectionFilter("material"))?.items || [];
+}
+
+function selectedMaterialRow(materialKey) {
+  return currentMaterialRows().find((item) => item.material_key === materialKey) || null;
+}
+
+function canPreviewMaterial(row) {
+  return Boolean(row?.video_url || row?.cover_url || row?.aweme_item_id);
+}
+
+function materialAwemeLink(row) {
+  const awemeId = String(row?.aweme_item_id || "").trim();
+  return awemeId ? `https://www.douyin.com/video/${encodeURIComponent(awemeId)}` : "";
+}
+
+function closeMaterialPreview() {
+  if (!materialPreviewModal) return;
+  materialPreviewModal.classList.add("hidden");
+  materialPreviewModal.setAttribute("aria-hidden", "true");
+  if (materialPreviewBody) materialPreviewBody.innerHTML = "";
+}
+
+function openMaterialPreview(materialKey) {
+  const row = selectedMaterialRow(materialKey);
+  if (!row || !materialPreviewModal || !materialPreviewBody) return;
+  const directVideoUrl = String(row.video_url || "").trim();
+  const coverUrl = String(row.cover_url || "").trim();
+  const awemeLink = materialAwemeLink(row);
+  if (materialPreviewTitle) {
+    materialPreviewTitle.textContent = row.material_name || "素材预览";
+  }
+  if (materialPreviewMeta) {
+    materialPreviewMeta.textContent = [row.top_account_name || "", row.top_plan_name || ""].filter(Boolean).join(" / ") || "当前素材预览";
+  }
+  const previewBlock = directVideoUrl
+    ? `<video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls autoplay playsinline></video>`
+    : coverUrl
+      ? `<img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row.material_name || "素材封面")}" />`
+      : '<div class="preview-empty">当前素材没有可直接预览的地址。</div>';
+  const extraActions = [
+    awemeLink ? `<a class="button ghost compact" href="${escapeHtml(awemeLink)}" target="_blank" rel="noreferrer">打开抖音作品</a>` : "",
+    directVideoUrl ? `<a class="button ghost compact" href="${escapeHtml(directVideoUrl)}" target="_blank" rel="noreferrer">打开原始视频</a>` : "",
+  ].filter(Boolean).join("");
+  materialPreviewBody.innerHTML = `
+    <div class="preview-media-shell">${previewBlock}</div>
+    <div class="preview-detail-grid">
+      <div class="preview-stat"><span>素材类型</span><strong>${escapeHtml(row.material_type || "-")}</strong></div>
+      <div class="preview-stat"><span>消耗</span><strong class="mono">${formatMoney(row.stat_cost)}</strong></div>
+      <div class="preview-stat"><span>支付</span><strong class="mono">${formatMoney(row.pay_amount)}</strong></div>
+      <div class="preview-stat"><span>订单</span><strong class="mono">${formatNumber(row.order_count)}</strong></div>
+      <div class="preview-stat"><span>ROI</span><strong class="mono">${formatRate(row.roi)}</strong></div>
+      <div class="preview-stat"><span>覆盖计划</span><strong class="mono">${formatNumber(row.plan_count)}</strong></div>
+      <div class="preview-stat"><span>素材 ID</span><strong class="mono">${escapeHtml(row.material_id || "--")}</strong></div>
+      <div class="preview-stat"><span>视频 ID</span><strong class="mono">${escapeHtml(row.video_id || "--")}</strong></div>
+    </div>
+    ${extraActions ? `<div class="preview-actions">${extraActions}</div>` : ""}
+  `;
+  materialPreviewModal.classList.remove("hidden");
+  materialPreviewModal.setAttribute("aria-hidden", "false");
 }
 
 function selectedUserMatchedMaterials() {
@@ -2330,6 +2447,8 @@ function setFormReadOnly(formEl, readOnly) {
 
 function applyRoleViewPolicy() {
   const admin = isAdmin();
+  const supervisor = isSupervisor();
+  const operator = isOperator();
   const role = String(state.session?.role || "");
   const accessTab = viewTabs?.querySelector('[data-view="access"]');
   const ownershipTab = viewTabs?.querySelector('[data-view="ownership"]');
@@ -2349,34 +2468,55 @@ function applyRoleViewPolicy() {
     signalsTab.classList.toggle("hidden", !admin);
   }
   if (accountTab) {
-    accountTab.classList.toggle("hidden", role === "operator");
+    accountTab.classList.toggle("hidden", operator);
   }
   if (planTab) {
-    planTab.classList.toggle("hidden", role === "operator");
+    planTab.classList.toggle("hidden", operator);
   }
   if (breakdownTab) {
-    breakdownTab.textContent = role === "operator" ? "团队排名" : "经营拆解";
+    breakdownTab.textContent = operator ? "团队排名" : "运营排名";
   }
   if (materialsTab) {
-    materialsTab.textContent = role === "operator" ? "我的素材" : "素材";
+    materialsTab.textContent = operator ? "我的素材" : "素材";
   }
   if (uploadsTab) {
     uploadsTab.classList.toggle("hidden", !canUseUploadModule());
-    uploadsTab.textContent = "上传素材";
+    uploadsTab.textContent = "批量上传";
+  }
+  if (syncButton) {
+    syncButton.classList.toggle("hidden", !admin);
+  }
+  if (syncExtendedButton) {
+    syncExtendedButton.classList.toggle("hidden", !admin);
   }
   if (productRankPanel) {
-    productRankPanel.classList.toggle("hidden", role === "operator");
+    productRankPanel.classList.toggle("hidden", operator);
+  }
+  if (overviewBoardGrid) {
+    overviewBoardGrid.classList.toggle("hidden", !admin);
+  }
+  if (overviewAlertTitle) {
+    overviewAlertTitle.textContent = admin ? "老板关注" : supervisor ? "范围关注" : "今日重点";
+  }
+  if (breakdownTitle) {
+    breakdownTitle.textContent = operator ? "团队排名" : "运营账号与商品排名";
+  }
+  if (teamPanelTitle) {
+    teamPanelTitle.textContent = operator ? "团队排名" : "运营账号排名";
+  }
+  if (materialsPanelTitle) {
+    materialsPanelTitle.textContent = operator ? "我的素材" : "素材效果排行";
   }
   if (heroCopy) {
     heroCopy.textContent = admin
-      ? "账户、计划、素材、运营排名、上传与预警管理。"
-      : role === "supervisor"
-        ? "查看授权账户范围内的账户、计划、素材与团队表现，可按需上传素材。"
-        : "查看我的素材和团队排名，跟踪当天消耗与归属情况。";
+      ? "账户、计划、素材、运营账号排名、账号管理、预警和上传任务。"
+      : supervisor
+        ? "查看授权账户范围内的账户、计划、素材和运营排名；按需批量上传素材。"
+        : "查看我的素材、团队排名和今日总消耗。";
   }
   const allowedViews = admin
     ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "uploads", "ownership", "access", "signals"])
-    : role === "supervisor"
+    : supervisor
       ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials"])
       : new Set(["overview", "breakdown", "materials"]);
   if (!allowedViews.has(state.activeView)) {
@@ -3177,6 +3317,17 @@ function bindRangeFilterControls(sectionKey) {
 }
 
 function bindInputs() {
+  materialPreviewModal?.addEventListener("click", (event) => {
+    const trigger = event.target.closest('[data-action="close-preview"]');
+    if (trigger) {
+      closeMaterialPreview();
+    }
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && materialPreviewModal && !materialPreviewModal.classList.contains("hidden")) {
+      closeMaterialPreview();
+    }
+  });
   if (viewTabs) {
     viewTabs.querySelectorAll(".view-tab").forEach((button) => {
       button.addEventListener("click", async () => {
@@ -3740,3 +3891,8 @@ bindInputs();
 setActiveView(state.activeView);
 fetchDashboard();
 window.setInterval(fetchDashboard, 60 * 1000);
+window.setInterval(() => {
+  if (state.activeView === "uploads" && canUseUploadModule()) {
+    fetchUploadJobs().catch(() => {});
+  }
+}, 5 * 1000);

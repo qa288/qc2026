@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import mimetypes
 import os
 import sys
 import time
@@ -36,7 +38,9 @@ UNI_PROMOTION_DATA_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/re
 PLAN_DETAIL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/detail/"
 PLAN_PRODUCT_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/product/get/"
 PLAN_MATERIAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/material/get/"
+PLAN_MATERIAL_ADD_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/material/add/"
 VIDEO_ORIGINAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/file/video/original/get/"
+LOCAL_VIDEO_UPLOAD_URL = "https://api.oceanengine.com/open_api/v3.0/local/file/video/upload/"
 
 REPORT_FIELDS = [
     "stat_cost",
@@ -325,6 +329,73 @@ def post_json(url: str, payload: dict[str, Any], timeout: int = 30) -> dict[str,
         raise ApiError(f"HTTP {exc.code}: {body}") from exc
 
 
+def post_api_json(url: str, access_token: str, payload: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Access-Token": access_token,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ApiError(f"HTTP {exc.code}: {body}") from exc
+
+
+def _multipart_form_body(
+    fields: dict[str, Any],
+    files: list[tuple[str, str, str, bytes]],
+) -> tuple[bytes, str]:
+    boundary = f"----CodexOcean{int(time.time() * 1000)}"
+    body = bytearray()
+    for name, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    for field_name, filename, content_type, content in files:
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode("utf-8")
+        )
+        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+        body.extend(content)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    return bytes(body), boundary
+
+
+def post_api_multipart(
+    url: str,
+    access_token: str,
+    fields: dict[str, Any],
+    files: list[tuple[str, str, str, bytes]],
+    timeout: int = 120,
+) -> dict[str, Any]:
+    body, boundary = _multipart_form_body(fields, files)
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Access-Token": access_token,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ApiError(f"HTTP {exc.code}: {body}") from exc
+
+
 def get_json(url: str, access_token: str, params: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
     encoded: dict[str, str] = {}
     for key, value in params.items():
@@ -376,6 +447,77 @@ def get_json_with_retries(
     if last_error is not None:
         raise ApiError(str(last_error)) from last_error
     raise ApiError("request failed without response")
+
+
+def post_api_json_with_retries(
+    url: str,
+    access_token: str,
+    payload: dict[str, Any],
+    timeout: int = 30,
+    attempts: int = 4,
+    base_delay: float = 1.0,
+) -> dict[str, Any]:
+    last_error: Exception | None = None
+    last_response: dict[str, Any] | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = post_api_json(url, access_token, payload, timeout=timeout)
+        except ApiError as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+        else:
+            code = int(response.get("code", 0) or 0)
+            if code not in RETRYABLE_API_CODES or attempt >= attempts:
+                return response
+            last_response = response
+        time.sleep(base_delay * (2 ** (attempt - 1)))
+    if last_response is not None:
+        return last_response
+    if last_error is not None:
+        raise ApiError(str(last_error)) from last_error
+    raise ApiError("request failed without response")
+
+
+def post_api_multipart_with_retries(
+    url: str,
+    access_token: str,
+    fields: dict[str, Any],
+    files: list[tuple[str, str, str, bytes]],
+    timeout: int = 120,
+    attempts: int = 3,
+    base_delay: float = 1.0,
+) -> dict[str, Any]:
+    last_error: Exception | None = None
+    last_response: dict[str, Any] | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = post_api_multipart(url, access_token, fields, files, timeout=timeout)
+        except ApiError as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+        else:
+            code = int(response.get("code", 0) or 0)
+            if code not in RETRYABLE_API_CODES or attempt >= attempts:
+                return response
+            last_response = response
+        time.sleep(base_delay * (2 ** (attempt - 1)))
+    if last_response is not None:
+        return last_response
+    if last_error is not None:
+        raise ApiError(str(last_error)) from last_error
+    raise ApiError("request failed without response")
+
+
+def sanitize_material_title(value: str, max_length: int = 60) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "视频素材"
+    text = text.replace("\r", " ").replace("\n", " ").strip()
+    if len(text) <= max_length:
+        return text
+    return text[:max_length]
 
 
 class OceanEngineClient:
@@ -761,6 +903,83 @@ class OceanEngineClient:
                 break
             page += 1
         return rows
+
+    def upload_local_video(
+        self,
+        advertiser_id: int,
+        material_name: str,
+        file_path: Path,
+        video_signature: str | None = None,
+        mime_type: str | None = None,
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        raw = file_path.read_bytes()
+        signature = str(video_signature or hashlib.md5(raw).hexdigest())
+        detected_type = mime_type or mimetypes.guess_type(file_path.name)[0] or "video/mp4"
+        fields = {
+            "filename": sanitize_material_title(material_name, max_length=255),
+            "local_account_id": int(advertiser_id),
+            "video_signature": signature,
+        }
+        files = [
+            (
+                "video_file",
+                file_path.name,
+                detected_type,
+                raw,
+            )
+        ]
+        response = post_api_multipart_with_retries(
+            LOCAL_VIDEO_UPLOAD_URL,
+            access_token,
+            fields,
+            files,
+            timeout=180,
+        )
+        if response.get("code") != 0:
+            raise ApiError(f"upload local video failed: {response}")
+        return response
+
+    def add_plan_material(
+        self,
+        advertiser_id: int,
+        ad_id: int,
+        material_title: str,
+        video_id: str,
+        marketing_goal: str = "",
+        product_id: str = "",
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        title = sanitize_material_title(material_title)
+        video_material = [{"video_id": str(video_id)}]
+        title_material = [{"title": title}]
+        payload: dict[str, Any] = {
+            "advertiser_id": int(advertiser_id),
+            "ad_id": int(ad_id),
+        }
+        product_text = str(product_id or "").strip()
+        if str(marketing_goal or "").strip() == "VIDEO_PROM_GOODS" and product_text.isdigit():
+            payload["multi_product_creative_list"] = [
+                {
+                    "product_id": int(product_text),
+                    "title_material": title_material,
+                    "video_material": video_material,
+                }
+            ]
+        else:
+            payload["programmatic_creative_media_list"] = {
+                "title_material": title_material,
+                "video_material": video_material,
+            }
+        response = post_api_json_with_retries(
+            PLAN_MATERIAL_ADD_URL,
+            access_token,
+            payload,
+            timeout=60,
+        )
+        if response.get("code") != 0:
+            raise ApiError(f"add plan material failed: {response}")
+        return response
 
     def get_original_videos(self, advertiser_id: int, material_ids: list[str]) -> dict[str, Any]:
         access_token = self.get_access_token()

@@ -49,13 +49,13 @@
             <div class="view-tabs" id="viewTabs">
               <button type="button" class="view-tab active" data-view="overview">总览</button>
               <button type="button" class="view-tab" data-view="accounts">账户</button>
-              <button type="button" class="view-tab" data-view="breakdown">经营拆解</button>
+              <button type="button" class="view-tab" data-view="breakdown">运营排名</button>
               <button type="button" class="view-tab" data-view="plans">计划</button>
               <button type="button" class="view-tab" data-view="materials">素材</button>
               <button type="button" class="view-tab" data-view="uploads">上传素材</button>
-              <button type="button" class="view-tab" data-view="ownership">归属规则</button>
-              <button type="button" class="view-tab" data-view="access">权限</button>
-              <button type="button" class="view-tab" data-view="signals">预警规则</button>
+              <button type="button" class="view-tab" data-view="ownership">数据归属</button>
+              <button type="button" class="view-tab" data-view="access">账号管理</button>
+              <button type="button" class="view-tab" data-view="signals">预警中心</button>
             </div>
           </div>
         </div>
@@ -72,11 +72,11 @@
 
         <section class="kpi-grid overview-kpi-strip" id="kpiGrid"></section>
 
-        <section class="board-grid">
-          <div class="panel alert-panel">
+        <section class="board-grid" id="overviewBoardGrid">
+          <div class="panel alert-panel" id="overviewAlertPanel">
             <div class="panel-head overview-alert-head">
               <div>
-                <h2>老板关注</h2>
+                <h2 id="overviewAlertTitle">老板关注</h2>
               </div>
             </div>
             <div class="alert-focus-grid">
@@ -134,7 +134,7 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h2 id="breakdownTitle">商品与团队排名</h2>
+              <h2 id="breakdownTitle">运营账号与商品排名</h2>
             </div>
             <div class="toolbar">
               <div class="range-filter-group">
@@ -158,7 +158,7 @@
             <div class="rank-panel">
               <div class="rank-panel-head">
                 <div>
-                  <h3 id="teamPanelTitle">团队排名</h3>
+                  <h3 id="teamPanelTitle">运营账号排名</h3>
                 </div>
                 <input id="employeeSearch" class="search-input rank-search" type="search" placeholder="搜索运营账号 / 代表计划" />
               </div>
@@ -229,7 +229,7 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h2>素材效果排行</h2>
+              <h2 id="materialsPanelTitle">素材效果排行</h2>
             </div>
             <div class="toolbar wide">
               <div class="range-filter-group">
@@ -344,7 +344,7 @@
         <section class="panel ownership-panel">
           <div class="panel-head">
             <div>
-              <h2>归属规则</h2>
+              <h2>数据归属</h2>
             </div>
             <div class="meta-block compact single-line" id="ownershipHeadMeta">
               <span>这里定义后台的关键词归属口径，关键词命中和人工绑定都会计入排名。</span>
@@ -498,10 +498,10 @@
         <section class="panel access-panel">
           <div class="panel-head">
             <div>
-              <h2>账号与权限</h2>
+              <h2>账号管理</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>运营和老板共用工作台，管理员只需要维护账号和账户范围。</span>
+              <span>管理员维护账号、角色、主管账户范围和运营关键词。</span>
             </div>
           </div>
           <div class="access-layout">
@@ -615,7 +615,7 @@
         <section class="panel signal-panel">
           <div class="panel-head signal-panel-head">
             <div>
-              <h2>预警规则</h2>
+              <h2>预警中心</h2>
             </div>
             <div class="meta-block compact single-line">
               <span>先定义阈值和监控对象，再决定是否外发到通知通道。</span>
@@ -757,6 +757,19 @@
           </div>
         </section>
       </section>
+    </div>
+    <div class="preview-modal hidden" id="materialPreviewModal" aria-hidden="true">
+      <div class="preview-backdrop" data-action="close-preview"></div>
+      <div class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="materialPreviewTitle">
+        <div class="preview-head">
+          <div>
+            <h3 id="materialPreviewTitle">素材预览</h3>
+            <div id="materialPreviewMeta" class="section-range-meta compact-inline">加载中</div>
+          </div>
+          <button type="button" class="button ghost compact" data-action="close-preview">关闭</button>
+        </div>
+        <div class="preview-body" id="materialPreviewBody"></div>
+      </div>
     </div>
     <script src="/static/app.js"></script>
   </body>

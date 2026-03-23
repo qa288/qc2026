@@ -32,3 +32,13 @@ def sync_dashboard_detail() -> dict:
 def dispatch_dashboard_alerts() -> dict:
     _prepare()
     return dispatch_once()
+
+
+@celery_app.task(name="dashboard.material_upload")
+def process_material_upload(job_id: int) -> dict:
+    _prepare()
+    try:
+        return service.process_material_upload_job(int(job_id))
+    except Exception as exc:
+        service.mark_material_upload_job_failed(int(job_id), f"上传任务失败：{exc}")
+        raise
