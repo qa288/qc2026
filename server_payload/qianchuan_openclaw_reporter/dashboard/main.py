@@ -4580,6 +4580,36 @@ class DashboardService:
             "missing_summary_days": missing_summary_days,
         }
 
+    def backfill_recent_performance_history(self, days: int = 30) -> dict[str, Any]:
+        tz = ZoneInfo(self.read_config()["timezone"])
+        end_dt = datetime.now(tz).replace(hour=23, minute=59, second=59, microsecond=0)
+        start_day = (end_dt.date() - timedelta(days=max(int(days or 30) - 1, 0)))
+        start_dt = datetime(start_day.year, start_day.month, start_day.day, 0, 0, 0, tzinfo=tz)
+        result = self.backfill_performance_history(start_dt, end_dt)
+        result.update(
+            {
+                "range_start": start_dt.strftime("%Y-%m-%d"),
+                "range_end": end_dt.strftime("%Y-%m-%d"),
+                "days": max(int(days or 30), 1),
+            }
+        )
+        return result
+
+    def backfill_recent_extended_history(self, days: int = 30) -> dict[str, Any]:
+        tz = ZoneInfo(self.read_config()["timezone"])
+        end_dt = datetime.now(tz).replace(hour=23, minute=59, second=59, microsecond=0)
+        start_day = (end_dt.date() - timedelta(days=max(int(days or 30) - 1, 0)))
+        start_dt = datetime(start_day.year, start_day.month, start_day.day, 0, 0, 0, tzinfo=tz)
+        result = self.backfill_extended_history(start_dt, end_dt)
+        result.update(
+            {
+                "range_start": start_dt.strftime("%Y-%m-%d"),
+                "range_end": end_dt.strftime("%Y-%m-%d"),
+                "days": max(int(days or 30), 1),
+            }
+        )
+        return result
+
     def persist_snapshot(self, payload: dict[str, Any]) -> None:
         with self.db() as conn:
             conn.execute(
@@ -5401,6 +5431,7 @@ class DashboardService:
         range_label = ""
         start_dt: datetime | None = None
         end_dt: datetime | None = None
+        missing_days = 0
         if not target_snapshot:
             config = self.read_config()
             if normalized not in PERFORMANCE_RANGES:
@@ -5409,12 +5440,12 @@ class DashboardService:
                 start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
             else:
                 start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
-            if normalized in {"yesterday", "week", "month", "custom"}:
-                self.backfill_extended_history(start_dt, end_dt)
 
         with self.db() as conn:
             if not target_snapshot:
                 assert start_dt is not None and end_dt is not None
+                if normalized in {"yesterday", "week", "month", "custom"}:
+                    missing_days = len(self._missing_extended_days(conn, start_dt, end_dt))
                 runs = self._latest_extended_sync_runs_for_window(conn, start_dt, end_dt)
                 if not runs:
                     return {
@@ -5426,6 +5457,8 @@ class DashboardService:
                         "query_start_date": start_dt.strftime("%Y-%m-%d"),
                         "query_end_date": end_dt.strftime("%Y-%m-%d"),
                         "snapshot_count": 0,
+                        "history_backfill_pending": missing_days > 0,
+                        "missing_history_days": missing_days,
                     }
                 snapshot_times = [str(item.get("snapshot_time") or "") for item in runs if str(item.get("snapshot_time") or "").strip()]
                 latest_meta = {
@@ -5524,6 +5557,8 @@ class DashboardService:
             payload["range_label"] = range_label
             payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")
             payload["query_end_date"] = end_dt.strftime("%Y-%m-%d")
+            payload["history_backfill_pending"] = missing_days > 0
+            payload["missing_history_days"] = missing_days
         self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
         return payload
 
@@ -5549,13 +5584,17 @@ class DashboardService:
             start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
         else:
             start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
+        missing_days = 0
         if normalized in {"week", "month", "custom", "yesterday"}:
-            self.backfill_performance_history(start_dt, end_dt)
+            with self.db() as conn:
+                missing_days = len(self._missing_summary_days(conn, start_dt, end_dt))
         payload = self._performance_snapshot_from_db(start_dt, end_dt)
         payload["range_key"] = normalized
         payload["range_label"] = range_label
         payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")
         payload["query_end_date"] = end_dt.strftime("%Y-%m-%d")
+        payload["history_backfill_pending"] = missing_days > 0
+        payload["missing_history_days"] = missing_days
         payload["plans"] = self._apply_employee_attribution(
             [self._decorate_plan_item(item) for item in payload["plans"]],
             payload["accounts"],
@@ -6620,6 +6659,44 @@ async def manual_extended_sync(_auth: dict[str, Any] = Depends(require_admin)) -
     task = celery_app.send_task("dashboard.detail_sync")
     return JSONResponse(
         {"ok": True, "queued": True, "task_id": task.id, "task_name": "dashboard.detail_sync"},
+        status_code=202,
+    )
+
+
+@app.post("/api/sync/backfill/performance")
+async def manual_performance_backfill(
+    days: int = 30, _auth: dict[str, Any] = Depends(require_admin)
+) -> JSONResponse:
+    from dashboard.celery_app import celery_app
+
+    task = celery_app.send_task("dashboard.performance_backfill", args=[max(int(days or 30), 1)])
+    return JSONResponse(
+        {
+            "ok": True,
+            "queued": True,
+            "task_id": task.id,
+            "task_name": "dashboard.performance_backfill",
+            "days": max(int(days or 30), 1),
+        },
+        status_code=202,
+    )
+
+
+@app.post("/api/sync/backfill/extended")
+async def manual_extended_backfill(
+    days: int = 30, _auth: dict[str, Any] = Depends(require_admin)
+) -> JSONResponse:
+    from dashboard.celery_app import celery_app
+
+    task = celery_app.send_task("dashboard.detail_backfill", args=[max(int(days or 30), 1)])
+    return JSONResponse(
+        {
+            "ok": True,
+            "queued": True,
+            "task_id": task.id,
+            "task_name": "dashboard.detail_backfill",
+            "days": max(int(days or 30), 1),
+        },
         status_code=202,
     )
 

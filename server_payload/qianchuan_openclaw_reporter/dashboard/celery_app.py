@@ -7,6 +7,7 @@ from celery.schedules import crontab
 
 TIMEZONE = os.environ.get("TIMEZONE", "Asia/Shanghai")
 DETAIL_SYNC_INTERVAL_MINUTES = int(os.environ.get("DETAIL_SYNC_INTERVAL_MINUTES", "10"))
+HISTORY_BACKFILL_DAYS = int(os.environ.get("HISTORY_BACKFILL_DAYS", "30"))
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL") or os.environ.get("REDIS_URL", "redis://redis:6379/1")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND") or os.environ.get(
     "REDIS_URL", "redis://redis:6379/2"
@@ -35,6 +36,16 @@ celery_app.conf.update(
         "dashboard-alert-dispatch": {
             "task": "dashboard.dispatch_alerts",
             "schedule": crontab(minute="*"),
+        },
+        "dashboard-performance-history-backfill": {
+            "task": "dashboard.performance_backfill",
+            "schedule": crontab(hour=2, minute=10),
+            "args": (HISTORY_BACKFILL_DAYS,),
+        },
+        "dashboard-detail-history-backfill": {
+            "task": "dashboard.detail_backfill",
+            "schedule": crontab(hour=2, minute=30),
+            "args": (HISTORY_BACKFILL_DAYS,),
         },
     },
 )

@@ -157,6 +157,10 @@ Dashboard 页面当前包含：
   - 登录后读取当前账号与权限能力
 - `POST /api/sync/extended`
   - 手动提交一次细粒度同步任务，接口立即返回 `202`
+- `POST /api/sync/backfill/performance`
+  - 管理员手动提交一次主快照历史回补任务，默认回补最近 `30` 天
+- `POST /api/sync/backfill/extended`
+  - 管理员手动提交一次细粒度历史回补任务，默认回补最近 `30` 天
 - `GET /api/plans/{ad_id}/assets`
   - 读取某条计划最近一次落库的详情、商品、素材和视频首发标记
 - `GET /api/material-rankings`
@@ -243,15 +247,17 @@ Dashboard 页面当前包含：
 - `GET /api/performance`
   - 默认只读 `summary_snapshots / account_snapshots / plan_snapshots`
   - 若查询 `昨日 / 近7天 / 近30天 / 指定日期范围` 时发现缺失历史日快照：
-    - 自动按天从官方接口回补
-    - 回补完成后写入 PostgreSQL
-    - 后续查询继续只读库
+    - 不在页面请求里直接远程拉数
+    - 只返回当前已有库内结果，并标记 `history_backfill_pending`
+    - 由定时任务或管理员手动触发回补
 - `GET /api/material-rankings`
   - 优先读取 `material_rollups`
   - `material_rollups` 在每次细粒度同步后生成
   - 查询 `昨日 / 近7天 / 近30天 / 指定日期范围` 时，会先检查是否缺少历史明细日快照
-  - 若缺失，则按天回补 `plan_detail / product / material / video flags`
-  - 回补完成后继续只读库
+  - 若缺失：
+    - 不在页面请求里直接远程拉数
+    - 只返回当前已有库内结果，并标记 `history_backfill_pending`
+    - 由定时任务或管理员手动触发回补
   - 如历史老快照尚未生成 `material_rollups`，才临时回退到 `material_snapshots` 聚合
 
 ## 手动同步行为
@@ -260,12 +266,19 @@ Dashboard 页面当前包含：
 
 - `POST /api/sync`
 - `POST /api/sync/extended`
+- `POST /api/sync/backfill/performance`
+- `POST /api/sync/backfill/extended`
 
 接口行为：
 
 - 立即返回 `202 Accepted`
 - 由 Celery Worker 异步执行
 - 避免经过 1Panel / 反向代理时因长任务导致 `504 Gateway Timeout`
+
+当前历史回补调度：
+
+- 每天 `02:10` 回补最近 `30` 天主快照历史
+- 每天 `02:30` 回补最近 `30` 天细粒度明细历史
 
 当前 Web 看板数据刷新节奏：
 

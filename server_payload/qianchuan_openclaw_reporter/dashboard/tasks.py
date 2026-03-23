@@ -28,6 +28,18 @@ def sync_dashboard_detail() -> dict:
     }
 
 
+@celery_app.task(name="dashboard.performance_backfill")
+def backfill_dashboard_performance(days: int = 30) -> dict:
+    _prepare()
+    return service.backfill_recent_performance_history(int(days or 30))
+
+
+@celery_app.task(name="dashboard.detail_backfill")
+def backfill_dashboard_detail(days: int = 30) -> dict:
+    _prepare()
+    return service.backfill_recent_extended_history(int(days or 30))
+
+
 @celery_app.task(name="dashboard.dispatch_alerts")
 def dispatch_dashboard_alerts() -> dict:
     _prepare()
