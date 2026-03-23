@@ -4140,6 +4140,48 @@ class DashboardService:
             cursor += timedelta(days=1)
         return missing
 
+    def _summary_meta_for_day(self, conn: Any, target_day: datetime) -> dict[str, Any] | None:
+        row = conn.execute(
+            """
+            SELECT snapshot_time, window_start, window_end
+            FROM summary_snapshots
+            WHERE snapshot_time >= ?
+              AND snapshot_time <= ?
+            ORDER BY snapshot_time DESC
+            LIMIT 1
+            """,
+            (
+                target_day.strftime("%Y-%m-%d 00:00:00"),
+                target_day.strftime("%Y-%m-%d 23:59:59"),
+            ),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def _missing_extended_days(self, conn: Any, start_dt: datetime, end_dt: datetime) -> list[datetime]:
+        start_day = start_dt.date()
+        end_day = end_dt.date()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT substr(snapshot_time, 1, 10) AS day_key
+            FROM extended_sync_runs
+            WHERE status IN ('ok', 'partial')
+              AND snapshot_time >= ?
+              AND snapshot_time <= ?
+            """,
+            (
+                start_dt.strftime("%Y-%m-%d 00:00:00"),
+                end_dt.strftime("%Y-%m-%d 23:59:59"),
+            ),
+        ).fetchall()
+        existing_days = {str(row["day_key"] or "") for row in rows if str(row["day_key"] or "").strip()}
+        missing: list[datetime] = []
+        cursor = start_day
+        while cursor <= end_day:
+            if cursor.strftime("%Y-%m-%d") not in existing_days:
+                missing.append(datetime(cursor.year, cursor.month, cursor.day))
+            cursor += timedelta(days=1)
+        return missing
+
     def _aggregate_account_snapshots(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[int, dict[str, Any]] = {}
         for row in rows:
@@ -4506,6 +4548,38 @@ class DashboardService:
             self._performance_cache.clear()
         return {"backfilled_days": backfilled, "skipped_current_day": skipped_current_day}
 
+    def backfill_extended_history(self, start_dt: datetime, end_dt: datetime) -> dict[str, Any]:
+        tz = ZoneInfo(self.read_config()["timezone"])
+        today = datetime.now(tz).date()
+        self.backfill_performance_history(start_dt, end_dt)
+        with self.db() as conn:
+            missing_days = self._missing_extended_days(conn, start_dt, end_dt)
+        backfilled = 0
+        skipped_current_day = 0
+        missing_summary_days = 0
+        for day_marker in missing_days:
+            target_day = day_marker.date()
+            if target_day >= today:
+                skipped_current_day += 1
+                continue
+            with self.db() as conn:
+                meta = self._summary_meta_for_day(conn, day_marker)
+            if not meta:
+                missing_summary_days += 1
+                continue
+            payload = self._collect_extended_snapshot_for_meta(meta)
+            if payload.get("skipped"):
+                continue
+            self.persist_extended_snapshot(payload)
+            backfilled += 1
+        if backfilled:
+            self._material_cache.clear()
+        return {
+            "backfilled_days": backfilled,
+            "skipped_current_day": skipped_current_day,
+            "missing_summary_days": missing_summary_days,
+        }
+
     def persist_snapshot(self, payload: dict[str, Any]) -> None:
         with self.db() as conn:
             conn.execute(
@@ -4766,28 +4840,10 @@ class DashboardService:
         result["video_material_ids"] = sorted(set(video_material_ids))
         return result
 
-    def collect_extended_snapshot(self) -> dict[str, Any]:
+    def _collect_extended_snapshot_for_meta(self, meta: dict[str, Any]) -> dict[str, Any]:
         config = self.read_config()
         with self.db() as conn:
-            meta = self._latest_summary_meta(conn)
-            if not meta:
-                return {
-                    "ok": False,
-                    "skipped": True,
-                    "reason": "missing summary snapshot",
-                }
-            existing = conn.execute(
-                "SELECT status FROM extended_sync_runs WHERE snapshot_time = ?",
-                (meta["snapshot_time"],),
-            ).fetchone()
-            if existing and str(existing["status"]) == "ok":
-                return {
-                    "ok": True,
-                    "skipped": True,
-                    "snapshot_time": meta["snapshot_time"],
-                    "reason": "already synced",
-                }
-            plans = self._snapshot_plans(conn, meta["snapshot_time"])
+            plans = self._snapshot_plans(conn, str(meta["snapshot_time"]))
 
         plan_limit = self._detail_sync_plan_limit(config)
         if plan_limit > 0:
@@ -4896,6 +4952,28 @@ class DashboardService:
             "video_flag_rows": video_flag_rows,
             "errors": errors,
         }
+
+    def collect_extended_snapshot(self) -> dict[str, Any]:
+        with self.db() as conn:
+            meta = self._latest_summary_meta(conn)
+            if not meta:
+                return {
+                    "ok": False,
+                    "skipped": True,
+                    "reason": "missing summary snapshot",
+                }
+            existing = conn.execute(
+                "SELECT status FROM extended_sync_runs WHERE snapshot_time = ?",
+                (meta["snapshot_time"],),
+            ).fetchone()
+            if existing and str(existing["status"]) == "ok":
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "snapshot_time": meta["snapshot_time"],
+                    "reason": "already synced",
+                }
+        return self._collect_extended_snapshot_for_meta(dict(meta))
 
     def persist_extended_snapshot(self, payload: dict[str, Any]) -> None:
         if payload.get("skipped"):
@@ -5318,17 +5396,25 @@ class DashboardService:
         if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
             return cached["payload"]
 
+        target_snapshot = str(snapshot_time or "").strip()
+        normalized = str(range_key or "day").strip().lower()
+        range_label = ""
+        start_dt: datetime | None = None
+        end_dt: datetime | None = None
+        if not target_snapshot:
+            config = self.read_config()
+            if normalized not in PERFORMANCE_RANGES:
+                raise ValueError("range must be one of day/yesterday/week/month/custom")
+            if normalized == "custom":
+                start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
+            else:
+                start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
+            if normalized in {"yesterday", "week", "month", "custom"}:
+                self.backfill_extended_history(start_dt, end_dt)
+
         with self.db() as conn:
-            target_snapshot = str(snapshot_time or "").strip()
             if not target_snapshot:
-                config = self.read_config()
-                normalized = str(range_key or "day").strip().lower()
-                if normalized not in PERFORMANCE_RANGES:
-                    raise ValueError("range must be one of day/yesterday/week/month/custom")
-                if normalized == "custom":
-                    start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
-                else:
-                    start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
+                assert start_dt is not None and end_dt is not None
                 runs = self._latest_extended_sync_runs_for_window(conn, start_dt, end_dt)
                 if not runs:
                     return {

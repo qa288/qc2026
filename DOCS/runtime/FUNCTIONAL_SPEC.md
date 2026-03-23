@@ -297,6 +297,10 @@
 - 查询 `昨日 / 近7天 / 近30天 / 指定日期范围` 时，会先检查本地是否缺失历史日快照
 - 如果缺失，则按天调用官方接口回补后再落库
 - 回补完成后，后续同范围查询继续只读库
+- 素材跨日范围查询也遵循同一原则：
+  - 先检查 `extended_sync_runs / material_rollups`
+  - 若缺失历史自然日明细快照，则按天回补 `plan_detail / product / material / video flags`
+  - 回补落库后，素材榜继续只读 `material_rollups`
 
 说明：
 

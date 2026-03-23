@@ -249,6 +249,9 @@ Dashboard 页面当前包含：
 - `GET /api/material-rankings`
   - 优先读取 `material_rollups`
   - `material_rollups` 在每次细粒度同步后生成
+  - 查询 `昨日 / 近7天 / 近30天 / 指定日期范围` 时，会先检查是否缺少历史明细日快照
+  - 若缺失，则按天回补 `plan_detail / product / material / video flags`
+  - 回补完成后继续只读库
   - 如历史老快照尚未生成 `material_rollups`，才临时回退到 `material_snapshots` 聚合
 
 ## 手动同步行为
