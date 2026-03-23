@@ -66,6 +66,7 @@ const state = {
   employeeKeywords: {},
   employeeBindings: {},
   userScopes: {},
+  userKeywords: {},
   matchPreview: null,
   unassignedPool: null,
   unassignedScope: "all",
@@ -183,6 +184,10 @@ const uploadPermissionField = document.getElementById("uploadPermissionField");
 const scopeAccountList = document.getElementById("scopeAccountList");
 const saveUserScopesButton = document.getElementById("saveUserScopesButton");
 const scopeEditorMeta = document.getElementById("scopeEditorMeta");
+const operatorKeywordSection = document.getElementById("operatorKeywordSection");
+const operatorKeywordStatus = document.getElementById("operatorKeywordStatus");
+const operatorKeywordForm = document.getElementById("operatorKeywordForm");
+const operatorKeywordTable = document.getElementById("operatorKeywordTable");
 const ruleTemplateButtons = Array.from(document.querySelectorAll(".signal-template-button"));
 const PERFORMANCE_SECTION_CONFIG = {
   account: {
@@ -1900,6 +1905,86 @@ function syncUserRoleFields() {
   uploadInput.disabled = true;
 }
 
+function selectedUserKeywords() {
+  if (!state.selectedUserId) return [];
+  return state.userKeywords[state.selectedUserId] || [];
+}
+
+async function fetchUserKeywords(userId, force = false) {
+  if (!userId || !isAdmin()) return [];
+  if (!force && state.userKeywords[userId]) return state.userKeywords[userId];
+  const response = await fetch(`/api/users/${userId}/keywords`);
+  const payload = await response.json();
+  state.userKeywords[userId] = payload.items || [];
+  return state.userKeywords[userId];
+}
+
+function renderUserKeywordTable() {
+  if (!operatorKeywordTable) return;
+  if (!isAdmin()) {
+    operatorKeywordTable.innerHTML = '<tbody><tr><td class="empty-cell">只有管理员可以配置运营关键词。</td></tr></tbody>';
+    return;
+  }
+  const user = selectedUserRecord();
+  if (!user) {
+    operatorKeywordTable.innerHTML = '<tbody><tr><td colspan="3" class="empty-cell">先选择一个运营账号，再维护关键词。</td></tr></tbody>';
+    return;
+  }
+  if (user.role !== "operator") {
+    operatorKeywordTable.innerHTML = '<tbody><tr><td colspan="3" class="empty-cell">只有运营账号需要配置关键词。</td></tr></tbody>';
+    return;
+  }
+  const items = selectedUserKeywords();
+  operatorKeywordTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>关键词</th>
+        <th>状态</th>
+        <th class="align-right">操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${items.length ? items.map((item) => `
+        <tr data-user-keyword-id="${item.id}">
+          <td>${escapeHtml(item.keyword || "--")}</td>
+          <td><span class="pill ${item.enabled ? "active" : ""}">${item.enabled ? "启用" : "停用"}</span></td>
+          <td class="align-right">
+            <button type="button" class="button ghost danger compact" data-action="delete-user-keyword" data-keyword-id="${item.id}">删除</button>
+          </td>
+        </tr>
+      `).join("") : '<tr><td colspan="3" class="empty-cell">还没有关键词。添加后，该运营账号只看命中这些关键词的数据。</td></tr>'}
+    </tbody>
+  `;
+}
+
+function syncAccessRolePanels() {
+  const user = selectedUserRecord();
+  const role = String(user?.role || userForm?.querySelector('select[name="role"]')?.value || "");
+  const isOperator = role === "operator";
+  const isSupervisor = role === "supervisor";
+  operatorKeywordSection?.classList.toggle("hidden", !isOperator);
+  if (scopeAccountList?.closest(".ownership-card")) {
+    scopeAccountList.closest(".ownership-card").classList.toggle("hidden", isOperator);
+  }
+  if (!isAdmin()) return;
+  if (!user) {
+    setInlineFeedback(scopeEditorMeta, "先选择后台账号，再配置账户范围。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "先选择一个运营账号，再配置关键词。", "neutral");
+    renderUserKeywordTable();
+    return;
+  }
+  if (isSupervisor) {
+    setInlineFeedback(scopeEditorMeta, "主管按账户范围查看全部计划和素材；如需上传，再开启素材上传权限。", "neutral");
+  } else if (isOperator) {
+    setInlineFeedback(scopeEditorMeta, "运营账号不配置账户范围，只根据关键词命中结果查看数据。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "给运营账号添加关键词后，该账号只看命中这些关键词的数据。", "neutral");
+  } else {
+    setInlineFeedback(scopeEditorMeta, "管理员默认可查看全部账户，不需要单独勾选。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "管理员和主管不使用运营关键词。", "neutral");
+  }
+  renderUserKeywordTable();
+}
+
 function setFormReadOnly(formEl, readOnly) {
   if (!formEl) return;
   formEl.querySelectorAll("input, select, textarea, button").forEach((field) => {
@@ -2404,6 +2489,7 @@ async function ensureOwnershipData(force = false) {
 function resetUserFormState() {
   state.selectedUserId = null;
   state.selectedUserScopeIds = [];
+  state.userKeywords = {};
   if (userForm) userForm.reset();
   const roleInput = userForm?.querySelector('select[name="role"]');
   if (roleInput) roleInput.value = "operator";
@@ -2419,10 +2505,13 @@ function resetUserFormState() {
   );
   setInlineFeedback(
     scopeEditorMeta,
-    isAdmin() ? "管理员默认全量可见；主管和运营都需要明确勾选账户范围。" : "当前账号无权修改账户范围。",
+    isAdmin() ? "管理员默认全量可见；主管需要明确勾选账户范围。" : "当前账号无权修改账户范围。",
     "neutral",
   );
+  setInlineFeedback(operatorKeywordStatus, "先选择一个运营账号，再配置关键词。", "neutral");
   renderScopeChecklist();
+  renderUserKeywordTable();
+  syncAccessRolePanels();
   if (isAdmin()) focusFirstInput(userForm, 'input[name="username"]');
 }
 
@@ -2440,6 +2529,7 @@ function fillUserForm(user) {
     user ? `当前编辑：${user.username} · ${roleLabel(user.role)}` : "创建主管或运营账号后，再配置账户范围。",
     "neutral",
   );
+  syncAccessRolePanels();
 }
 
 function renderUserTable() {
@@ -2490,6 +2580,10 @@ function renderScopeChecklist() {
   }
   if (user.role === "admin") {
     scopeAccountList.innerHTML = '<div class="empty-cell">管理员默认可查看全部账户，不需要单独勾选。</div>';
+    return;
+  }
+  if (user.role === "operator") {
+    scopeAccountList.innerHTML = '<div class="empty-cell">运营账号按关键词归属查看数据，这里不配置账户范围。</div>';
     return;
   }
   if (!state.catalogAccounts.length) {
@@ -2547,15 +2641,22 @@ async function selectUserManager(userId) {
   const user = selectedUserRecord();
   fillUserForm(user);
   renderUserTable();
-  if (user && user.role !== "admin") {
+  if (user?.role === "supervisor") {
     state.selectedUserScopeIds = await fetchUserScopes(userId, true);
   } else {
     state.selectedUserScopeIds = [];
   }
-  renderScopeChecklist();
-  if (isAdmin() && user && user.role !== "admin") {
-    scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
+  if (user?.role === "operator") {
+    await fetchUserKeywords(userId, true);
   }
+  renderScopeChecklist();
+  renderUserKeywordTable();
+  if (isAdmin() && user?.role === "supervisor") {
+    scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
+  } else if (isAdmin() && user?.role === "operator") {
+    focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
+  }
+  syncAccessRolePanels();
 }
 
 async function ensureAccessData(force = false) {
@@ -2564,15 +2665,20 @@ async function ensureAccessData(force = false) {
   if (state.selectedUserId) {
     fillUserForm(selectedUserRecord());
     const user = selectedUserRecord();
-    if (user && user.role !== "admin" && isAdmin()) {
+    if (user?.role === "supervisor" && isAdmin()) {
       state.selectedUserScopeIds = await fetchUserScopes(state.selectedUserId, force);
     } else {
       state.selectedUserScopeIds = [];
+    }
+    if (user?.role === "operator" && isAdmin()) {
+      await fetchUserKeywords(state.selectedUserId, force);
     }
   } else {
     resetUserFormState();
   }
   renderScopeChecklist();
+  renderUserKeywordTable();
+  syncAccessRolePanels();
 }
 
 async function fetchPerformance(filter, force = false) {
@@ -3031,9 +3137,12 @@ function bindInputs() {
     if (item?.id) {
       await selectUserManager(Number(item.id));
       setInlineFeedback(userEditorStatus, `已保存账号：${item.username || payload.username}。`, "success");
-      if (item.role !== "admin") {
-        setInlineFeedback(scopeEditorMeta, `下一步勾选该${item.role === "supervisor" ? "主管" : "运营"}账号允许访问的账户范围。`, "success");
+      if (item.role === "supervisor") {
+        setInlineFeedback(scopeEditorMeta, "下一步勾选该主管允许访问的账户范围。", "success");
         scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
+      } else if (item.role === "operator") {
+        setInlineFeedback(operatorKeywordStatus, "下一步给该运营账号添加关键词。", "success");
+        focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
       }
     } else {
       await ensureAccessData(true);
@@ -3047,6 +3156,66 @@ function bindInputs() {
 
   userForm?.querySelector('select[name="role"]')?.addEventListener("change", () => {
     syncUserRoleFields();
+    syncAccessRolePanels();
+    renderScopeChecklist();
+  });
+
+  operatorKeywordForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!isAdmin() || !state.selectedUserId) {
+      window.alert("请先选择一个运营账号");
+      return;
+    }
+    const user = selectedUserRecord();
+    if (!user || user.role !== "operator") {
+      window.alert("只有运营账号可以配置关键词");
+      return;
+    }
+    const form = new FormData(operatorKeywordForm);
+    const payload = {
+      keyword: String(form.get("keyword") || "").trim(),
+      enabled: form.get("enabled") === "on",
+    };
+    if (!payload.keyword) {
+      window.alert("请输入关键词");
+      return;
+    }
+    const response = await fetch(`/api/users/${state.selectedUserId}/keywords`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({}));
+      window.alert(errorPayload.detail || "新增运营关键词失败");
+      return;
+    }
+    operatorKeywordForm.reset();
+    operatorKeywordForm.querySelector('input[name="enabled"]').checked = true;
+    await fetchUserKeywords(state.selectedUserId, true);
+    renderUserKeywordTable();
+    setInlineFeedback(operatorKeywordStatus, `已添加关键词“${payload.keyword}”。`, "success");
+    focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
+    await fetchDashboard();
+  });
+
+  operatorKeywordTable?.addEventListener("click", async (event) => {
+    const button = event.target.closest('[data-action="delete-user-keyword"]');
+    if (!button || !isAdmin()) return;
+    const keywordId = Number(button.dataset.keywordId || 0);
+    if (!keywordId) return;
+    const response = await fetch(`/api/user-keywords/${keywordId}`, { method: "DELETE" });
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({}));
+      window.alert(errorPayload.detail || "删除运营关键词失败");
+      return;
+    }
+    if (state.selectedUserId) {
+      await fetchUserKeywords(state.selectedUserId, true);
+    }
+    renderUserKeywordTable();
+    setInlineFeedback(operatorKeywordStatus, "已删除关键词。", "success");
+    await fetchDashboard();
   });
 
   saveUserScopesButton?.addEventListener("click", async () => {

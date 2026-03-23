@@ -273,6 +273,11 @@ class UserScopePayload(BaseModel):
     advertiser_ids: list[int] = Field(default_factory=list)
 
 
+class UserKeywordPayload(BaseModel):
+    keyword: str = Field(min_length=1, max_length=80)
+    enabled: bool = True
+
+
 class DashboardService:
     def __init__(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -586,6 +591,16 @@ class DashboardService:
                     FOREIGN KEY(user_id) REFERENCES app_users(id)
                 );
 
+                CREATE TABLE IF NOT EXISTS user_keywords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    keyword TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES app_users(id)
+                );
+
                 CREATE TABLE IF NOT EXISTS account_balances (
                     snapshot_time TEXT NOT NULL,
                     advertiser_id BIGINT NOT NULL,
@@ -666,6 +681,9 @@ class DashboardService:
 
                 CREATE INDEX IF NOT EXISTS idx_user_account_scopes_user
                 ON user_account_scopes (user_id);
+
+                CREATE INDEX IF NOT EXISTS idx_user_keywords_user
+                ON user_keywords (user_id, enabled);
 
                 CREATE INDEX IF NOT EXISTS idx_account_balances_adv_time
                 ON account_balances (advertiser_id, snapshot_time);
@@ -763,7 +781,7 @@ class DashboardService:
                 (username, hashed, ROLE_ADMIN, "管理员", now, now),
             )
 
-    def get_user_by_id(self, user_id: int) -> dict[str, Any] | None:
+    def get_user_by_id(self, user_id: int, include_disabled: bool = False) -> dict[str, Any] | None:
         with self.db() as conn:
             row = conn.execute(
                 """
@@ -774,7 +792,9 @@ class DashboardService:
                 """,
                 (user_id,),
             ).fetchone()
-        if not row or not bool(row["enabled"]):
+        if not row:
+            return None
+        if not include_disabled and not bool(row["enabled"]):
             return None
         return dict(row)
 
@@ -870,10 +890,10 @@ class DashboardService:
                 """,
                 (str(payload.username).strip(),),
             ).fetchone()
-        return self.get_user_by_id(int(row["id"])) if row else {}
+        return self.get_user_by_id(int(row["id"]), include_disabled=True) if row else {}
 
     def update_user(self, user_id: int, payload: AppUserPayload) -> dict[str, Any]:
-        current = self.get_user_by_id(user_id)
+        current = self.get_user_by_id(user_id, include_disabled=True)
         if not current:
             raise ValueError("用户不存在。")
         role = str(payload.role).strip()
@@ -910,7 +930,7 @@ class DashboardService:
         params.append(user_id)
         with self.db() as conn:
             conn.execute(sql, tuple(params))
-        return self.get_user_by_id(user_id) or {}
+        return self.get_user_by_id(user_id, include_disabled=True) or {}
 
     def user_account_scopes(self, user_id: int) -> list[int]:
         with self.db() as conn:
@@ -926,7 +946,7 @@ class DashboardService:
         return [int(row["advertiser_id"]) for row in rows]
 
     def replace_user_account_scopes(self, user_id: int, advertiser_ids: list[int]) -> list[int]:
-        if not self.get_user_by_id(user_id):
+        if not self.get_user_by_id(user_id, include_disabled=True):
             raise ValueError("用户不存在。")
         unique_ids = sorted({int(item) for item in advertiser_ids if int(item) > 0})
         now = now_text()
@@ -941,6 +961,73 @@ class DashboardService:
                     [(user_id, advertiser_id, now) for advertiser_id in unique_ids],
                 )
         return unique_ids
+
+    def list_user_keywords(self, user_id: int) -> list[dict[str, Any]]:
+        user = self.get_user_by_id(user_id, include_disabled=True)
+        if not user:
+            raise ValueError("用户不存在。")
+        with self.db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, user_id, keyword, enabled, created_at, updated_at
+                FROM user_keywords
+                WHERE user_id = ?
+                ORDER BY enabled DESC, LENGTH(keyword) DESC, keyword ASC, id ASC
+                """,
+                (user_id,),
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            item["enabled"] = bool(item["enabled"])
+        return items
+
+    def create_user_keyword(self, user_id: int, payload: UserKeywordPayload) -> dict[str, Any]:
+        user = self.get_user_by_id(user_id, include_disabled=True)
+        if not user:
+            raise ValueError("用户不存在。")
+        if str(user.get("role") or "") != ROLE_OPERATOR:
+            raise ValueError("只有运营账号可以配置关键词。")
+        keyword = str(payload.keyword or "").strip()
+        if not keyword:
+            raise ValueError("关键词不能为空。")
+        now = now_text()
+        with self.db() as conn:
+            exists = conn.execute(
+                """
+                SELECT 1
+                FROM user_keywords
+                WHERE user_id = ? AND keyword = ?
+                LIMIT 1
+                """,
+                (user_id, keyword),
+            ).fetchone()
+            if exists:
+                raise ValueError("该运营账号下已存在相同关键词。")
+            conn.execute(
+                """
+                INSERT INTO user_keywords (user_id, keyword, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, keyword, 1 if payload.enabled else 0, now, now),
+            )
+            row = conn.execute(
+                """
+                SELECT id, user_id, keyword, enabled, created_at, updated_at
+                FROM user_keywords
+                WHERE user_id = ? AND keyword = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (user_id, keyword),
+            ).fetchone()
+        item = dict(row) if row else {}
+        if item:
+            item["enabled"] = bool(item["enabled"])
+        return item
+
+    def delete_user_keyword(self, keyword_id: int) -> None:
+        with self.db() as conn:
+            conn.execute("DELETE FROM user_keywords WHERE id = ?", (keyword_id,))
 
     def list_employees(self) -> list[dict[str, Any]]:
         with self.db() as conn:
@@ -5036,6 +5123,34 @@ async def replace_user_account_scopes(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse({"advertiser_ids": advertiser_ids})
+
+
+@app.get("/api/users/{user_id}/keywords")
+async def user_keywords(user_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+    try:
+        items = service.list_user_keywords(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"items": items})
+
+
+@app.post("/api/users/{user_id}/keywords")
+async def create_user_keyword(
+    user_id: int,
+    payload: UserKeywordPayload,
+    _user: dict[str, Any] = Depends(require_admin),
+) -> JSONResponse:
+    try:
+        item = service.create_user_keyword(user_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(item)
+
+
+@app.delete("/api/user-keywords/{keyword_id}")
+async def delete_user_keyword(keyword_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+    service.delete_user_keyword(keyword_id)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/catalog/accounts")

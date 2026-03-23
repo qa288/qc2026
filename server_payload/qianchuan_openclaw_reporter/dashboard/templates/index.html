@@ -433,7 +433,7 @@
                 <div>
                   <h3>后台账号</h3>
                 </div>
-                <div class="section-range-meta compact-inline">运营只看被分配的账户。</div>
+                <div class="section-range-meta compact-inline">主管按账户范围，运营按关键词归属查看数据。</div>
               </div>
               <div class="table-shell tall">
                 <table id="userTable" class="data-table compact"></table>
@@ -492,6 +492,26 @@
                 <div id="scopeAccountList" class="scope-checklist"></div>
                 <div class="ownership-form-actions ownership-actions-end">
                   <button type="button" id="saveUserScopesButton" class="button primary">保存账户范围</button>
+                </div>
+              </section>
+
+              <section class="ownership-card hidden" id="operatorKeywordSection">
+                <div class="subpanel-head">
+                  <div>
+                    <h3>运营关键词</h3>
+                  </div>
+                </div>
+                <div id="operatorKeywordStatus" class="section-range-meta compact-inline inline-feedback">先选择一个运营账号，再配置关键词。</div>
+                <form id="operatorKeywordForm" class="ownership-inline-form">
+                  <input name="keyword" type="text" placeholder="例如：小宇 / 小宇剪辑 / XY" />
+                  <label class="toggle-chip">
+                    <input name="enabled" type="checkbox" checked />
+                    <span>启用</span>
+                  </label>
+                  <button type="submit" class="button primary">添加关键词</button>
+                </form>
+                <div class="table-shell">
+                  <table id="operatorKeywordTable" class="data-table compact"></table>
                 </div>
               </section>
             </section>
