@@ -1029,9 +1029,37 @@ class DashboardService:
         with self.db() as conn:
             rows = conn.execute(
                 """
-                SELECT id, username, role, display_name, upload_materials_enabled, enabled, created_at, updated_at
-                FROM app_users
-                ORDER BY role ASC, username ASC
+                SELECT
+                    u.id,
+                    u.username,
+                    u.role,
+                    u.display_name,
+                    u.upload_materials_enabled,
+                    u.enabled,
+                    u.created_at,
+                    u.updated_at,
+                    COALESCE(sc.scope_count, 0) AS scope_count,
+                    COALESCE(kw.keyword_count, 0) AS keyword_count
+                FROM app_users u
+                LEFT JOIN (
+                    SELECT user_id, COUNT(*) AS scope_count
+                    FROM user_account_scopes
+                    GROUP BY user_id
+                ) sc ON sc.user_id = u.id
+                LEFT JOIN (
+                    SELECT user_id, COUNT(*) AS keyword_count
+                    FROM user_keywords
+                    WHERE enabled = 1
+                    GROUP BY user_id
+                ) kw ON kw.user_id = u.id
+                ORDER BY
+                    CASE u.role
+                        WHEN 'admin' THEN 1
+                        WHEN 'supervisor' THEN 2
+                        WHEN 'operator' THEN 3
+                        ELSE 99
+                    END,
+                    u.username ASC
                 """
             ).fetchall()
         return [dict(row) for row in rows]
@@ -6383,7 +6411,7 @@ async def unassigned_candidates(
     start_date: str = "",
     end_date: str = "",
     scope: str = "all",
-    user: dict[str, Any] = Depends(require_auth),
+    user: dict[str, Any] = Depends(require_admin),
 ) -> JSONResponse:
     allowed = service.allowed_advertiser_ids_for_user(user)
     try:
@@ -6418,7 +6446,7 @@ async def current_session(user: dict[str, Any] = Depends(require_auth)) -> JSONR
 
 
 @app.get("/api/employees")
-async def employees(_user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+async def employees(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
     return JSONResponse({"items": service.list_employees()})
 
 
@@ -6445,7 +6473,7 @@ async def update_employee(
 
 
 @app.get("/api/employees/{employee_id}/keywords")
-async def employee_keywords(employee_id: int, _user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+async def employee_keywords(employee_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
     return JSONResponse({"items": service.list_employee_keywords(employee_id)})
 
 
@@ -6482,7 +6510,7 @@ async def delete_employee_keyword(keyword_id: int, _user: dict[str, Any] = Depen
 
 
 @app.get("/api/employees/{employee_id}/bindings")
-async def employee_bindings(employee_id: int, _user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+async def employee_bindings(employee_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
     return JSONResponse({"items": service.list_employee_bindings(employee_id)})
 
 

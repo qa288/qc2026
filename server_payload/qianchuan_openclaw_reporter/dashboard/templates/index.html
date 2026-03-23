@@ -19,7 +19,7 @@
             </div>
             <div class="top-title-row top-title-inline">
               <h1>{{ app_name }}</h1>
-              <p class="hero-copy" id="heroCopy">账户、计划、商品、归属人与素材实时看板。</p>
+              <p class="hero-copy" id="heroCopy">账户、计划、素材、运营账号与预警实时看板。</p>
             </div>
           </div>
 
@@ -53,8 +53,8 @@
               <button type="button" class="view-tab" data-view="plans">计划</button>
               <button type="button" class="view-tab" data-view="materials">素材</button>
               <button type="button" class="view-tab" data-view="uploads">上传素材</button>
-              <button type="button" class="view-tab" data-view="ownership">数据归属</button>
-              <button type="button" class="view-tab" data-view="access">账号管理</button>
+              <button type="button" class="view-tab" data-view="ownership">归属规则</button>
+              <button type="button" class="view-tab" data-view="access">账号与权限</button>
               <button type="button" class="view-tab" data-view="signals">预警中心</button>
             </div>
           </div>
@@ -344,7 +344,7 @@
         <section class="panel ownership-panel">
           <div class="panel-head">
             <div>
-              <h2>数据归属</h2>
+              <h2>归属规则</h2>
             </div>
             <div class="meta-block compact single-line" id="ownershipHeadMeta">
               <span>这里定义后台的关键词归属口径，关键词命中和人工绑定都会计入排名。</span>
@@ -354,7 +354,7 @@
             <section class="ownership-list-card">
               <div class="subpanel-head">
                 <div>
-                  <h3>归属人列表</h3>
+                  <h3>归属主体列表</h3>
                 </div>
                 <div class="section-range-meta compact-inline">启用的归属规则会参与后台团队排名与素材归属。</div>
               </div>
@@ -366,9 +366,9 @@
             <section class="ownership-editor-card">
               <div class="subpanel-head">
                 <div>
-                  <h3>归属人配置</h3>
+                  <h3>归属主体配置</h3>
                 </div>
-                <div id="employeeEditorStatus" class="section-range-meta compact-inline inline-feedback">先选择或创建归属人。</div>
+                <div id="employeeEditorStatus" class="section-range-meta compact-inline inline-feedback">先选择或创建归属主体。</div>
               </div>
               <div id="ownershipReadonlyBanner" class="readonly-banner hidden">当前账号为只读角色，可查看规则和命中结果，但不能修改归属配置。</div>
 
@@ -379,14 +379,14 @@
                 </label>
                 <label class="wide-field">
                   <span>备注</span>
-                  <input name="note" type="text" placeholder="说明这个归属人负责的业务线或命名规范" />
+                  <input name="note" type="text" placeholder="说明这个归属主体负责的业务线或命名规范" />
                 </label>
                 <label class="toggle-chip">
                   <input name="enabled" type="checkbox" checked />
                   <span>启用</span>
                 </label>
                 <div class="ownership-form-actions">
-                  <button type="submit" class="button primary">保存归属人</button>
+                  <button type="submit" class="button primary">保存归属主体</button>
                   <button type="button" id="employeeFormReset" class="button ghost">新建</button>
                 </div>
               </form>
@@ -424,7 +424,7 @@
                     </label>
                     <button type="submit" class="button primary">新增关键词</button>
                   </form>
-                  <div id="keywordStatus" class="section-range-meta compact-inline inline-feedback">选择归属人后，再添加关键词。</div>
+                  <div id="keywordStatus" class="section-range-meta compact-inline inline-feedback">选择归属主体后，再添加关键词。</div>
                   <div class="table-shell">
                     <table id="keywordTable" class="data-table compact"></table>
                   </div>
@@ -454,7 +454,7 @@
                     </label>
                     <button type="submit" class="button ghost">预览命中</button>
                   </form>
-                  <div id="matchPreviewMeta" class="section-range-meta compact-inline inline-feedback">先选择归属人，再预览命中结果。</div>
+                  <div id="matchPreviewMeta" class="section-range-meta compact-inline inline-feedback">先选择归属主体，再预览命中结果。</div>
                   <div class="table-shell">
                     <table id="matchPreviewTable" class="data-table compact"></table>
                   </div>
@@ -498,7 +498,7 @@
         <section class="panel access-panel">
           <div class="panel-head">
             <div>
-              <h2>账号管理</h2>
+              <h2>账号与权限</h2>
             </div>
             <div class="meta-block compact single-line">
               <span>管理员维护账号、角色、主管账户范围和运营关键词。</span>

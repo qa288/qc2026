@@ -1621,7 +1621,7 @@ function renderProductTable(rows) {
     { key: "pay_amount", label: "支付", sortable: true },
     { key: "roi", label: "ROI", sortable: true },
     { key: "advertiser_count", label: "账户数", sortable: true },
-    { key: "employee_count", label: "归属人数", sortable: true },
+    { key: "employee_count", label: "命中人数", sortable: true },
     { key: "plan_count", label: "计划数", sortable: true },
   ];
   const sorted = sortRows(visibleRows, state.productSort);
@@ -2195,6 +2195,14 @@ function roleLabel(role) {
   return role || "--";
 }
 
+function userScopeSummary(user) {
+  if (!user) return "--";
+  if (user.role === "admin") return "全部账户";
+  if (user.role === "supervisor") return `${formatNumber(user.scope_count || 0)} 个账户`;
+  if (user.role === "operator") return "按关键词";
+  return "--";
+}
+
 function syncUserRoleFields() {
   if (!userForm) return;
   const role = String(userForm.querySelector('select[name="role"]')?.value || "operator");
@@ -2454,9 +2462,11 @@ function applyRoleViewPolicy() {
   const uploadsTab = viewTabs?.querySelector('[data-view="uploads"]');
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
+    accessTab.textContent = "账号与权限";
   }
   if (ownershipTab) {
     ownershipTab.classList.toggle("hidden", !admin);
+    ownershipTab.textContent = "归属规则";
   }
   if (signalsTab) {
     signalsTab.classList.toggle("hidden", !admin);
@@ -2503,7 +2513,7 @@ function applyRoleViewPolicy() {
   }
   if (heroCopy) {
     heroCopy.textContent = admin
-      ? "账户、计划、素材、运营账号排名、账号管理、预警和上传任务。"
+      ? "账户、计划、素材、运营账号排名、账号与权限、预警和上传任务。"
       : supervisor
         ? "查看授权账户范围内的账户、计划、素材和运营排名；按需批量上传素材。"
         : "查看我的素材、团队排名和今日总消耗。";
@@ -2547,12 +2557,12 @@ function resetEmployeeFormState() {
   if (enabledInput) enabledInput.checked = true;
   setInlineFeedback(
     employeeEditorStatus,
-    isAdmin() ? "新建归属人后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。",
+    isAdmin() ? "新建归属主体后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。",
     "neutral",
   );
-  setInlineFeedback(keywordStatus, "选择归属人后，再添加关键词。", "neutral");
-  keywordTable.innerHTML = '<tbody><tr><td colspan="6" class="empty-cell">先选择归属人，再维护关键词。</td></tr></tbody>';
-  bindingTable.innerHTML = '<tbody><tr><td colspan="5" class="empty-cell">先选择归属人，再维护人工绑定。</td></tr></tbody>';
+  setInlineFeedback(keywordStatus, "选择归属主体后，再添加关键词。", "neutral");
+  keywordTable.innerHTML = '<tbody><tr><td colspan="6" class="empty-cell">先选择归属主体，再维护关键词。</td></tr></tbody>';
+  bindingTable.innerHTML = '<tbody><tr><td colspan="5" class="empty-cell">先选择归属主体，再维护人工绑定。</td></tr></tbody>';
   if (isAdmin()) focusFirstInput(employeeForm, 'input[name="display_name"]');
 }
 
@@ -2565,12 +2575,12 @@ function fillEmployeeForm(employee) {
     employeeEditorStatus,
     employee
       ? `${isAdmin() ? "当前编辑" : "当前查看"}：${employee.display_name} · 关键词 ${formatNumber(employee.keyword_count || 0)} · 绑定 ${formatNumber(employee.binding_count || 0)}`
-      : (isAdmin() ? "新建归属人后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。"),
+      : (isAdmin() ? "新建归属主体后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。"),
     "neutral",
   );
   setInlineFeedback(
     keywordStatus,
-    employee ? `正在为 ${employee.display_name} 维护关键词。` : "选择归属人后，再添加关键词。",
+    employee ? `正在为 ${employee.display_name} 维护关键词。` : "选择归属主体后，再添加关键词。",
     "neutral",
   );
 }
@@ -2580,7 +2590,7 @@ function renderEmployeeManagerTable() {
   employeeManagerTable.innerHTML = `
     <thead>
       <tr>
-        <th>归属人</th>
+        <th>归属主体</th>
         <th>关键词</th>
         <th>绑定</th>
         <th>状态</th>
@@ -2594,7 +2604,7 @@ function renderEmployeeManagerTable() {
           <td class="mono">${formatNumber(item.binding_count || 0)}</td>
           <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
         </tr>
-      `).join("") : '<tr><td colspan="4" class="empty-cell">还没有归属人，请先创建。</td></tr>'}
+      `).join("") : '<tr><td colspan="4" class="empty-cell">还没有归属主体，请先创建。</td></tr>'}
     </tbody>
   `;
   employeeManagerTable.querySelectorAll("tbody tr[data-employee-id]").forEach((row) => {
@@ -2628,7 +2638,7 @@ function renderKeywordTable() {
             ${isAdmin() ? `<button type="button" class="button ghost delete-keyword" data-id="${item.id}">删除</button>` : '<span class="detail-sub">只读</span>'}
           </td>
         </tr>
-      `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属人还没有关键词。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属人。</td></tr>'}
+      `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属主体还没有关键词。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属主体。</td></tr>'}
     </tbody>
   `;
   keywordTable.querySelectorAll(".delete-keyword").forEach((button) => {
@@ -2668,7 +2678,7 @@ function renderBindingTable() {
           <td>${escapeHtml(item.note || "--")}</td>
           <td>${isAdmin() ? `<button type="button" class="button ghost delete-binding" data-id="${item.id}">删除</button>` : '<span class="detail-sub">只读</span>'}</td>
         </tr>
-      `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属人还没有人工绑定。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属人。</td></tr>'}
+      `).join("") : '<tr><td colspan="5" class="empty-cell">当前归属主体还没有人工绑定。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属主体。</td></tr>'}
     </tbody>
   `;
   bindingTable.querySelectorAll(".delete-binding").forEach((button) => {
@@ -2721,8 +2731,8 @@ function renderMatchPreview() {
   setInlineFeedback(
     matchPreviewMeta,
     employee
-      ? `当前归属人：${employee.display_name} · 当前命中 ${formatNumber(rows.length)} 条，可直接人工绑定。`
-      : "先选择归属人，再预览命中结果。",
+      ? `当前归属主体：${employee.display_name} · 当前命中 ${formatNumber(rows.length)} 条，可直接人工绑定。`
+      : "先选择归属主体，再预览命中结果。",
     "neutral",
   );
   matchPreviewTable.innerHTML = `
@@ -2741,7 +2751,7 @@ function renderMatchPreview() {
           <td>${escapeHtml(row.object_label || "--")}<br /><span class="detail-sub mono">${escapeHtml(row.object_key || "--")}</span></td>
           <td>${escapeHtml([row.account_name, row.plan_name].filter(Boolean).join(" / ") || "--")}</td>
           <td>
-            ${employee && isAdmin() ? `<button type="button" class="button ghost bind-preview" data-type="${escapeHtml(row.object_type)}" data-key="${escapeHtml(row.object_key)}" data-label="${escapeHtml(row.object_label)}">绑定到当前归属人</button>` : employee ? '<span class="detail-sub">当前账号只读</span>' : '<span class="detail-sub">先选择归属人</span>'}
+            ${employee && isAdmin() ? `<button type="button" class="button ghost bind-preview" data-type="${escapeHtml(row.object_type)}" data-key="${escapeHtml(row.object_key)}" data-label="${escapeHtml(row.object_label)}">绑定到当前归属主体</button>` : employee ? '<span class="detail-sub">当前账号只读</span>' : '<span class="detail-sub">先选择归属主体</span>'}
           </td>
         </tr>
       `).join("") : '<tr><td colspan="4" class="empty-cell">输入关键词并预览后，这里会展示命中的账户、计划、商品和素材。</td></tr>'}
@@ -2799,7 +2809,7 @@ async function fetchUnassignedPool(force = false) {
 async function bindUnassignedCandidate(option) {
   const employee = selectedEmployeeRecord();
   if (!employee) {
-    window.alert("请先选择归属人");
+    window.alert("请先选择归属主体");
     return;
   }
   const response = await fetch(`/api/employees/${employee.id}/bindings`, {
@@ -2833,7 +2843,7 @@ function renderUnassignedTable() {
   const items = state.unassignedPool?.items || [];
   const rangeText = state.unassignedPool?.range_label || rangeLabel(sectionFilter("plan"));
   if (!state.employees.length) {
-    unassignedMeta.textContent = "当前还没有归属人。请先创建归属人，再配置关键词或人工绑定；未归属池会基于这些规则生成。";
+    unassignedMeta.textContent = "当前还没有归属主体。请先创建归属主体，再配置关键词或人工绑定；未归属池会基于这些规则生成。";
   } else {
     unassignedMeta.textContent = `按计划页当前时间范围查看未命中归属规则的数据 · ${rangeText} · 未归属计划 ${formatNumber(state.unassignedPool?.total_plan_count || 0)} 条 · 当前对象 ${formatNumber(state.unassignedPool?.item_count || 0)} 条`;
   }
@@ -2884,7 +2894,7 @@ function renderUnassignedTable() {
                 `).join("")
                 : employee
                   ? '<span class="detail-sub">当前账号只读</span>'
-                  : '<span class="detail-sub">先选择归属人</span>'}
+                  : '<span class="detail-sub">先选择归属主体</span>'}
             </div>
           </td>
         </tr>
@@ -3024,6 +3034,8 @@ function renderUserTable() {
         <th>用户名</th>
         <th>显示名</th>
         <th>角色</th>
+        <th>数据范围</th>
+        <th>关键词</th>
         <th>上传</th>
         <th>状态</th>
       </tr>
@@ -3034,10 +3046,12 @@ function renderUserTable() {
           <td>${escapeHtml(item.username)}</td>
           <td>${escapeHtml(item.display_name || "--")}</td>
           <td>${escapeHtml(roleLabel(item.role))}</td>
-          <td>${item.role === "supervisor" ? `<span class="pill ${item.upload_materials_enabled ? "active" : ""}">${item.upload_materials_enabled ? "允许" : "关闭"}</span>` : "--"}</td>
+          <td>${escapeHtml(userScopeSummary(item))}</td>
+          <td class="mono">${item.role === "operator" ? formatNumber(item.keyword_count || 0) : "--"}</td>
+          <td>${item.role === "admin" ? '<span class="pill active">允许</span>' : item.role === "supervisor" ? `<span class="pill ${item.upload_materials_enabled ? "active" : ""}">${item.upload_materials_enabled ? "允许" : "关闭"}</span>` : "--"}</td>
           <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
         </tr>
-      `).join("") : '<tr><td colspan="5" class="empty-cell">还没有后台账号。</td></tr>'}
+      `).join("") : '<tr><td colspan="7" class="empty-cell">还没有后台账号。</td></tr>'}
     </tbody>
   `;
   userTable.querySelectorAll("tbody tr[data-user-id]").forEach((row) => {
@@ -3203,10 +3217,10 @@ function renderPerformanceSections() {
   planRangeMeta.textContent = formatDateWindowMeta(planPayload);
   breakdownRangeMeta.textContent = formatDateWindowMeta(breakdownPayload);
   if (breakdownTitle) {
-    breakdownTitle.textContent = breakdownUsesOperators(breakdownPayload) ? "商品与团队排名" : "商品与归属人排名";
+    breakdownTitle.textContent = breakdownUsesOperators(breakdownPayload) ? "商品与团队排名" : "商品与归属主体排名";
   }
   if (teamPanelTitle) {
-    teamPanelTitle.textContent = breakdownUsesOperators(breakdownPayload) ? "团队排名" : "归属人排名";
+    teamPanelTitle.textContent = breakdownUsesOperators(breakdownPayload) ? "团队排名" : "归属主体排名";
   }
   if (employeeSearch) {
     employeeSearch.placeholder = breakdownSearchPlaceholder(breakdownPayload);
@@ -3437,14 +3451,14 @@ function bindInputs() {
     });
     if (!response.ok) {
       const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "保存归属人失败");
+      window.alert(errorPayload.detail || "保存归属主体失败");
       return;
     }
     const item = await response.json();
     await fetchEmployees(true);
     if (item?.id) {
       await selectEmployeeManager(Number(item.id));
-      setInlineFeedback(employeeEditorStatus, `已保存归属人：${item.display_name || payload.display_name}。`, "success");
+      setInlineFeedback(employeeEditorStatus, `已保存归属主体：${item.display_name || payload.display_name}。`, "success");
       setInlineFeedback(keywordStatus, "可以继续添加关键词，或先预览命中结果。", "success");
       focusFirstInput(keywordForm, 'input[name="keyword"]');
     } else {
@@ -3462,7 +3476,7 @@ function bindInputs() {
   keywordForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!state.selectedEmployeeId) {
-      window.alert("请先选择归属人");
+      window.alert("请先选择归属主体");
       return;
     }
     const form = new FormData(keywordForm);
