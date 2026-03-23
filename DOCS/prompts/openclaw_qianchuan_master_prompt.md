@@ -2,7 +2,7 @@
 
 > 说明：这是一份历史初始化模板，主要对应早期 `SQLite + OpenClaw cron + 日报/简报` 方案。  
 > 当前正式开发与部署基线已经改为 `FastAPI + PostgreSQL + Redis + Celery + 独立 scheduler + Docker Compose`。  
-> 后续如需继续使用提示词，应优先参考 [目标技术架构与部署基线](/Users/xy/千川/docs/standard/03_目标技术架构与部署基线.md) 和 [已确认决策基线](/Users/xy/千川/docs/standard/13_已确认决策基线.md)，不要直接按本文原样落地。
+> 后续如需继续使用提示词，应优先参考 [目标技术架构与部署基线](/Users/xy/千川/DOCS/standard/03_目标技术架构与部署基线.md) 和 [已确认决策基线](/Users/xy/千川/DOCS/standard/13_已确认决策基线.md)，不要直接按本文原样落地。
 
 ---
 
@@ -56,7 +56,7 @@ project/
     check_alerts.py
     send_feishu_report.py
     run_full_sync.py
-  docs/
+  DOCS/
     README.md
 
 四、本地数据表

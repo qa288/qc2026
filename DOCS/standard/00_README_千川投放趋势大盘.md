@@ -27,41 +27,41 @@
 用于指导 V1 正式开发、部署、联调、验收。
 
 位置：
-- `docs/standard/`
+- `DOCS/standard/`
 
 ### 2.2 试运行 / 能力验证文档
 用于记录现网试运行实现、接口探测结果、已踩坑点、官方字段能力。
 
 位置：
-- `docs/runtime/`
-- `docs/runtime/capabilities/`
+- `DOCS/runtime/`
+- `DOCS/runtime/capabilities/`
 
 说明：
 - 试运行文档不能直接替代目标生产架构文档
-- 正式开发必须以 `docs/standard/` 为准
+- 正式开发必须以 `DOCS/standard/` 为准
 
 ---
 
 ## 3. 建议阅读顺序
 
-1. [13_已确认决策基线.md](/Users/xy/千川/docs/standard/13_已确认决策基线.md)
-2. [01_PRD_产品需求文档.md](/Users/xy/千川/docs/standard/01_PRD_产品需求文档.md)
-3. [02_页面与交互说明.md](/Users/xy/千川/docs/standard/02_页面与交互说明.md)
-4. [03_目标技术架构与部署基线.md](/Users/xy/千川/docs/standard/03_目标技术架构与部署基线.md)
-5. [04_数据模型与存储设计.md](/Users/xy/千川/docs/standard/04_数据模型与存储设计.md)
-6. [05_内部接口与集成规范.md](/Users/xy/千川/docs/standard/05_内部接口与集成规范.md)
-7. [06_任务调度与预警设计.md](/Users/xy/千川/docs/standard/06_任务调度与预警设计.md)
-8. [07_开发实施计划.md](/Users/xy/千川/docs/standard/07_开发实施计划.md)
-9. [08_测试验收与上线清单.md](/Users/xy/千川/docs/standard/08_测试验收与上线清单.md)
-10. [10_Codex_开发交接说明.md](/Users/xy/千川/docs/standard/10_Codex_开发交接说明.md)
-11. [11_字段字典与排序规则.md](/Users/xy/千川/docs/standard/11_字段字典与排序规则.md)
-12. [12_初始化配置模板.md](/Users/xy/千川/docs/standard/12_初始化配置模板.md)
-13. [14_开发执行清单.md](/Users/xy/千川/docs/standard/14_开发执行清单.md)
-14. [15_前端执行清单.md](/Users/xy/千川/docs/standard/15_前端执行清单.md)
-15. [16_后端执行清单.md](/Users/xy/千川/docs/standard/16_后端执行清单.md)
-16. [17_运维上线清单.md](/Users/xy/千川/docs/standard/17_运维上线清单.md)
-17. [09_待确认技术项.md](/Users/xy/千川/docs/standard/09_待确认技术项.md)
-18. [18_公开页与后台重构方案.md](/Users/xy/千川/docs/standard/18_公开页与后台重构方案.md)
+1. [13_已确认决策基线.md](/Users/xy/千川/DOCS/standard/13_已确认决策基线.md)
+2. [01_PRD_产品需求文档.md](/Users/xy/千川/DOCS/standard/01_PRD_产品需求文档.md)
+3. [02_页面与交互说明.md](/Users/xy/千川/DOCS/standard/02_页面与交互说明.md)
+4. [03_目标技术架构与部署基线.md](/Users/xy/千川/DOCS/standard/03_目标技术架构与部署基线.md)
+5. [04_数据模型与存储设计.md](/Users/xy/千川/DOCS/standard/04_数据模型与存储设计.md)
+6. [05_内部接口与集成规范.md](/Users/xy/千川/DOCS/standard/05_内部接口与集成规范.md)
+7. [06_任务调度与预警设计.md](/Users/xy/千川/DOCS/standard/06_任务调度与预警设计.md)
+8. [07_开发实施计划.md](/Users/xy/千川/DOCS/standard/07_开发实施计划.md)
+9. [08_测试验收与上线清单.md](/Users/xy/千川/DOCS/standard/08_测试验收与上线清单.md)
+10. [10_Codex_开发交接说明.md](/Users/xy/千川/DOCS/standard/10_Codex_开发交接说明.md)
+11. [11_字段字典与排序规则.md](/Users/xy/千川/DOCS/standard/11_字段字典与排序规则.md)
+12. [12_初始化配置模板.md](/Users/xy/千川/DOCS/standard/12_初始化配置模板.md)
+13. [14_开发执行清单.md](/Users/xy/千川/DOCS/standard/14_开发执行清单.md)
+14. [15_前端执行清单.md](/Users/xy/千川/DOCS/standard/15_前端执行清单.md)
+15. [16_后端执行清单.md](/Users/xy/千川/DOCS/standard/16_后端执行清单.md)
+16. [17_运维上线清单.md](/Users/xy/千川/DOCS/standard/17_运维上线清单.md)
+17. [09_待确认技术项.md](/Users/xy/千川/DOCS/standard/09_待确认技术项.md)
+18. [18_公开页与后台重构方案.md](/Users/xy/千川/DOCS/standard/18_公开页与后台重构方案.md)
 
 ---
 

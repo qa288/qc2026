@@ -2,9 +2,13 @@
 
 千川经营看板与官方接口接入项目。
 
+唯一文档入口：
+
+- `DOCS/README.md`
+
 目录说明：
 
-- `docs/`
+- `DOCS/`
   - 全部正式文档入口
   - 包含 `standard / runtime / integrations / prompts`
 - `server_payload/qianchuan_openclaw_reporter/`
@@ -22,6 +26,6 @@
 
 当前正式文档入口：
 
-- `docs/README.md`
-- `docs/standard/00_README_千川投放趋势大盘.md`
-- `docs/runtime/README.md`
+- `DOCS/README.md`
+- `DOCS/standard/00_README_千川投放趋势大盘.md`
+- `DOCS/runtime/README.md`

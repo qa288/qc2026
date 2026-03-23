@@ -30,7 +30,7 @@
 ```bash
 python3 /path/to/qianchuan-reporter/tools/discover_qianchuan_capabilities.py \
   --base-dir /path/to/qianchuan-reporter \
-  --output-dir /path/to/qianchuan-reporter/docs/discovery
+  --output-dir /path/to/qianchuan-reporter/DOCS/runtime/capabilities/discovery
 ```
 
 输出：
@@ -61,7 +61,7 @@ cp "$APP_ROOT/data/qianchuan_latest_token.json" \
 ```bash
 python3 "$APP_ROOT/tools/discover_qianchuan_capabilities.py" \
   --base-dir "$APP_ROOT" \
-  --output-dir "$REPO_ROOT/docs/runtime/capabilities/discovery"
+  --output-dir "$REPO_ROOT/DOCS/runtime/capabilities/discovery"
 ```
 
 ## 5. 怎么看结果
