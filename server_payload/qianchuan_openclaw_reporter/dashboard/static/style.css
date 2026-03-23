@@ -2606,7 +2606,8 @@ body {
 }
 
 .ownership-layout,
-.access-layout {
+.access-layout,
+.upload-layout {
   display: grid;
   grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.72fr);
   gap: 14px;
@@ -2617,6 +2618,7 @@ body {
 .ownership-editor-card,
 .access-list-card,
 .access-editor-card,
+.upload-card,
 .ownership-card {
   border: 1px solid rgba(13, 42, 77, 0.08);
   background: rgba(255, 255, 255, 0.96);
@@ -2626,9 +2628,32 @@ body {
 }
 
 .ownership-editor-card,
-.access-editor-card {
+.access-editor-card,
+.upload-card {
   display: grid;
   gap: 12px;
+}
+
+.upload-target-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.upload-form-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.upload-file-picker input[type="file"] {
+  min-height: 44px;
+  padding: 10px 12px;
+}
+
+.check-col {
+  width: 54px;
+  text-align: center;
 }
 
 .ownership-form-grid {
@@ -2732,6 +2757,7 @@ body {
   .signal-console,
   .ownership-layout,
   .access-layout,
+  .upload-layout,
   .ownership-dual-grid {
     grid-template-columns: 1fr;
   }

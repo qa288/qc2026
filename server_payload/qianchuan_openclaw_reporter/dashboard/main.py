@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -52,6 +52,7 @@ from dashboard.db_backend import connect_database, database_backend  # noqa: E40
 APP_NAME = "Qianchuan"
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/config.json"))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
+UPLOAD_DIR = DATA_DIR / "material_uploads"
 DATABASE_PATH = Path(os.environ.get("DATABASE_PATH", str(DATA_DIR / "dashboard.db")))
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 TOKEN_CACHE_PATH = Path(os.environ.get("TOKEN_CACHE_PATH", str(DATA_DIR / "token_cache.json")))
@@ -608,6 +609,51 @@ class DashboardService:
                     FOREIGN KEY(user_id) REFERENCES app_users(id)
                 );
 
+                CREATE TABLE IF NOT EXISTS material_upload_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_by_user_id INTEGER NOT NULL,
+                    scope TEXT NOT NULL DEFAULT 'plan',
+                    query_text TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    total_files INTEGER NOT NULL DEFAULT 0,
+                    total_targets INTEGER NOT NULL DEFAULT 0,
+                    uploaded_files INTEGER NOT NULL DEFAULT 0,
+                    processed_targets INTEGER NOT NULL DEFAULT 0,
+                    success_targets INTEGER NOT NULL DEFAULT 0,
+                    failed_targets INTEGER NOT NULL DEFAULT 0,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(created_by_user_id) REFERENCES app_users(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS material_upload_job_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL,
+                    original_name TEXT NOT NULL,
+                    stored_name TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    mime_type TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'stored',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES material_upload_jobs(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS material_upload_job_targets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL,
+                    advertiser_id BIGINT NOT NULL,
+                    advertiser_name TEXT NOT NULL DEFAULT '',
+                    ad_id BIGINT NOT NULL,
+                    ad_name TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES material_upload_jobs(id)
+                );
+
                 CREATE TABLE IF NOT EXISTS account_balances (
                     snapshot_time TEXT NOT NULL,
                     advertiser_id BIGINT NOT NULL,
@@ -691,6 +737,15 @@ class DashboardService:
 
                 CREATE INDEX IF NOT EXISTS idx_user_keywords_user
                 ON user_keywords (user_id, enabled);
+
+                CREATE INDEX IF NOT EXISTS idx_material_upload_jobs_user_created
+                ON material_upload_jobs (created_by_user_id, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_material_upload_job_targets_job
+                ON material_upload_job_targets (job_id, advertiser_id, ad_id);
+
+                CREATE INDEX IF NOT EXISTS idx_material_upload_job_files_job
+                ON material_upload_job_files (job_id, created_at);
 
                 CREATE INDEX IF NOT EXISTS idx_account_balances_adv_time
                 ON account_balances (advertiser_id, snapshot_time);
@@ -2859,6 +2914,231 @@ class DashboardService:
             "query": str(query or "").strip(),
             "snapshot_time": payload.get("snapshot_time", ""),
             "snapshot_count": int(payload.get("snapshot_count") or 0),
+        }
+
+    def _visible_upload_targets(self, user: dict[str, Any], scope: str, query: str) -> dict[str, Any]:
+        allowed = self.allowed_advertiser_ids_for_user(user)
+        payload = self.latest_snapshot(allowed)
+        if not payload:
+            return {"scope": scope, "query": query, "accounts": [], "plans": [], "plan_count": 0, "account_count": 0}
+        accounts = [dict(item) for item in payload.get("accounts", [])]
+        plans = [dict(item) for item in payload.get("plans", [])]
+        query_text = str(query or "").strip().casefold()
+        account_map = {int(item.get("advertiser_id", 0) or 0): dict(item) for item in accounts}
+        if scope == "account":
+            matched_accounts = []
+            for item in accounts:
+                haystack = self._normalize_match_text(
+                    str(item.get("advertiser_name") or ""),
+                    str(item.get("advertiser_id") or ""),
+                )
+                if not query_text or query_text in haystack:
+                    matched_accounts.append(dict(item))
+            account_ids = {int(item.get("advertiser_id", 0) or 0) for item in matched_accounts}
+            target_plans = [dict(item) for item in plans if int(item.get("advertiser_id", 0) or 0) in account_ids]
+        else:
+            target_plans = []
+            for item in plans:
+                haystack = self._normalize_match_text(
+                    str(item.get("ad_name") or ""),
+                    str(item.get("product_name") or ""),
+                    str(item.get("anchor_name") or ""),
+                    str(item.get("advertiser_name") or ""),
+                    str(item.get("ad_id") or ""),
+                )
+                if not query_text or query_text in haystack:
+                    target_plans.append(dict(item))
+            account_ids = {int(item.get("advertiser_id", 0) or 0) for item in target_plans}
+            matched_accounts = [account_map[item] for item in account_ids if item in account_map]
+        normalized_plans = []
+        for item in target_plans:
+            normalized_plans.append(
+                {
+                    "advertiser_id": int(item.get("advertiser_id", 0) or 0),
+                    "advertiser_name": str(item.get("advertiser_name") or ""),
+                    "ad_id": int(item.get("ad_id", 0) or 0),
+                    "ad_name": str(item.get("ad_name") or ""),
+                    "product_name": str(item.get("product_name") or ""),
+                    "anchor_name": str(item.get("anchor_name") or ""),
+                    "stat_cost": round(float(item.get("stat_cost", 0.0) or 0.0), 2),
+                    "pay_amount": round(float(item.get("pay_amount", 0.0) or 0.0), 2),
+                    "order_count": int(float(item.get("order_count", 0.0) or 0.0)),
+                    "roi": round(float(item.get("roi", 0.0) or 0.0), 2),
+                    "status_text": str(item.get("status_text") or ""),
+                }
+            )
+        normalized_plans.sort(
+            key=lambda item: (
+                str(item["advertiser_name"]),
+                -float(item["stat_cost"]),
+                str(item["ad_name"]),
+                int(item["ad_id"]),
+            )
+        )
+        normalized_accounts = [
+            {
+                "advertiser_id": int(item.get("advertiser_id", 0) or 0),
+                "advertiser_name": str(item.get("advertiser_name") or ""),
+                "plan_count": sum(1 for plan in normalized_plans if int(plan["advertiser_id"]) == int(item.get("advertiser_id", 0) or 0)),
+                "stat_cost": round(float(item.get("stat_cost", 0.0) or 0.0), 2),
+                "pay_amount": round(float(item.get("pay_amount", 0.0) or 0.0), 2),
+                "order_count": int(float(item.get("order_count", 0.0) or 0.0)),
+                "roi": round(float(item.get("roi", 0.0) or 0.0), 2),
+            }
+            for item in matched_accounts
+        ]
+        normalized_accounts.sort(key=lambda item: (-float(item["stat_cost"]), str(item["advertiser_name"]), int(item["advertiser_id"])))
+        return {
+            "scope": scope,
+            "query": str(query or "").strip(),
+            "snapshot_time": str(payload.get("snapshot_time") or ""),
+            "accounts": normalized_accounts,
+            "plans": normalized_plans,
+            "plan_count": len(normalized_plans),
+            "account_count": len(normalized_accounts),
+        }
+
+    def list_material_upload_jobs(self, user: dict[str, Any]) -> list[dict[str, Any]]:
+        role = str(user.get("role") or "")
+        with self.db() as conn:
+            if role == ROLE_ADMIN:
+                rows = conn.execute(
+                    """
+                    SELECT j.*, u.username, u.display_name
+                    FROM material_upload_jobs j
+                    LEFT JOIN app_users u ON u.id = j.created_by_user_id
+                    ORDER BY j.id DESC
+                    LIMIT 30
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT j.*, u.username, u.display_name
+                    FROM material_upload_jobs j
+                    LEFT JOIN app_users u ON u.id = j.created_by_user_id
+                    WHERE j.created_by_user_id = ?
+                    ORDER BY j.id DESC
+                    LIMIT 30
+                    """,
+                    (int(user.get("id", 0) or 0),),
+                ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["created_by_label"] = str(item.get("display_name") or item.get("username") or "")
+            items.append(item)
+        return items
+
+    async def create_material_upload_job(
+        self,
+        user: dict[str, Any],
+        scope: str,
+        query: str,
+        target_plan_ids: list[int],
+        files: list[UploadFile],
+    ) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        normalized_scope = "account" if str(scope or "").strip() == "account" else "plan"
+        normalized_target_ids = sorted({int(item) for item in target_plan_ids if int(item or 0) > 0})
+        if not normalized_target_ids:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少选择一个计划")
+        valid_files = [item for item in files if item and str(item.filename or "").strip()]
+        if not valid_files:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少选择一个视频文件")
+        if len(valid_files) > 50:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="单次最多上传 50 个视频")
+
+        visible = self._visible_upload_targets(user, normalized_scope, query)
+        visible_plan_map = {int(item["ad_id"]): item for item in visible.get("plans", [])}
+        target_plans = [visible_plan_map[item] for item in normalized_target_ids if item in visible_plan_map]
+        if not target_plans:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="所选计划不在当前可用范围内")
+
+        now = now_text()
+        with self.db() as conn:
+            job_row = conn.execute(
+                """
+                INSERT INTO material_upload_jobs (
+                    created_by_user_id, scope, query_text, status, total_files, total_targets,
+                    uploaded_files, processed_targets, success_targets, failed_targets, note, created_at, updated_at
+                ) VALUES (?, ?, ?, 'prepared', ?, ?, ?, 0, 0, 0, ?, ?, ?)
+                RETURNING *
+                """,
+                (
+                    int(user.get("id", 0) or 0),
+                    normalized_scope,
+                    str(query or "").strip(),
+                    len(valid_files),
+                    len(target_plans),
+                    len(valid_files),
+                    "上传任务已创建，执行器待接入。",
+                    now,
+                    now,
+                ),
+            ).fetchone()
+            job_id = int(job_row["id"])
+            job_dir = UPLOAD_DIR / str(job_id)
+            job_dir.mkdir(parents=True, exist_ok=True)
+            file_rows: list[tuple[Any, ...]] = []
+            for index, upload in enumerate(valid_files, start=1):
+                content = await upload.read()
+                original_name = Path(str(upload.filename or "")).name or f"video-{index}.mp4"
+                safe_name = f"{index:03d}_{secrets.token_hex(6)}_{original_name}"
+                relative_path = f"{job_id}/{safe_name}"
+                destination = UPLOAD_DIR / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(content)
+                file_rows.append(
+                    (
+                        job_id,
+                        original_name,
+                        safe_name,
+                        relative_path,
+                        len(content),
+                        str(upload.content_type or ""),
+                        "stored",
+                        now,
+                    )
+                )
+            conn.executemany(
+                """
+                INSERT INTO material_upload_job_files (
+                    job_id, original_name, stored_name, relative_path, file_size, mime_type, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                file_rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO material_upload_job_targets (
+                    job_id, advertiser_id, advertiser_name, ad_id, ad_name, status, message, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'queued', '', ?, ?)
+                """,
+                [
+                    (
+                        job_id,
+                        int(item["advertiser_id"]),
+                        str(item["advertiser_name"]),
+                        int(item["ad_id"]),
+                        str(item["ad_name"]),
+                        now,
+                        now,
+                    )
+                    for item in target_plans
+                ],
+            )
+        return {
+            "id": job_id,
+            "status": "prepared",
+            "scope": normalized_scope,
+            "query_text": str(query or "").strip(),
+            "total_files": len(valid_files),
+            "total_targets": len(target_plans),
+            "note": "上传任务已创建，执行器待接入。",
+            "created_at": now,
         }
 
     def _apply_account_scope(
@@ -5159,6 +5439,7 @@ class DashboardService:
         return payload
 
     async def start(self) -> None:
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         self.init_db()
         self.bootstrap_auth_store()
         self.bootstrap_token_store()
@@ -5190,6 +5471,15 @@ def require_admin(user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any
     if str(user.get("role") or "") != ROLE_ADMIN:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
     return user
+
+
+def require_material_uploader(user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    role = str(user.get("role") or "")
+    if role == ROLE_ADMIN:
+        return user
+    if role == ROLE_SUPERVISOR and service.can_upload_materials(user):
+        return user
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
 
 
 @app.on_event("startup")
@@ -5509,6 +5799,36 @@ async def user_matched_materials(
 async def delete_user_keyword(keyword_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
     service.delete_user_keyword(keyword_id)
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/upload/targets")
+async def upload_targets(
+    scope: str = "plan",
+    q: str = "",
+    user: dict[str, Any] = Depends(require_material_uploader),
+) -> JSONResponse:
+    return JSONResponse(service._visible_upload_targets(user, scope, q))
+
+
+@app.get("/api/upload/jobs")
+async def upload_jobs(user: dict[str, Any] = Depends(require_material_uploader)) -> JSONResponse:
+    return JSONResponse({"items": service.list_material_upload_jobs(user)})
+
+
+@app.post("/api/upload/jobs")
+async def create_upload_job(
+    scope: str = Form("plan"),
+    query_text: str = Form(""),
+    target_plan_ids: str = Form("[]"),
+    files: list[UploadFile] = File(...),
+    user: dict[str, Any] = Depends(require_material_uploader),
+) -> JSONResponse:
+    try:
+        plan_ids = [int(item) for item in json.loads(str(target_plan_ids or "[]"))]
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="target_plan_ids 格式错误") from exc
+    payload = await service.create_material_upload_job(user, scope, query_text, plan_ids, files)
+    return JSONResponse(payload, status_code=202)
 
 
 @app.get("/api/catalog/accounts")

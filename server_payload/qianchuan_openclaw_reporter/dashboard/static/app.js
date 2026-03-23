@@ -68,6 +68,10 @@ const state = {
   userScopes: {},
   userKeywords: {},
   userMatchedMaterials: {},
+  uploadTargets: null,
+  uploadJobs: [],
+  uploadSelectedPlanIds: [],
+  uploadFiles: [],
   matchPreview: null,
   unassignedPool: null,
   unassignedScope: "all",
@@ -196,6 +200,19 @@ const operatorMaterialSection = document.getElementById("operatorMaterialSection
 const operatorMaterialStatus = document.getElementById("operatorMaterialStatus");
 const operatorMaterialSearch = document.getElementById("operatorMaterialSearch");
 const operatorMaterialTable = document.getElementById("operatorMaterialTable");
+const uploadSearchForm = document.getElementById("uploadSearchForm");
+const uploadScopeSelect = document.getElementById("uploadScopeSelect");
+const uploadKeywordInput = document.getElementById("uploadKeywordInput");
+const uploadTargetMeta = document.getElementById("uploadTargetMeta");
+const uploadSelectAll = document.getElementById("uploadSelectAll");
+const uploadTargetSummary = document.getElementById("uploadTargetSummary");
+const uploadTargetTable = document.getElementById("uploadTargetTable");
+const uploadJobForm = document.getElementById("uploadJobForm");
+const uploadFileInput = document.getElementById("uploadFileInput");
+const uploadFileSummary = document.getElementById("uploadFileSummary");
+const uploadJobStatus = document.getElementById("uploadJobStatus");
+const uploadJobSubmit = document.getElementById("uploadJobSubmit");
+const uploadJobTable = document.getElementById("uploadJobTable");
 const ruleTemplateButtons = Array.from(document.querySelectorAll(".signal-template-button"));
 const PERFORMANCE_SECTION_CONFIG = {
   account: {
@@ -883,6 +900,161 @@ function rangeLabel(filter) {
   }
   const payload = rangePayload(normalized);
   return payload?.range_label || RANGE_LABELS[normalized.mode] || "当前";
+}
+
+function canUseUploadModule() {
+  return Boolean(state.session?.can_upload_materials);
+}
+
+function selectedUploadPlans() {
+  const planIds = new Set(state.uploadSelectedPlanIds || []);
+  return (state.uploadTargets?.plans || []).filter((item) => planIds.has(Number(item.ad_id)));
+}
+
+function uploadScopeLabel(scope) {
+  return scope === "account" ? "账户" : "计划";
+}
+
+function renderUploadTargetSummary() {
+  if (!uploadTargetSummary) return;
+  const selected = selectedUploadPlans();
+  if (!selected.length) {
+    uploadTargetSummary.textContent = "未选择计划";
+    return;
+  }
+  const accountCount = new Set(selected.map((item) => Number(item.advertiser_id))).size;
+  uploadTargetSummary.textContent = `已选 ${selected.length} 个计划，覆盖 ${accountCount} 个账户`;
+}
+
+function renderUploadFileSummary() {
+  if (!uploadFileSummary) return;
+  if (!state.uploadFiles.length) {
+    uploadFileSummary.textContent = "未选择文件";
+    return;
+  }
+  const totalSize = state.uploadFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  uploadFileSummary.textContent = `已选 ${state.uploadFiles.length} 个视频，约 ${(totalSize / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderUploadTargetTable() {
+  if (!uploadTargetTable) return;
+  const payload = state.uploadTargets;
+  const items = payload?.plans || [];
+  if (!items.length) {
+    uploadTargetTable.innerHTML = '<tbody><tr><td colspan="7" class="empty-cell">先按账户或计划搜索，再勾选目标计划。</td></tr></tbody>';
+    renderUploadTargetSummary();
+    return;
+  }
+  uploadTargetTable.innerHTML = `
+    <thead>
+      <tr>
+        <th class="check-col">选择</th>
+        <th>账户</th>
+        <th>计划</th>
+        <th>商品 / 主播</th>
+        <th class="mono">消耗</th>
+        <th class="mono">支付</th>
+        <th class="mono">订单</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${items.map((item) => {
+        const checked = state.uploadSelectedPlanIds.includes(Number(item.ad_id)) ? "checked" : "";
+        return `
+          <tr>
+            <td class="check-col"><input type="checkbox" class="upload-target-checkbox" data-plan-id="${item.ad_id}" ${checked} /></td>
+            <td>${escapeHtml(item.advertiser_name || "-")}</td>
+            <td>
+              <div class="entity-cell">
+                <span class="entity-title">${escapeHtml(item.ad_name || "-")}</span>
+                <span class="entity-sub mono">PID ${escapeHtml(item.ad_id)}</span>
+              </div>
+            </td>
+            <td>${escapeHtml([item.product_name, item.anchor_name].filter(Boolean).join(" / ") || "--")}</td>
+            <td class="mono">${formatMoney(item.stat_cost)}</td>
+            <td class="mono">${formatMoney(item.pay_amount)}</td>
+            <td class="mono">${formatNumber(item.order_count)}</td>
+          </tr>
+        `;
+      }).join("")}
+    </tbody>
+  `;
+  renderUploadTargetSummary();
+}
+
+function renderUploadJobTable() {
+  if (!uploadJobTable) return;
+  const items = state.uploadJobs || [];
+  if (!items.length) {
+    uploadJobTable.innerHTML = '<tbody><tr><td colspan="7" class="empty-cell">还没有上传任务。</td></tr></tbody>';
+    return;
+  }
+  uploadJobTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>状态</th>
+        <th>范围</th>
+        <th class="mono">文件数</th>
+        <th class="mono">计划数</th>
+        <th>创建人</th>
+        <th>时间</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${items.map((item) => `
+        <tr>
+          <td class="mono">#${escapeHtml(item.id)}</td>
+          <td>${escapeHtml(item.status || "--")}</td>
+          <td>${escapeHtml(uploadScopeLabel(item.scope || "plan"))}</td>
+          <td class="mono">${formatNumber(item.total_files)}</td>
+          <td class="mono">${formatNumber(item.total_targets)}</td>
+          <td>${escapeHtml(item.created_by_label || "--")}</td>
+          <td>${escapeHtml(item.created_at || "--")}</td>
+        </tr>
+      `).join("")}
+    </tbody>
+  `;
+}
+
+async function fetchUploadTargets(force = false) {
+  if (!canUseUploadModule()) return;
+  const scope = String(uploadScopeSelect?.value || "plan");
+  const query = String(uploadKeywordInput?.value || "").trim();
+  if (!force && state.uploadTargets && state.uploadTargets.scope === scope && state.uploadTargets.query === query) {
+    renderUploadTargetTable();
+    return;
+  }
+  setInlineFeedback(uploadTargetMeta, `正在按${uploadScopeLabel(scope)}搜索目标计划…`, "neutral");
+  const params = new URLSearchParams({ scope, q: query });
+  const response = await fetch(`/api/upload/targets?${params.toString()}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    window.alert(payload.detail || "加载上传目标失败");
+    return;
+  }
+  state.uploadTargets = await response.json();
+  state.uploadSelectedPlanIds = [];
+  if (uploadSelectAll) uploadSelectAll.checked = false;
+  renderUploadTargetTable();
+  setInlineFeedback(
+    uploadTargetMeta,
+    `已命中 ${formatNumber(state.uploadTargets.plan_count || 0)} 个计划，覆盖 ${formatNumber(state.uploadTargets.account_count || 0)} 个账户。`,
+    "success",
+  );
+}
+
+async function fetchUploadJobs() {
+  if (!canUseUploadModule()) return;
+  const response = await fetch("/api/upload/jobs");
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    window.alert(payload.detail || "加载上传任务失败");
+    return;
+  }
+  const payload = await response.json();
+  state.uploadJobs = payload.items || [];
+  renderUploadJobTable();
 }
 
 function renderAlertSummary(events) {
@@ -2166,6 +2338,7 @@ function applyRoleViewPolicy() {
   const planTab = viewTabs?.querySelector('[data-view="plans"]');
   const breakdownTab = viewTabs?.querySelector('[data-view="breakdown"]');
   const materialsTab = viewTabs?.querySelector('[data-view="materials"]');
+  const uploadsTab = viewTabs?.querySelector('[data-view="uploads"]');
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
   }
@@ -2187,20 +2360,24 @@ function applyRoleViewPolicy() {
   if (materialsTab) {
     materialsTab.textContent = role === "operator" ? "我的素材" : "素材";
   }
+  if (uploadsTab) {
+    uploadsTab.classList.toggle("hidden", !canUseUploadModule());
+    uploadsTab.textContent = "上传素材";
+  }
   if (productRankPanel) {
     productRankPanel.classList.toggle("hidden", role === "operator");
   }
   if (heroCopy) {
     heroCopy.textContent = admin
-      ? "账户、计划、素材、团队排名与预警管理。"
+      ? "账户、计划、素材、运营排名、上传与预警管理。"
       : role === "supervisor"
-        ? "查看授权账户范围内的账户、计划、素材与团队表现。"
+        ? "查看授权账户范围内的账户、计划、素材与团队表现，可按需上传素材。"
         : "查看我的素材和团队排名，跟踪当天消耗与归属情况。";
   }
   const allowedViews = admin
-    ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "ownership", "access", "signals"])
+    ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "uploads", "ownership", "access", "signals"])
     : role === "supervisor"
-      ? new Set(["overview", "accounts", "breakdown", "plans", "materials"])
+      ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials"])
       : new Set(["overview", "breakdown", "materials"]);
   if (!allowedViews.has(state.activeView)) {
     const fallback = allowedViews.has("overview") ? "overview" : Array.from(allowedViews)[0] || "overview";
@@ -3008,6 +3185,10 @@ function bindInputs() {
         if (view === "materials") {
           await refreshMaterialSection(true);
         }
+        if (view === "uploads") {
+          await fetchUploadTargets(true);
+          await fetchUploadJobs();
+        }
         if (view === "ownership") {
           await ensureOwnershipData(true);
         }
@@ -3025,6 +3206,69 @@ function bindInputs() {
   materialSearch.addEventListener("input", () => renderMaterialTable(materialRangePayload(sectionFilter("material"))?.items || []));
   operatorMaterialSearch?.addEventListener("input", () => renderUserMatchedMaterialTable());
   planAccountFilter.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
+  uploadSearchForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await fetchUploadTargets(true);
+  });
+  uploadSelectAll?.addEventListener("change", () => {
+    const items = state.uploadTargets?.plans || [];
+    state.uploadSelectedPlanIds = uploadSelectAll.checked ? items.map((item) => Number(item.ad_id)) : [];
+    renderUploadTargetTable();
+  });
+  uploadTargetTable?.addEventListener("change", (event) => {
+    const input = event.target.closest(".upload-target-checkbox");
+    if (!input) return;
+    const planId = Number(input.dataset.planId || 0);
+    if (!planId) return;
+    if (input.checked) {
+      if (!state.uploadSelectedPlanIds.includes(planId)) state.uploadSelectedPlanIds.push(planId);
+    } else {
+      state.uploadSelectedPlanIds = state.uploadSelectedPlanIds.filter((item) => item !== planId);
+    }
+    const total = (state.uploadTargets?.plans || []).length;
+    if (uploadSelectAll) {
+      uploadSelectAll.checked = total > 0 && state.uploadSelectedPlanIds.length === total;
+    }
+    renderUploadTargetSummary();
+  });
+  uploadFileInput?.addEventListener("change", () => {
+    state.uploadFiles = Array.from(uploadFileInput.files || []);
+    renderUploadFileSummary();
+  });
+  uploadJobForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.uploadSelectedPlanIds.length) {
+      window.alert("请先勾选目标计划");
+      return;
+    }
+    if (!state.uploadFiles.length) {
+      window.alert("请先选择视频文件");
+      return;
+    }
+    const form = new FormData();
+    form.set("scope", String(uploadScopeSelect?.value || "plan"));
+    form.set("query_text", String(uploadKeywordInput?.value || "").trim());
+    form.set("target_plan_ids", JSON.stringify(state.uploadSelectedPlanIds));
+    state.uploadFiles.forEach((file) => form.append("files", file));
+    uploadJobSubmit.disabled = true;
+    setInlineFeedback(uploadJobStatus, "正在创建上传任务…", "neutral");
+    try {
+      const response = await fetch("/api/upload/jobs", { method: "POST", body: form });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        window.alert(payload.detail || "创建上传任务失败");
+        setInlineFeedback(uploadJobStatus, "创建上传任务失败。", "error");
+        return;
+      }
+      state.uploadFiles = [];
+      if (uploadFileInput) uploadFileInput.value = "";
+      renderUploadFileSummary();
+      setInlineFeedback(uploadJobStatus, `已创建任务 #${payload.id}，当前为准备状态。`, "success");
+      await fetchUploadJobs();
+    } finally {
+      uploadJobSubmit.disabled = false;
+    }
+  });
 
   bindRangeFilterControls("account");
   bindRangeFilterControls("plan");
@@ -3479,6 +3723,14 @@ async function render(payload) {
       await ensureAccessData(true);
     } catch (error) {
       console.error("ensureAccessData failed", error);
+    }
+  }
+  if (state.activeView === "uploads" && canUseUploadModule()) {
+    try {
+      await fetchUploadTargets(true);
+      await fetchUploadJobs();
+    } catch (error) {
+      console.error("upload section load failed", error);
     }
   }
   setActiveView(state.activeView);

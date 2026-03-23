@@ -52,6 +52,7 @@
               <button type="button" class="view-tab" data-view="breakdown">经营拆解</button>
               <button type="button" class="view-tab" data-view="plans">计划</button>
               <button type="button" class="view-tab" data-view="materials">素材</button>
+              <button type="button" class="view-tab" data-view="uploads">上传素材</button>
               <button type="button" class="view-tab" data-view="ownership">归属规则</button>
               <button type="button" class="view-tab" data-view="access">权限</button>
               <button type="button" class="view-tab" data-view="signals">预警规则</button>
@@ -259,6 +260,82 @@
             <aside class="decision-side">
               <div id="materialDetail" class="detail-panel empty">点击素材行，查看该素材覆盖的账户、计划和当前核心表现。</div>
             </aside>
+          </div>
+        </section>
+      </section>
+
+      <section class="view-section" data-view="uploads">
+        <section class="panel upload-panel">
+          <div class="panel-head">
+            <div>
+              <h2>素材上传</h2>
+            </div>
+            <div class="meta-block compact single-line">
+              <span>先按账户或计划搜索目标，再勾选计划并上传视频素材。</span>
+            </div>
+          </div>
+
+          <div class="upload-layout">
+            <section class="upload-card">
+              <div class="subpanel-head">
+                <div>
+                  <h3>选择投放目标</h3>
+                </div>
+                <div id="uploadTargetMeta" class="section-range-meta compact-inline inline-feedback">先选择搜索范围并筛选计划。</div>
+              </div>
+              <form id="uploadSearchForm" class="ownership-inline-form">
+                <label>
+                  <span>搜索范围</span>
+                  <select id="uploadScopeSelect" name="scope">
+                    <option value="plan">计划</option>
+                    <option value="account">账户</option>
+                  </select>
+                </label>
+                <label class="wide-field">
+                  <span>关键词</span>
+                  <input id="uploadKeywordInput" name="query" type="search" placeholder="留空表示当前权限范围内全部计划" />
+                </label>
+                <button type="submit" class="button ghost">搜索目标</button>
+              </form>
+              <div class="upload-target-toolbar">
+                <label class="toggle-chip">
+                  <input id="uploadSelectAll" type="checkbox" />
+                  <span>全选当前结果</span>
+                </label>
+                <div id="uploadTargetSummary" class="section-range-meta compact-inline">未选择计划</div>
+              </div>
+              <div class="table-shell tall">
+                <table id="uploadTargetTable" class="data-table compact"></table>
+              </div>
+            </section>
+
+            <section class="upload-card">
+              <div class="subpanel-head">
+                <div>
+                  <h3>选择视频并创建任务</h3>
+                </div>
+                <div id="uploadJobStatus" class="section-range-meta compact-inline inline-feedback">选择目标计划后，再上传 1 到 50 个视频。</div>
+              </div>
+              <form id="uploadJobForm" class="upload-form-grid">
+                <label class="wide-field upload-file-picker">
+                  <span>视频文件</span>
+                  <input id="uploadFileInput" name="files" type="file" accept="video/*" multiple />
+                </label>
+                <div id="uploadFileSummary" class="section-range-meta compact-inline">未选择文件</div>
+                <div class="ownership-form-actions">
+                  <button id="uploadJobSubmit" type="submit" class="button primary">创建上传任务</button>
+                </div>
+              </form>
+              <div class="subpanel-head narrow-top">
+                <div>
+                  <h3>最近任务</h3>
+                </div>
+                <div class="section-range-meta compact-inline">当前只显示你可见的任务。</div>
+              </div>
+              <div class="table-shell">
+                <table id="uploadJobTable" class="data-table compact"></table>
+              </div>
+            </section>
           </div>
         </section>
       </section>
