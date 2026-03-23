@@ -1495,14 +1495,12 @@ function renderPlanAssetSummaryPayload(payload) {
     <div class="asset-group">
       <div class="asset-group-head">
         <h4>素材类型分布</h4>
-        <span>用于判断当前计划主要依赖的视频/图片/标题类型</span>
       </div>
       <div class="asset-tag-row">${typeTags || '<span class="pill">暂无素材</span>'}</div>
     </div>
     <div class="asset-group">
       <div class="asset-group-head">
         <h4>代表商品</h4>
-        <span>按订单数排序</span>
       </div>
       <div class="asset-list">
         ${topProducts.length ? topProducts.map((item) => `
@@ -1523,7 +1521,6 @@ function renderPlanAssetSummaryPayload(payload) {
     <div class="asset-group">
       <div class="asset-group-head">
         <h4>代表素材</h4>
-        <span>按订单数排序，视频会标记首发</span>
       </div>
       <div class="asset-list">
         ${topMaterials.length ? topMaterials.map((item) => `

@@ -933,13 +933,6 @@ body {
   max-width: 260px;
 }
 
-.rank-note {
-  margin: 8px 0 10px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
 .rank-table-shell {
   max-height: 460px;
 }
@@ -2013,7 +2006,6 @@ body {
 }
 
 .notify-inline-copy,
-.rank-note,
 .system-card-copy,
 .summary-sub,
 .meta-block,
