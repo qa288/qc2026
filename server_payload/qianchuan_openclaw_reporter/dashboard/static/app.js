@@ -67,6 +67,7 @@ const state = {
   employeeBindings: {},
   userScopes: {},
   userKeywords: {},
+  userMatchedMaterials: {},
   matchPreview: null,
   unassignedPool: null,
   unassignedScope: "all",
@@ -191,6 +192,10 @@ const operatorKeywordSection = document.getElementById("operatorKeywordSection")
 const operatorKeywordStatus = document.getElementById("operatorKeywordStatus");
 const operatorKeywordForm = document.getElementById("operatorKeywordForm");
 const operatorKeywordTable = document.getElementById("operatorKeywordTable");
+const operatorMaterialSection = document.getElementById("operatorMaterialSection");
+const operatorMaterialStatus = document.getElementById("operatorMaterialStatus");
+const operatorMaterialSearch = document.getElementById("operatorMaterialSearch");
+const operatorMaterialTable = document.getElementById("operatorMaterialTable");
 const ruleTemplateButtons = Array.from(document.querySelectorAll(".signal-template-button"));
 const PERFORMANCE_SECTION_CONFIG = {
   account: {
@@ -1996,6 +2001,11 @@ function selectedUserKeywords() {
   return state.userKeywords[state.selectedUserId] || [];
 }
 
+function selectedUserMatchedMaterials() {
+  if (!state.selectedUserId) return [];
+  return state.userMatchedMaterials[state.selectedUserId] || [];
+}
+
 async function fetchUserKeywords(userId, force = false) {
   if (!userId || !isAdmin()) return [];
   if (!force && state.userKeywords[userId]) return state.userKeywords[userId];
@@ -2003,6 +2013,15 @@ async function fetchUserKeywords(userId, force = false) {
   const payload = await response.json();
   state.userKeywords[userId] = payload.items || [];
   return state.userKeywords[userId];
+}
+
+async function fetchUserMatchedMaterials(userId, force = false) {
+  if (!userId || !isAdmin()) return [];
+  if (!force && state.userMatchedMaterials[userId]) return state.userMatchedMaterials[userId];
+  const response = await fetch(`/api/users/${userId}/matched-materials?range=day`);
+  const payload = await response.json();
+  state.userMatchedMaterials[userId] = payload.items || [];
+  return state.userMatchedMaterials[userId];
 }
 
 function renderUserKeywordTable() {
@@ -2043,12 +2062,65 @@ function renderUserKeywordTable() {
   `;
 }
 
+function renderUserMatchedMaterialTable() {
+  if (!operatorMaterialTable) return;
+  if (!isAdmin()) {
+    operatorMaterialTable.innerHTML = '<tbody><tr><td class="empty-cell">只有管理员可以查看运营账号的命中素材。</td></tr></tbody>';
+    return;
+  }
+  const user = selectedUserRecord();
+  if (!user) {
+    operatorMaterialTable.innerHTML = '<tbody><tr><td colspan="4" class="empty-cell">先选择一个运营账号，再查看命中素材列表。</td></tr></tbody>';
+    return;
+  }
+  if (user.role !== "operator") {
+    operatorMaterialTable.innerHTML = '<tbody><tr><td colspan="4" class="empty-cell">只有运营账号才会显示命中素材列表。</td></tr></tbody>';
+    return;
+  }
+  const query = String(operatorMaterialSearch?.value || "").trim().toLowerCase();
+  const items = selectedUserMatchedMaterials().filter((item) => {
+    if (!query) return true;
+    const haystack = [
+      item.material_name,
+      item.material_id,
+      item.video_id,
+      item.top_account_name,
+      item.top_plan_name,
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+  operatorMaterialTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>素材</th>
+        <th>消耗</th>
+        <th>账户</th>
+        <th>计划</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${items.length ? items.map((item) => `
+        <tr>
+          <td>
+            <div class="table-primary">${escapeHtml(item.material_name || "--")}</div>
+            <div class="table-sub mono">${escapeHtml(item.material_id || "--")}</div>
+          </td>
+          <td class="mono">${formatMoney(item.stat_cost)}</td>
+          <td>${escapeHtml(item.top_account_name || "--")}</td>
+          <td>${escapeHtml(item.top_plan_name || "--")}</td>
+        </tr>
+      `).join("") : '<tr><td colspan="4" class="empty-cell">当前关键词还没有命中素材。</td></tr>'}
+    </tbody>
+  `;
+}
+
 function syncAccessRolePanels() {
   const user = selectedUserRecord();
   const role = String(user?.role || userForm?.querySelector('select[name="role"]')?.value || "");
   const isOperator = role === "operator";
   const isSupervisor = role === "supervisor";
   operatorKeywordSection?.classList.toggle("hidden", !isOperator);
+  operatorMaterialSection?.classList.toggle("hidden", !isOperator);
   if (scopeAccountList?.closest(".ownership-card")) {
     scopeAccountList.closest(".ownership-card").classList.toggle("hidden", isOperator);
   }
@@ -2056,7 +2128,9 @@ function syncAccessRolePanels() {
   if (!user) {
     setInlineFeedback(scopeEditorMeta, "先选择后台账号，再配置账户范围。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "先选择一个运营账号，再配置关键词。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "先选择一个运营账号，再查看命中素材列表。", "neutral");
     renderUserKeywordTable();
+    renderUserMatchedMaterialTable();
     return;
   }
   if (isSupervisor) {
@@ -2064,11 +2138,14 @@ function syncAccessRolePanels() {
   } else if (isOperator) {
     setInlineFeedback(scopeEditorMeta, "运营账号不配置账户范围，只根据关键词命中结果查看数据。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "给运营账号添加关键词后，该账号只看命中这些关键词的数据。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "这里显示该运营账号当前关键词命中的素材结果，可按素材、账户或计划再搜索。", "neutral");
   } else {
     setInlineFeedback(scopeEditorMeta, "管理员默认可查看全部账户，不需要单独勾选。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "管理员和主管不使用运营关键词。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "管理员和主管不显示运营命中素材列表。", "neutral");
   }
   renderUserKeywordTable();
+  renderUserMatchedMaterialTable();
 }
 
 function setFormReadOnly(formEl, readOnly) {
@@ -2579,6 +2656,7 @@ function resetUserFormState() {
   state.selectedUserId = null;
   state.selectedUserScopeIds = [];
   state.userKeywords = {};
+  state.userMatchedMaterials = {};
   if (userForm) userForm.reset();
   const roleInput = userForm?.querySelector('select[name="role"]');
   if (roleInput) roleInput.value = "operator";
@@ -2598,8 +2676,10 @@ function resetUserFormState() {
     "neutral",
   );
   setInlineFeedback(operatorKeywordStatus, "先选择一个运营账号，再配置关键词。", "neutral");
+  setInlineFeedback(operatorMaterialStatus, "先选择一个运营账号，再查看命中素材列表。", "neutral");
   renderScopeChecklist();
   renderUserKeywordTable();
+  renderUserMatchedMaterialTable();
   syncAccessRolePanels();
   if (isAdmin()) focusFirstInput(userForm, 'input[name="username"]');
 }
@@ -2737,9 +2817,11 @@ async function selectUserManager(userId) {
   }
   if (user?.role === "operator") {
     await fetchUserKeywords(userId, true);
+    await fetchUserMatchedMaterials(userId, true);
   }
   renderScopeChecklist();
   renderUserKeywordTable();
+  renderUserMatchedMaterialTable();
   if (isAdmin() && user?.role === "supervisor") {
     scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
   } else if (isAdmin() && user?.role === "operator") {
@@ -2761,12 +2843,14 @@ async function ensureAccessData(force = false) {
     }
     if (user?.role === "operator" && isAdmin()) {
       await fetchUserKeywords(state.selectedUserId, force);
+      await fetchUserMatchedMaterials(state.selectedUserId, force);
     }
   } else {
     resetUserFormState();
   }
   renderScopeChecklist();
   renderUserKeywordTable();
+  renderUserMatchedMaterialTable();
   syncAccessRolePanels();
 }
 
@@ -2939,6 +3023,7 @@ function bindInputs() {
   employeeSearch.addEventListener("input", () => renderEmployeeTable(breakdownRows(rangePayload(sectionFilter("breakdown")))));
   productSearch.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
   materialSearch.addEventListener("input", () => renderMaterialTable(materialRangePayload(sectionFilter("material"))?.items || []));
+  operatorMaterialSearch?.addEventListener("input", () => renderUserMatchedMaterialTable());
   planAccountFilter.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
 
   bindRangeFilterControls("account");
@@ -3291,7 +3376,9 @@ function bindInputs() {
     operatorKeywordForm.reset();
     operatorKeywordForm.querySelector('input[name="enabled"]').checked = true;
     await fetchUserKeywords(state.selectedUserId, true);
+    await fetchUserMatchedMaterials(state.selectedUserId, true);
     renderUserKeywordTable();
+    renderUserMatchedMaterialTable();
     setInlineFeedback(operatorKeywordStatus, `已添加关键词“${payload.keyword}”。`, "success");
     focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
     await fetchDashboard();
@@ -3310,8 +3397,10 @@ function bindInputs() {
     }
     if (state.selectedUserId) {
       await fetchUserKeywords(state.selectedUserId, true);
+      await fetchUserMatchedMaterials(state.selectedUserId, true);
     }
     renderUserKeywordTable();
+    renderUserMatchedMaterialTable();
     setInlineFeedback(operatorKeywordStatus, "已删除关键词。", "success");
     await fetchDashboard();
   });

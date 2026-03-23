@@ -64,6 +64,13 @@ DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "replace-me")
 RANGE_CACHE_SECONDS = int(os.environ.get("RANGE_CACHE_SECONDS", "55"))
 PERFORMANCE_RANGES = {"day", "yesterday", "week", "month", "custom"}
+RANGE_LABEL_MAP = {
+    "day": "今日",
+    "yesterday": "昨日",
+    "week": "近7天",
+    "month": "近30天",
+    "custom": "指定日期范围",
+}
 DETAIL_SYNC_INTERVAL_MINUTES = int(os.environ.get("DETAIL_SYNC_INTERVAL_MINUTES", "10"))
 ENABLE_IN_PROCESS_SCHEDULER = os.environ.get("ENABLE_IN_PROCESS_SCHEDULER", "0") == "1"
 ROLE_ADMIN = "admin"
@@ -1887,8 +1894,20 @@ class DashboardService:
         bindings = [item for item in bindings if int(item["employee_id"]) in employees]
         return employees, keywords, bindings
 
-    def _active_operator_config(self) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+    def _operator_config(
+        self,
+        *,
+        include_disabled: bool = False,
+        only_user_id: int | None = None,
+    ) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
         with self.db() as conn:
+            clauses = ["role = ?"]
+            params: list[Any] = [ROLE_OPERATOR]
+            if not include_disabled:
+                clauses.append("enabled = 1")
+            if only_user_id is not None:
+                clauses.append("id = ?")
+                params.append(int(only_user_id))
             users = {
                 int(row["id"]): {
                     "id": int(row["id"]),
@@ -1896,13 +1915,13 @@ class DashboardService:
                     "display_name": str(row["display_name"] or "").strip() or str(row["username"] or "").strip(),
                 }
                 for row in conn.execute(
-                    """
+                    f"""
                     SELECT id, username, display_name
                     FROM app_users
-                    WHERE role = ? AND enabled = 1
+                    WHERE {" AND ".join(clauses)}
                     ORDER BY COALESCE(display_name, username) ASC, id ASC
                     """,
-                    (ROLE_OPERATOR,),
+                    params,
                 ).fetchall()
             }
             keywords = [
@@ -1918,6 +1937,9 @@ class DashboardService:
             ]
         keywords = [item for item in keywords if int(item["user_id"]) in users]
         return users, keywords
+
+    def _active_operator_config(self) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+        return self._operator_config()
 
     def _match_operator_candidates(
         self,
@@ -2741,8 +2763,15 @@ class DashboardService:
         rows.sort(key=lambda item: (-float(item.get("stat_cost", 0.0) or 0.0), int(item.get("advertiser_id", 0) or 0)))
         return rows
 
-    def _filter_plans_for_operator(self, plans: list[dict[str, Any]], user_id: int) -> list[dict[str, Any]]:
-        operators, keywords = self._active_operator_config()
+    def _filter_plans_for_operator(
+        self,
+        plans: list[dict[str, Any]],
+        user_id: int,
+        operators: dict[int, dict[str, Any]] | None = None,
+        keywords: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if operators is None or keywords is None:
+            operators, keywords = self._active_operator_config()
         if int(user_id or 0) not in operators:
             return []
         result: list[dict[str, Any]] = []
@@ -2752,8 +2781,15 @@ class DashboardService:
                 result.append(dict(row))
         return result
 
-    def _filter_material_items_for_operator(self, items: list[dict[str, Any]], user_id: int) -> list[dict[str, Any]]:
-        operators, keywords = self._active_operator_config()
+    def _filter_material_items_for_operator(
+        self,
+        items: list[dict[str, Any]],
+        user_id: int,
+        operators: dict[int, dict[str, Any]] | None = None,
+        keywords: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if operators is None or keywords is None:
+            operators, keywords = self._active_operator_config()
         if int(user_id or 0) not in operators:
             return []
         result: list[dict[str, Any]] = []
@@ -2787,6 +2823,43 @@ class DashboardService:
         next_payload = dict(payload)
         next_payload["items"] = self._filter_material_items_for_operator(payload.get("items", []), int(user.get("id", 0) or 0))
         return next_payload
+
+    def matched_materials_for_user(
+        self,
+        user_id: int,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        query: str = "",
+    ) -> dict[str, Any]:
+        user = self.get_user_by_id(user_id, include_disabled=True)
+        if not user or str(user.get("role") or "") != ROLE_OPERATOR:
+            return {"items": [], "range_key": range_key, "query": str(query or "").strip()}
+        operators, keywords = self._operator_config(include_disabled=True, only_user_id=user_id)
+        payload = self.material_rankings(range_key, start_date, end_date, "", None)
+        items = self._filter_material_items_for_operator(payload.get("items", []), user_id, operators, keywords)
+        query_text = str(query or "").strip().casefold()
+        if query_text:
+            items = [
+                item
+                for item in items
+                if query_text in self._normalize_match_text(
+                    str(item.get("material_name") or ""),
+                    str(item.get("material_id") or ""),
+                    str(item.get("video_id") or ""),
+                    str(item.get("top_account_name") or ""),
+                    str(item.get("top_plan_name") or ""),
+                )
+            ]
+        return {
+            "user": user,
+            "items": items[:200],
+            "range_key": payload.get("range_key", range_key),
+            "range_label": payload.get("range_label", RANGE_LABEL_MAP.get(range_key, "今日")),
+            "query": str(query or "").strip(),
+            "snapshot_time": payload.get("snapshot_time", ""),
+            "snapshot_count": int(payload.get("snapshot_count") or 0),
+        }
 
     def _apply_account_scope(
         self, payload: dict[str, Any], allowed_advertiser_ids: set[int] | None
@@ -5414,6 +5487,22 @@ async def create_user_keyword(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(item)
+
+
+@app.get("/api/users/{user_id}/matched-materials")
+async def user_matched_materials(
+    user_id: int,
+    range: str = "day",
+    start_date: str = "",
+    end_date: str = "",
+    q: str = "",
+    _user: dict[str, Any] = Depends(require_admin),
+) -> JSONResponse:
+    try:
+        payload = service.matched_materials_for_user(user_id, range, start_date, end_date, q)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(payload)
 
 
 @app.delete("/api/user-keywords/{keyword_id}")
