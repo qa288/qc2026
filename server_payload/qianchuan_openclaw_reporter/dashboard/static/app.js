@@ -1126,7 +1126,7 @@ function renderAlertSummary(events) {
     alertSummary.innerHTML = `
       <div class="alert-summary-card spotlight calm">
         <div class="summary-topline">
-          <span class="summary-chip">当前状态</span>
+          <span class="summary-chip">状态</span>
           <span class="summary-chip subtle">平稳</span>
         </div>
         <div class="summary-value">暂无异常</div>
@@ -1138,9 +1138,9 @@ function renderAlertSummary(events) {
         </div>
       </div>
       <div class="alert-summary-card stat">
-        <div class="summary-label">待处理</div>
-        <div class="summary-value mono">0</div>
-        <div class="summary-sub">当前没有待处理提醒</div>
+      <div class="summary-label">待处理</div>
+      <div class="summary-value mono">0</div>
+      <div class="summary-sub">当前没有待处理</div>
       </div>
       <div class="alert-summary-card stat">
       <div class="summary-label">状态</div>
@@ -1220,10 +1220,10 @@ function renderOverviewHero(latest) {
   const planTone = planFailures ? "danger" : "ok";
   const title = operatorMode ? "今日总览" : supervisor ? "范围总览" : "今日投放概况";
   const copy = operatorMode
-    ? "只看当前关键词命中的素材和团队表现。"
+    ? "只看关键词命中的素材和团队表现。"
     : supervisor
       ? "只看授权范围内的账户、计划和素材。"
-      : "先看核心消耗、支付、订单和 ROI。";
+      : "先看消耗、支付、订单和 ROI。";
   const pillMarkup = admin
     ? `
         <span class="system-pill ${accountTone === "danger" ? "danger" : ""}">${accountFailures ? `账户异常 ${formatNumber(accountFailures)}` : "账户查询正常"}</span>
@@ -2492,7 +2492,7 @@ function renderUserKeywordTable() {
             <button type="button" class="button ghost danger compact" data-action="delete-user-keyword" data-keyword-id="${item.id}">删除</button>
           </td>
         </tr>
-      `).join("") : '<tr><td colspan="3" class="empty-cell">还没有关键词。添加后，该运营账号只看命中这些关键词的数据。</td></tr>'}
+      `).join("") : '<tr><td colspan="3" class="empty-cell">还没有关键词。添加后，该账号只看命中结果。</td></tr>'}
     </tbody>
   `;
 }
@@ -2584,23 +2584,23 @@ function syncAccessRolePanels() {
   }
   if (!isAdmin()) return;
   if (!user) {
-    setInlineFeedback(scopeEditorMeta, "先选账号，再配置范围。", "neutral");
-    setInlineFeedback(operatorKeywordStatus, "先选运营账号，再配关键词。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "先选运营账号，再看命中素材。", "neutral");
+    setInlineFeedback(scopeEditorMeta, "先选账号，再配范围。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "先选运营，再加关键词。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "先选运营，再看命中素材。", "neutral");
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
     return;
   }
   if (isSupervisor) {
-    setInlineFeedback(scopeEditorMeta, "主管按账户范围查看；如需上传，再开启上传权限。", "neutral");
+    setInlineFeedback(scopeEditorMeta, "主管只看勾选账户；需要时再开上传。", "neutral");
   } else if (isOperator) {
-    setInlineFeedback(scopeEditorMeta, "运营账号不配置账户范围，只看关键词命中结果。", "neutral");
-    setInlineFeedback(operatorKeywordStatus, "加关键词后，该账号只看命中这些关键词的数据。", "neutral");
+    setInlineFeedback(scopeEditorMeta, "运营不配置账户范围，只看关键词命中结果。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "加关键词后，该账号只看命中结果。", "neutral");
     setInlineFeedback(operatorMaterialStatus, "只按素材名称命中，默认收起。", "neutral");
   } else {
     setInlineFeedback(scopeEditorMeta, "管理员默认全量可见。", "neutral");
-    setInlineFeedback(operatorKeywordStatus, "管理员和主管不使用运营关键词。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "管理员和主管不显示运营命中素材列表。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "当前角色不使用运营关键词。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "当前角色不显示运营命中素材。", "neutral");
   }
   renderUserKeywordTable();
   renderUserMatchedMaterialTable();
@@ -2688,9 +2688,9 @@ function applyRoleViewPolicy() {
   }
   if (heroCopy) {
     heroCopy.textContent = admin
-      ? "账户、计划、素材、运营账号、上传任务、账号权限和预警。"
+      ? "账户、计划、素材、运营、上传、权限和预警。"
       : supervisor
-        ? "查看授权账户范围内的账户、计划、素材和运营排名；按需批量上传素材。"
+        ? "查看授权范围内的账户、计划、素材和运营排名；按需上传素材。"
         : "查看我的素材、团队排名和今日总消耗。";
   }
   const allowedViews = admin
@@ -3162,16 +3162,16 @@ function resetUserFormState() {
   syncUserRoleFields();
   setInlineFeedback(
     userEditorStatus,
-    isAdmin() ? "新建账号后，再补账户范围或关键词。" : "只有管理员可以配置后台账号。",
+    isAdmin() ? "新建账号后，再补范围或关键词。" : "只有管理员可以配置账号。",
     "neutral",
   );
   setInlineFeedback(
     scopeEditorMeta,
-    isAdmin() ? "管理员默认全量；主管需要勾选范围。" : "当前账号无权修改账户范围。",
+    isAdmin() ? "管理员默认全量；主管需要勾选范围。" : "当前账号无权修改范围。",
     "neutral",
   );
-  setInlineFeedback(operatorKeywordStatus, "先选运营账号，再配关键词。", "neutral");
-  setInlineFeedback(operatorMaterialStatus, "先选运营账号，再看命中素材。", "neutral");
+  setInlineFeedback(operatorKeywordStatus, "先选运营，再加关键词。", "neutral");
+  setInlineFeedback(operatorMaterialStatus, "先选运营，再看命中素材。", "neutral");
   setOperatorMaterialVisibility(false);
   renderScopeChecklist();
   renderUserKeywordTable();
@@ -3254,7 +3254,7 @@ function renderScopeChecklist() {
     return;
   }
   if (user.role === "operator") {
-    scopeAccountList.innerHTML = '<div class="empty-cell">运营账号按关键词归属查看数据，这里不配置账户范围。</div>';
+    scopeAccountList.innerHTML = '<div class="empty-cell">运营账号按关键词看数据，这里不配置范围。</div>';
     return;
   }
   if (!state.catalogAccounts.length) {
@@ -3933,7 +3933,7 @@ function bindInputs() {
         if (addedKeywordCount) {
           setInlineFeedback(operatorKeywordStatus, "关键词已保存，可继续追加或查看命中素材。", "success");
         } else {
-          setInlineFeedback(operatorKeywordStatus, "下一步给该运营账号添加关键词。", "success");
+          setInlineFeedback(operatorKeywordStatus, "下一步给该运营添加关键词。", "success");
           focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
         }
       }

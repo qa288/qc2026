@@ -81,15 +81,13 @@
             <div class="alert-focus-grid">
               <div class="alert-summary-shell">
                 <div class="alert-section-head">
-                  <span>摘要</span>
-                  <span>待处理优先</span>
+                  <span>重点</span>
                 </div>
                 <div id="alertSummary" class="alert-summary"></div>
               </div>
               <div class="alert-stream-shell">
                 <div class="alert-section-head">
-                  <span>最近记录</span>
-                  <span>最新在前</span>
+                  <span>记录</span>
                 </div>
                 <div id="alertStream" class="alert-stream empty">暂无告警记录</div>
               </div>
@@ -496,7 +494,7 @@
                 <div>
                   <h3>后台账号</h3>
                 </div>
-                <div class="section-range-meta compact-inline">主管看账户范围，运营看关键词结果。</div>
+                <div class="section-range-meta compact-inline">主管看账户，运营看关键词。</div>
               </div>
               <div class="table-shell tall">
                 <table id="userTable" class="data-table compact"></table>
@@ -508,7 +506,7 @@
                 <div>
                   <h3>账号配置</h3>
                 </div>
-                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">管理员可配置账号、角色和上传权限。</div>
+                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">新建或编辑账号。</div>
               </div>
               <form id="userForm" class="ownership-form-grid">
                 <label>
@@ -555,7 +553,7 @@
                     <h3>账户范围</h3>
                   </div>
                 </div>
-                <div id="scopeEditorMeta" class="section-range-meta compact-inline inline-feedback">主管按账户范围查看，运营不在这里配范围。</div>
+                <div id="scopeEditorMeta" class="section-range-meta compact-inline inline-feedback">主管看勾选账户，运营不在这里配。</div>
                 <div id="scopeAccountList" class="scope-checklist"></div>
                 <div class="ownership-form-actions ownership-actions-end">
                   <button type="button" id="saveUserScopesButton" class="button primary">保存账户范围</button>
@@ -568,7 +566,7 @@
                     <h3>运营关键词</h3>
                   </div>
                 </div>
-                <div id="operatorKeywordStatus" class="section-range-meta compact-inline inline-feedback">先选运营账号，再配关键词。</div>
+                <div id="operatorKeywordStatus" class="section-range-meta compact-inline inline-feedback">先选运营，再加关键词。</div>
                 <form id="operatorKeywordForm" class="ownership-inline-form">
                   <input name="keyword" type="text" placeholder="例如：小宇 / 小宇剪辑 / XY" />
                   <label class="toggle-chip">
