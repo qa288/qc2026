@@ -130,7 +130,7 @@ function renderPublicTable(items) {
   `;
 }
 
-function renderPublicSummary(items) {
+function renderPublicSummary(items, rangeLabel) {
   if (!publicSummaryStrip) return;
   const top = items[0] || null;
   const totalSpend = items.reduce((sum, item) => sum + Number(item.stat_cost || 0), 0);
@@ -145,15 +145,15 @@ function renderPublicSummary(items) {
     <article class="public-summary-card">
       <span>榜首归属人</span>
       <strong>${top?.employee_name || "--"}</strong>
-      <small>${top ? `当前消耗 ${publicFormatMoney(top.stat_cost)}` : "等待数据"}</small>
+      <small>${top ? `${rangeLabel}消耗 ${publicFormatMoney(top.stat_cost)}` : "等待数据"}</small>
     </article>
     <article class="public-summary-card">
-      <span>总消耗</span>
+      <span>${rangeLabel}总消耗</span>
       <strong>${publicFormatMoney(totalSpend)}</strong>
-      <small>总支付 ${publicFormatMoney(totalPay)}</small>
+      <small>${rangeLabel}支付 ${publicFormatMoney(totalPay)}</small>
     </article>
     <article class="public-summary-card">
-      <span>总订单</span>
+      <span>${rangeLabel}总订单</span>
       <strong>${publicFormatNumber(totalOrders)}</strong>
       <small>按归属人聚合后对比当前区间表现</small>
     </article>
@@ -173,7 +173,7 @@ async function refreshPublicView() {
           : `${payload.query_start_date} 至 ${payload.query_end_date}`)
       : "--";
     publicRangeMeta.textContent = `统计范围：${rangeLabel} · ${dateText} · ${attributionNote} · 更新于 ${payload.updated_at || "--"}`;
-    renderPublicSummary(payload.items || []);
+    renderPublicSummary(payload.items || [], rangeLabel);
     renderPublicTable(payload.items || []);
   } catch (error) {
     publicRangeMeta.textContent = error.message || "公开榜加载失败";
