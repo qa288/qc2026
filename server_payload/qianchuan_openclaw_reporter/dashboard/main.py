@@ -65,6 +65,7 @@ DASHBOARD_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "replace-me")
 RANGE_CACHE_SECONDS = int(os.environ.get("RANGE_CACHE_SECONDS", "55"))
+BACKFILL_QUEUE_DEBOUNCE_SECONDS = int(os.environ.get("BACKFILL_QUEUE_DEBOUNCE_SECONDS", "900"))
 PERFORMANCE_RANGES = {"day", "yesterday", "week", "month", "custom"}
 RANGE_LABEL_MAP = {
     "day": "今日",
@@ -295,10 +296,42 @@ class DashboardService:
         self._templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
         self._performance_cache: dict[str, dict[str, Any]] = {}
         self._material_cache: dict[str, dict[str, Any]] = {}
+        self._backfill_queue_marks: dict[str, float] = {}
 
     @property
     def templates(self) -> Jinja2Templates:
         return self._templates
+
+    def _range_span_days(self, start_dt: datetime, end_dt: datetime) -> int:
+        return max((end_dt.date() - start_dt.date()).days + 1, 1)
+
+    def _enqueue_backfill_task(self, task_name: str, days: int, dedupe_key: str) -> bool:
+        now_ts = time.time()
+        last_ts = float(self._backfill_queue_marks.get(dedupe_key, 0.0) or 0.0)
+        if now_ts - last_ts < BACKFILL_QUEUE_DEBOUNCE_SECONDS:
+            return False
+        from dashboard.celery_app import celery_app
+
+        celery_app.send_task(task_name, args=[max(int(days or 1), 1)])
+        self._backfill_queue_marks[dedupe_key] = now_ts
+        return True
+
+    def _queue_history_backfill_if_needed(
+        self,
+        kind: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        missing_days: int,
+    ) -> bool:
+        if missing_days <= 0:
+            return False
+        days = min(self._range_span_days(start_dt, end_dt), RETENTION_DAYS)
+        range_key = f"{start_dt.strftime('%Y-%m-%d')}:{end_dt.strftime('%Y-%m-%d')}"
+        if kind == "performance":
+            return self._enqueue_backfill_task("dashboard.performance_backfill", days, f"performance:{range_key}")
+        if kind == "detail":
+            return self._enqueue_backfill_task("dashboard.detail_backfill", days, f"detail:{range_key}")
+        return False
 
     def init_db(self) -> None:
         with self.db() as conn:
@@ -5420,18 +5453,11 @@ class DashboardService:
         snapshot_time: str = "",
         allowed_advertiser_ids: set[int] | None = None,
     ) -> dict[str, Any]:
-        cache_key = build_material_cache_key(range_key, start_date, end_date, snapshot_time, allowed_advertiser_ids)
-        cached = self._material_cache.get(cache_key)
-        now_ts = time.time()
-        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
-            return cached["payload"]
-
         target_snapshot = str(snapshot_time or "").strip()
         normalized = str(range_key or "day").strip().lower()
         range_label = ""
         start_dt: datetime | None = None
         end_dt: datetime | None = None
-        missing_days = 0
         if not target_snapshot:
             config = self.read_config()
             if normalized not in PERFORMANCE_RANGES:
@@ -5440,6 +5466,25 @@ class DashboardService:
                 start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
             else:
                 start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
+        cache_key = build_material_cache_key(range_key, start_date, end_date, snapshot_time, allowed_advertiser_ids)
+        cached = self._material_cache.get(cache_key)
+        now_ts = time.time()
+        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
+            cached_payload = dict(cached["payload"])
+            missing_cached_days = int(cached_payload.get("missing_history_days", 0) or 0)
+            if (
+                not target_snapshot
+                and start_dt is not None
+                and end_dt is not None
+                and cached_payload.get("history_backfill_pending")
+                and missing_cached_days > 0
+            ):
+                cached_payload["history_backfill_queued"] = self._queue_history_backfill_if_needed(
+                    "detail", start_dt, end_dt, missing_cached_days
+                )
+            return cached_payload
+
+        missing_days = 0
 
         with self.db() as conn:
             if not target_snapshot:
@@ -5448,6 +5493,7 @@ class DashboardService:
                     missing_days = len(self._missing_extended_days(conn, start_dt, end_dt))
                 runs = self._latest_extended_sync_runs_for_window(conn, start_dt, end_dt)
                 if not runs:
+                    backfill_queued = self._queue_history_backfill_if_needed("detail", start_dt, end_dt, missing_days)
                     return {
                         "snapshot_time": "",
                         "items": [],
@@ -5459,6 +5505,7 @@ class DashboardService:
                         "snapshot_count": 0,
                         "history_backfill_pending": missing_days > 0,
                         "missing_history_days": missing_days,
+                        "history_backfill_queued": backfill_queued,
                     }
                 snapshot_times = [str(item.get("snapshot_time") or "") for item in runs if str(item.get("snapshot_time") or "").strip()]
                 latest_meta = {
@@ -5553,12 +5600,14 @@ class DashboardService:
             "snapshot_count": len(snapshot_times),
         }
         if not target_snapshot:
+            backfill_queued = self._queue_history_backfill_if_needed("detail", start_dt, end_dt, missing_days)
             payload["range_key"] = normalized
             payload["range_label"] = range_label
             payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")
             payload["query_end_date"] = end_dt.strftime("%Y-%m-%d")
             payload["history_backfill_pending"] = missing_days > 0
             payload["missing_history_days"] = missing_days
+            payload["history_backfill_queued"] = backfill_queued
         self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
         return payload
 
@@ -5573,21 +5622,26 @@ class DashboardService:
         normalized = str(range_key or "day").strip().lower()
         if normalized not in PERFORMANCE_RANGES:
             raise ValueError("range must be one of day/yesterday/week/month/custom")
-        cache_key = build_performance_cache_key(normalized, start_date, end_date)
-        cached = self._performance_cache.get(cache_key)
-        now_ts = time.time()
-        if not force_refresh and cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
-            return self._apply_account_scope(cached["payload"], allowed_advertiser_ids)
-
         config = self.read_config()
         if normalized == "custom":
             start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
         else:
             start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
+        cache_key = build_performance_cache_key(normalized, start_date, end_date)
+        cached = self._performance_cache.get(cache_key)
+        now_ts = time.time()
+        if not force_refresh and cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
+            cached_payload = dict(cached["payload"])
+            if cached_payload.get("history_backfill_pending") and int(cached_payload.get("missing_history_days", 0) or 0) > 0:
+                cached_payload["history_backfill_queued"] = self._queue_history_backfill_if_needed(
+                    "performance", start_dt, end_dt, int(cached_payload.get("missing_history_days", 0) or 0)
+                )
+            return self._apply_account_scope(cached_payload, allowed_advertiser_ids)
         missing_days = 0
         if normalized in {"week", "month", "custom", "yesterday"}:
             with self.db() as conn:
                 missing_days = len(self._missing_summary_days(conn, start_dt, end_dt))
+        backfill_queued = self._queue_history_backfill_if_needed("performance", start_dt, end_dt, missing_days)
         payload = self._performance_snapshot_from_db(start_dt, end_dt)
         payload["range_key"] = normalized
         payload["range_label"] = range_label
@@ -5595,6 +5649,7 @@ class DashboardService:
         payload["query_end_date"] = end_dt.strftime("%Y-%m-%d")
         payload["history_backfill_pending"] = missing_days > 0
         payload["missing_history_days"] = missing_days
+        payload["history_backfill_queued"] = backfill_queued
         payload["plans"] = self._apply_employee_attribution(
             [self._decorate_plan_item(item) for item in payload["plans"]],
             payload["accounts"],

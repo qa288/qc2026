@@ -882,10 +882,14 @@ function formatDateWindowMeta(payload) {
   if (!payload) {
     return "统计范围：加载中";
   }
+  const queued =
+    payload.history_backfill_pending
+    && Number(payload.missing_history_days || 0) > 0
+    && Boolean(payload.history_backfill_queued);
   const label = payload.range_label || RANGE_LABELS[payload.range_key] || "当前";
   const backfillHint =
     payload.history_backfill_pending && Number(payload.missing_history_days || 0) > 0
-      ? ` · 历史补齐中（缺 ${Number(payload.missing_history_days || 0)} 天）`
+      ? ` · 历史补齐中（缺 ${Number(payload.missing_history_days || 0)} 天${queued ? "，已排队" : ""}）`
       : "";
   if (payload.query_start_date && payload.query_end_date) {
     if (payload.query_start_date === payload.query_end_date) {
