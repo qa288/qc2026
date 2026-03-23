@@ -1733,22 +1733,38 @@ function renderMaterialInteractions(rows) {
 }
 
 function renderMaterialTable(rows) {
+  const operatorMode = isOperator();
+  if (
+    operatorMode
+    && !["material_name", "stat_cost", "top_account_name", "top_plan_name"].includes(String(state.materialSort.key || ""))
+  ) {
+    state.materialSort = { key: "stat_cost", direction: "desc" };
+    saveSort("material-sort", state.materialSort);
+  }
   const query = materialSearch.value.trim().toLowerCase();
   const visibleRows = rows.filter((row) => {
     const haystack = [row.material_name, row.material_id, row.video_id, row.top_plan_name, row.top_account_name].join(" ").toLowerCase();
     return haystack.includes(query);
   });
-  const columns = [
-    { key: "material_name", label: "素材", sortable: true },
-    { key: "preview", label: "预览", sortable: false },
-    { key: "stat_cost", label: "消耗", sortable: true },
-    { key: "material_type", label: "类型", sortable: true },
-    { key: "order_count", label: "订单", sortable: true },
-    { key: "pay_amount", label: "支付", sortable: true },
-    { key: "roi", label: "ROI", sortable: true },
-    { key: "plan_count", label: "计划数", sortable: true },
-    { key: "advertiser_count", label: "账户数", sortable: true },
-  ];
+  const columns = operatorMode
+    ? [
+        { key: "material_name", label: "素材", sortable: true },
+        { key: "preview", label: "预览", sortable: false },
+        { key: "stat_cost", label: "消耗", sortable: true },
+        { key: "top_account_name", label: "归属账户", sortable: true },
+        { key: "top_plan_name", label: "归属计划", sortable: true },
+      ]
+    : [
+        { key: "material_name", label: "素材", sortable: true },
+        { key: "preview", label: "预览", sortable: false },
+        { key: "stat_cost", label: "消耗", sortable: true },
+        { key: "material_type", label: "类型", sortable: true },
+        { key: "order_count", label: "订单", sortable: true },
+        { key: "pay_amount", label: "支付", sortable: true },
+        { key: "roi", label: "ROI", sortable: true },
+        { key: "plan_count", label: "计划数", sortable: true },
+        { key: "advertiser_count", label: "账户数", sortable: true },
+      ];
   const sorted = sortRows(visibleRows, state.materialSort);
   materialTable.innerHTML = `
     ${makeHeader(columns, state.materialSort, "material-sort")}
@@ -1772,12 +1788,19 @@ function renderMaterialTable(rows) {
             >预览</button>
           </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
+          ${operatorMode
+            ? `
+          <td>${escapeHtml(row.top_account_name || "--")}</td>
+          <td>${escapeHtml(row.top_plan_name || "--")}</td>
+          `
+            : `
           <td><span class="pill">${escapeHtml(row.material_type || "-")}</span></td>
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
           <td class="mono">${formatNumber(row.plan_count)}</td>
           <td class="mono">${formatNumber(row.advertiser_count)}</td>
+          `}
         </tr>
       `).join("")}
     </tbody>
@@ -2510,6 +2533,9 @@ function applyRoleViewPolicy() {
   }
   if (materialsPanelTitle) {
     materialsPanelTitle.textContent = operator ? "我的素材" : "素材效果排行";
+  }
+  if (materialSearch) {
+    materialSearch.placeholder = operator ? "搜索素材 / 账户 / 计划" : "搜索素材 / 账户 / 计划 / 视频ID";
   }
   if (heroCopy) {
     heroCopy.textContent = admin
