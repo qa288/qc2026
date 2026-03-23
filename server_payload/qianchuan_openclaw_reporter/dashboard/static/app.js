@@ -2276,8 +2276,7 @@ function closeMaterialPreview() {
   if (materialPreviewBody) materialPreviewBody.innerHTML = "";
 }
 
-function openMaterialPreview(materialKey) {
-  const row = selectedMaterialRow(materialKey);
+function openMaterialPreviewFromRow(row) {
   if (!row || !materialPreviewModal || !materialPreviewBody) return;
   const directVideoUrl = String(row.video_url || "").trim();
   const coverUrl = String(row.cover_url || "").trim();
@@ -2313,6 +2312,12 @@ function openMaterialPreview(materialKey) {
   `;
   materialPreviewModal.classList.remove("hidden");
   materialPreviewModal.setAttribute("aria-hidden", "false");
+}
+
+function openMaterialPreview(materialKey) {
+  const row = selectedMaterialRow(materialKey);
+  if (!row) return;
+  openMaterialPreviewFromRow(row);
 }
 
 function selectedUserMatchedMaterials() {
@@ -2407,6 +2412,7 @@ function renderUserMatchedMaterialTable() {
     <thead>
       <tr>
         <th>素材</th>
+        <th>预览</th>
         <th>消耗</th>
         <th>账户</th>
         <th>计划</th>
@@ -2419,13 +2425,29 @@ function renderUserMatchedMaterialTable() {
             <div class="table-primary">${escapeHtml(item.material_name || "--")}</div>
             <div class="table-sub mono">${escapeHtml(item.material_id || "--")}</div>
           </td>
+          <td>
+            <button
+              type="button"
+              class="button ghost compact"
+              data-action="preview-user-material"
+              data-material-key="${escapeHtml(item.material_key || "")}"
+              ${canPreviewMaterial(item) ? "" : "disabled"}
+            >预览</button>
+          </td>
           <td class="mono">${formatMoney(item.stat_cost)}</td>
           <td>${escapeHtml(item.top_account_name || "--")}</td>
           <td>${escapeHtml(item.top_plan_name || "--")}</td>
         </tr>
-      `).join("") : '<tr><td colspan="4" class="empty-cell">当前关键词还没有命中素材。</td></tr>'}
+      `).join("") : '<tr><td colspan="5" class="empty-cell">当前关键词还没有命中素材。</td></tr>'}
     </tbody>
   `;
+  operatorMaterialTable.querySelectorAll('[data-action="preview-user-material"]').forEach((button, index) => {
+    button.addEventListener("click", () => {
+      const row = items[index];
+      if (!row) return;
+      openMaterialPreviewFromRow(row);
+    });
+  });
 }
 
 function syncAccessRolePanels() {
