@@ -1603,9 +1603,15 @@ function renderEmployeeTable(rows) {
     <tbody>
       ${sorted.map((row) => {
         const entityName = breakdownEntityName(row);
+        const subline = operatorMode
+          ? [row.operator_username ? `账号 ${row.operator_username}` : "", row.top_account_name ? `代表账户 ${row.top_account_name}` : ""].filter(Boolean)
+          : [row.top_account_name ? `代表账户 ${row.top_account_name}` : "", row.top_plan_name ? `代表计划 ${row.top_plan_name}` : ""].filter(Boolean);
         return `
           <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
-            <td>${escapeHtml(entityName)}</td>
+            <td>
+              <div class="cell-primary">${escapeHtml(entityName)}</div>
+              ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+            </td>
             <td class="mono">${formatMoney(row.stat_cost)}</td>
             <td class="mono">${formatMoney(row.pay_amount)}</td>
             <td class="mono">${formatNumber(row.order_count)}</td>
@@ -1656,7 +1662,13 @@ function renderProductTable(rows) {
     <tbody>
       ${sorted.map((row) => `
         <tr data-product-key="${escapeHtml(row.product_key)}" class="${state.selectedProductKey === row.product_key ? "active-row" : ""}">
-          <td>${escapeHtml(row.product_name)}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.product_name)}</div>
+            <div class="cell-subline">
+              ${row.top_plan_name ? `<span class="cell-subitem">代表计划 ${escapeHtml(row.top_plan_name)}</span>` : ""}
+              ${row.top_account_name ? `<span class="cell-subitem">代表账户 ${escapeHtml(row.top_account_name)}</span>` : ""}
+            </div>
+          </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
@@ -1685,7 +1697,7 @@ function renderProductTable(rows) {
 
 function clearMaterialDetail() {
   materialDetail.className = "detail-panel empty";
-  materialDetail.textContent = "点击素材行，查看覆盖范围和当前表现。";
+  materialDetail.textContent = "点击素材行，查看覆盖范围、代表计划和预览。";
 }
 
 function renderMaterialDetail(materialKey) {
@@ -1695,7 +1707,7 @@ function renderMaterialDetail(materialKey) {
   materialDetail.className = "detail-panel";
   materialDetail.innerHTML = `
     <div class="detail-block-head">
-      <h4>素材覆盖与表现</h4>
+      <h4>${escapeHtml(row.material_name || "素材详情")}</h4>
       <span>补充信息</span>
     </div>
     <div class="detail-inline-actions">
@@ -1703,14 +1715,11 @@ function renderMaterialDetail(materialKey) {
     </div>
     <div class="detail-stats">
       <div class="detail-stat"><span class="label">素材类型</span><span class="value compact">${escapeHtml(row.material_type || "-")}</span></div>
-      <div class="detail-stat"><span class="label">当前统计消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
-      <div class="detail-stat"><span class="label">当前统计支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
-      <div class="detail-stat"><span class="label">当前统计订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
-      <div class="detail-stat"><span class="label">最近一次素材同步 ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
       <div class="detail-stat"><span class="label">覆盖账户数</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
       <div class="detail-stat"><span class="label">覆盖计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
       <div class="detail-stat"><span class="label">首发视频</span><span class="value compact">${row.is_original ? "是" : "否"}</span></div>
-      <div class="detail-stat detail-stat-wide"><span class="label">代表计划 / 账户</span><span class="value compact">${escapeHtml(row.top_plan_name || "-")}<br /><span class="detail-sub">${escapeHtml(row.top_account_name || "-")}</span></span></div>
+      <div class="detail-stat detail-stat-wide"><span class="label">代表计划</span><span class="value compact">${escapeHtml(row.top_plan_name || "-")}</span></div>
+      <div class="detail-stat detail-stat-wide"><span class="label">代表账户</span><span class="value compact">${escapeHtml(row.top_account_name || "-")}</span></div>
     </div>
   `;
   materialDetail.querySelector('[data-action="open-material-preview"]')?.addEventListener("click", () => {
@@ -1783,12 +1792,12 @@ function renderMaterialTable(rows) {
         { key: "material_name", label: "素材", sortable: true },
         { key: "preview", label: "预览", sortable: false },
         { key: "stat_cost", label: "消耗", sortable: true },
-        { key: "material_type", label: "类型", sortable: true },
-        { key: "order_count", label: "订单", sortable: true },
-        { key: "pay_amount", label: "支付", sortable: true },
         { key: "roi", label: "ROI", sortable: true },
+        { key: "pay_amount", label: "支付", sortable: true },
+        { key: "order_count", label: "订单", sortable: true },
         { key: "plan_count", label: "计划数", sortable: true },
         { key: "advertiser_count", label: "账户数", sortable: true },
+        { key: "material_type", label: "类型", sortable: true },
       ];
   const sorted = sortRows(visibleRows, state.materialSort);
   materialTable.innerHTML = `
@@ -1819,12 +1828,12 @@ function renderMaterialTable(rows) {
           <td>${escapeHtml(row.top_plan_name || "--")}</td>
           `
             : `
-          <td><span class="pill">${escapeHtml(row.material_type || "-")}</span></td>
-          <td class="mono">${formatNumber(row.order_count)}</td>
-          <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
+          <td class="mono">${formatMoney(row.pay_amount)}</td>
+          <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatNumber(row.plan_count)}</td>
           <td class="mono">${formatNumber(row.advertiser_count)}</td>
+          <td><span class="pill">${escapeHtml(row.material_type || "-")}</span></td>
           `}
         </tr>
       `).join("")}
@@ -2005,22 +2014,24 @@ async function renderPlanDetail(adId) {
   const currentRangeLabel = rangeLabel(planFilter);
   planDetail.className = "detail-panel";
   planDetail.innerHTML = `
+    <div class="detail-block-head">
+      <h4>${escapeHtml(row.ad_name)}</h4>
+      <span>补充信息</span>
+    </div>
     <div class="detail-stats detail-stats-plan">
-      <div class="detail-stat detail-stat-wide"><span class="label">计划名称</span><span class="value compact">${escapeHtml(row.ad_name)}</span></div>
       <div class="detail-stat"><span class="label">计划 ID</span><span class="value compact mono">${formatNumber(row.ad_id)}</span></div>
-      <div class="detail-stat"><span class="label">账户 / ID</span><span class="value compact">${escapeHtml(row.advertiser_name)}<br /><span class="detail-sub mono">${formatNumber(row.advertiser_id)}</span></span></div>
-      <div class="detail-stat"><span class="label">商品 / ID</span><span class="value compact">${escapeHtml(row.product_name || "-")}<br /><span class="detail-sub mono">${escapeHtml(row.product_id || "-")}</span></span></div>
+      <div class="detail-stat"><span class="label">账户</span><span class="value compact">${escapeHtml(row.advertiser_name)}</span></div>
+      <div class="detail-stat"><span class="label">商品</span><span class="value compact">${escapeHtml(row.product_name || "-")}</span></div>
       <div class="detail-stat"><span class="label">主播</span><span class="value compact">${escapeHtml(row.anchor_name || "-")}</span></div>
       <div class="detail-stat"><span class="label">营销目标</span><span class="value">${renderMarketingGoalBadge(row)}</span></div>
       <div class="detail-stat"><span class="label">投放状态</span><span class="value">${renderPlanStatusBadge(row)}</span></div>
-      <div class="detail-stat"><span class="label">${escapeHtml(currentRangeLabel)}订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
-      <div class="detail-stat"><span class="label">${escapeHtml(currentRangeLabel)} ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+      <div class="detail-stat"><span class="label">商品 ID</span><span class="value compact mono">${escapeHtml(row.product_id || "-")}</span></div>
+      <div class="detail-stat"><span class="label">账户 ID</span><span class="value compact mono">${formatNumber(row.advertiser_id)}</span></div>
       <div class="detail-stat"><span class="label">目标 ROI</span><span class="value mono">${formatRate(row.roi_goal)}</span></div>
       <div class="detail-stat"><span class="label">ROI 差值</span><span class="value mono ${roiGap >= 0 ? "positive" : "negative"}">${roiGap >= 0 ? "+" : ""}${formatRate(roiGap)}</span></div>
-      <div class="detail-stat"><span class="label">${escapeHtml(currentRangeLabel)}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
-      <div class="detail-stat"><span class="label">${escapeHtml(currentRangeLabel)}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
       <div class="detail-stat"><span class="label">单均成本</span><span class="value mono">${orderCost === null ? "-" : formatMoney(orderCost)}</span></div>
       <div class="detail-stat"><span class="label">支付减消耗</span><span class="value mono ${payGap >= 0 ? "positive" : "negative"}">${payGap >= 0 ? "+" : ""}${formatMoney(payGap)}</span></div>
+      <div class="detail-stat detail-stat-wide"><span class="label">${escapeHtml(currentRangeLabel)}补充判断</span><span class="value compact">当前区间 ROI ${formatRate(row.roi)}，订单 ${formatNumber(row.order_count)}，支付 ${formatMoney(row.pay_amount)}。</span></div>
     </div>
   `;
   await renderPlanAssets(adId);
@@ -2028,7 +2039,7 @@ async function renderPlanDetail(adId) {
 
 function clearPlanDetail() {
   planDetail.className = "detail-panel empty";
-  planDetail.textContent = "点击计划行，查看计划字段和当前表现。";
+  planDetail.textContent = "点击计划行，查看补充配置和异常判断。";
   clearPlanAssetSummary();
 }
 
@@ -2076,15 +2087,15 @@ function renderPlanTable(plans) {
   const accountFilter = planAccountFilter.value;
   const columns = [
     { key: "ad_name", label: "计划", sortable: true },
-    { key: "product_name", label: "商品 / 主播", sortable: true },
-    { key: "marketing_goal_text", label: "营销目标", sortable: true },
-    { key: "advertiser_name", label: "账户", sortable: true },
-    { key: "order_count", label: "订单", sortable: true },
-    { key: "roi", label: "ROI", sortable: true },
-    { key: "roi_goal", label: "目标ROI", sortable: true },
     { key: "stat_cost", label: "消耗", sortable: true },
+    { key: "roi", label: "ROI", sortable: true },
     { key: "pay_amount", label: "支付", sortable: true },
+    { key: "order_count", label: "订单", sortable: true },
+    { key: "product_name", label: "商品 / 主播", sortable: true },
+    { key: "advertiser_name", label: "账户", sortable: true },
     { key: "status_text", label: "投放状态", sortable: true },
+    { key: "roi_goal", label: "目标ROI", sortable: true },
+    { key: "marketing_goal_text", label: "营销目标", sortable: true },
   ];
   const enrichedRows = plans.map((row) => ({
     ...row,
@@ -2119,6 +2130,10 @@ function renderPlanTable(plans) {
               <span class="cell-subitem">PID ${escapeHtml(String(row.ad_id || "-"))}</span>
             </div>
           </td>
+          <td class="mono">${formatMoney(row.stat_cost)}</td>
+          <td class="mono">${formatRate(row.roi)}</td>
+          <td class="mono">${formatMoney(row.pay_amount)}</td>
+          <td class="mono">${formatNumber(row.order_count)}</td>
           <td>
             <div class="cell-primary">${escapeHtml(row.product_name || "-")}</div>
             <div class="cell-subline">
@@ -2126,14 +2141,10 @@ function renderPlanTable(plans) {
               ${row.anchor_name ? `<span class="cell-subitem">主播 ${escapeHtml(row.anchor_name)}</span>` : ""}
             </div>
           </td>
-          <td>${renderMarketingGoalBadge(row)}</td>
           <td>${escapeHtml(row.advertiser_name)}</td>
-          <td class="mono">${formatNumber(row.order_count)}</td>
-          <td class="mono">${formatRate(row.roi)}</td>
-          <td class="mono">${formatRate(row.roi_goal)}</td>
-          <td class="mono">${formatMoney(row.stat_cost)}</td>
-          <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td>${renderPlanStatusBadge(row)}</td>
+          <td class="mono">${formatRate(row.roi_goal)}</td>
+          <td>${renderMarketingGoalBadge(row)}</td>
         </tr>
       `).join("")}
     </tbody>
