@@ -543,11 +543,13 @@
                     </select>
                   </label>
                   <label>
-                    <span id="ruleTargetLabel">限定对象</span>
-                    <input name="target_id" id="ruleTargetInput" type="text" list="ruleTargetOptions" placeholder="留空表示全部生效" />
+                    <span id="ruleTargetLabel">搜索并选择对象</span>
+                    <input id="ruleTargetSearchInput" type="text" list="ruleTargetOptions" placeholder="输入关键词搜索候选对象，留空表示全部" autocomplete="off" />
+                    <input name="target_id" id="ruleTargetInput" type="hidden" />
                     <datalist id="ruleTargetOptions"></datalist>
                   </label>
                 </div>
+                <div id="ruleTargetMeta" class="signal-form-hint compact">输入账户名、计划名或钱包名关键词后，从下拉候选项中选择；留空表示全部。</div>
                 <div class="signal-form-row signal-form-row-aux">
                   <label>
                     <span>比较</span>
@@ -585,11 +587,11 @@
             <section class="signal-config-card signal-notify-card">
               <div class="signal-config-head">
                 <div>
-                  <h3>通知出口</h3>
+                  <h3>通知渠道</h3>
                 </div>
                 <button type="submit" form="notificationForm" class="button primary">保存通知</button>
               </div>
-              <div class="signal-form-hint compact">这里只控制阈值告警是否外发，不处理定时报表。</div>
+              <div class="signal-form-hint compact">先把阈值告警规则配好，再决定是否发到飞书、钉钉或微信。</div>
               <div id="notificationStatus" class="notify-inline-status"></div>
               <form id="notificationForm" class="signal-compact-form">
                 <div class="signal-form-row signal-form-row-notify">
@@ -600,16 +602,14 @@
                   <label>
                     <span>渠道</span>
                     <select name="channel" required>
-                      <option value="feishu">Feishu</option>
-                      <option value="slack">Slack</option>
-                      <option value="telegram">Telegram</option>
-                      <option value="email">Email</option>
-                      <option value="dingtalk">DingTalk</option>
+                      <option value="feishu">飞书</option>
+                      <option value="dingtalk">钉钉</option>
+                      <option value="wechat">微信</option>
                     </select>
                   </label>
                   <label class="wide-field">
-                    <span>目标</span>
-                    <input name="target" type="text" placeholder="open_id、chat_id 或群目标值" />
+                    <span>接收目标</span>
+                    <input name="target" type="text" placeholder="群机器人、群会话或接收对象标识" />
                   </label>
                   <label>
                     <span>账号</span>

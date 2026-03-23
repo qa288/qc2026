@@ -29,8 +29,9 @@
 5. [公开页与后台重构方案](/Users/xy/千川/DOCS/standard/18_公开页与后台重构方案.md)
 6. [素材上传与批量投放方案](/Users/xy/千川/DOCS/standard/19_素材上传与批量投放方案.md)
 7. [角色模型与运营工作台方案](/Users/xy/千川/DOCS/standard/20_角色模型与运营工作台方案.md)
-8. [运行目录说明](/Users/xy/千川/DOCS/runtime/README.md)
-9. [官方能力目录](/Users/xy/千川/DOCS/runtime/capabilities/QIANCHUAN_CAPABILITY_CATALOG.md)
+8. [管理员预警规则页方案](/Users/xy/千川/DOCS/standard/21_管理员预警规则页方案.md)
+9. [运行目录说明](/Users/xy/千川/DOCS/runtime/README.md)
+10. [官方能力目录](/Users/xy/千川/DOCS/runtime/capabilities/QIANCHUAN_CAPABILITY_CATALOG.md)
 
 ## 使用规则
 

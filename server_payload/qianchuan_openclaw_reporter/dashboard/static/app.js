@@ -75,6 +75,7 @@ const state = {
   productSort: loadSort("product-sort", { key: "order_count", dir: "desc" }),
   materialSort: loadSort("material-sort", { key: "order_count", dir: "desc" }),
   activeView: loadPreference("active-view", "overview"),
+  ruleTargetOptions: [],
   performanceFilters: {
     account: loadRangeFilter("account-range-filter", "day"),
     plan: loadRangeFilter("plan-range-filter", "day"),
@@ -118,8 +119,10 @@ const ruleFormHint = document.getElementById("ruleFormHint");
 const ruleFormSubmitButton = document.getElementById("ruleFormSubmitButton");
 const ruleFormCancelButton = document.getElementById("ruleFormCancelButton");
 const ruleTargetInput = document.getElementById("ruleTargetInput");
+const ruleTargetSearchInput = document.getElementById("ruleTargetSearchInput");
 const ruleTargetLabel = document.getElementById("ruleTargetLabel");
 const ruleTargetOptions = document.getElementById("ruleTargetOptions");
+const ruleTargetMeta = document.getElementById("ruleTargetMeta");
 const ruleMinSpendField = document.getElementById("ruleMinSpendField");
 const syncButton = document.getElementById("syncButton");
 const syncExtendedButton = document.getElementById("syncExtendedButton");
@@ -372,9 +375,7 @@ function channelLabel(channel) {
   const labels = {
     feishu: "飞书",
     dingtalk: "钉钉",
-    slack: "Slack",
-    telegram: "Telegram",
-    email: "邮箱",
+    wechat: "微信",
   };
   return labels[String(channel || "").trim().toLowerCase()] || String(channel || "-");
 }
@@ -453,6 +454,19 @@ function entityTargetOptions(entityType) {
   return [];
 }
 
+function ruleTargetLookupMaps(options) {
+  const byLabel = new Map();
+  const byValue = new Map();
+  for (const item of options || []) {
+    const label = String(item.label || "").trim();
+    const value = String(item.value || "").trim();
+    if (!label || !value) continue;
+    byLabel.set(label, value);
+    byValue.set(value, label);
+  }
+  return { byLabel, byValue };
+}
+
 function targetDisplayLabel(entityType, targetId) {
   const target = String(targetId || "").trim();
   if (!target) return "全部";
@@ -467,6 +481,8 @@ function resetRuleFormState() {
   ruleForm.reset();
   const ruleIdInput = ruleForm.querySelector('input[name="rule_id"]');
   if (ruleIdInput) ruleIdInput.value = "";
+  if (ruleTargetSearchInput) ruleTargetSearchInput.value = "";
+  if (ruleTargetInput) ruleTargetInput.value = "";
   const enabledInput = ruleForm.querySelector('input[name="enabled"]');
   if (enabledInput) enabledInput.checked = true;
   const cooldownInput = ruleForm.querySelector('input[name="cooldown_minutes"]');
@@ -499,6 +515,9 @@ function fillRuleForm(rule) {
   ruleForm.querySelector('input[name="min_spend"]').value = String(rule.min_spend ?? 0);
   ruleForm.querySelector('input[name="cooldown_minutes"]').value = String(rule.cooldown_minutes ?? 60);
   ruleForm.querySelector('input[name="target_id"]').value = String(rule.target_id || "");
+  if (ruleTargetSearchInput) {
+    ruleTargetSearchInput.value = targetDisplayLabel(String(rule.entity_type || "plan"), String(rule.target_id || ""));
+  }
   ruleForm.querySelector('input[name="note"]').value = String(rule.note || "");
   ruleForm.querySelector('input[name="enabled"]').checked = Boolean(rule.enabled);
   if (ruleFormSubmitButton) ruleFormSubmitButton.textContent = "保存规则";
@@ -522,17 +541,42 @@ function syncRuleFormFields() {
   metricSelect.value = metricOptions.some((item) => item.value === currentMetric) ? currentMetric : metricOptions[0].value;
   thresholdInput.step = config.thresholdStep || "0.01";
   ruleTargetLabel.textContent = config.targetLabel;
-  ruleTargetInput.placeholder = config.targetPlaceholder;
+  ruleTargetSearchInput.placeholder = config.targetPlaceholder;
   ruleMinSpendField.classList.toggle("hidden", !config.supportsMinSpend);
   minSpendInput.disabled = !config.supportsMinSpend;
   if (!config.supportsMinSpend) {
     minSpendInput.value = "0";
   }
   const targetOptions = entityTargetOptions(entityType);
+  state.ruleTargetOptions = targetOptions;
   ruleTargetOptions.innerHTML = targetOptions
     .slice(0, 400)
-    .map((item) => `<option value="${escapeHtml(item.value)}" label="${escapeHtml(item.label)}"></option>`)
+    .map((item) => `<option value="${escapeHtml(item.label)}"></option>`)
     .join("");
+  const targetMaps = ruleTargetLookupMaps(targetOptions);
+  const currentTargetId = String(ruleTargetInput.value || "").trim();
+  if (currentTargetId) {
+    const currentLabel = targetMaps.byValue.get(currentTargetId);
+    if (currentLabel) {
+      ruleTargetSearchInput.value = currentLabel;
+    } else {
+      ruleTargetInput.value = "";
+      ruleTargetSearchInput.value = "";
+    }
+  }
+  if (ruleTargetMeta) {
+    const targetScopeHelp = config.targetSource === "sharedWallets"
+      ? "支持按钱包名称关键词搜索"
+      : config.targetSource === "accountBalances"
+        ? "支持按账户名称关键词搜索"
+        : config.targetSource === "plans"
+          ? "支持按计划名称关键词搜索"
+          : "支持按账户名称关键词搜索";
+    ruleTargetMeta.textContent = `输入关键词筛选候选对象，并从下拉项中选择；留空表示全部。${targetScopeHelp}。`;
+    if (!ruleTargetMeta.dataset.tone || ruleTargetMeta.dataset.tone === "neutral") {
+      ruleTargetMeta.dataset.tone = "neutral";
+    }
+  }
   if (ruleFormHint) {
     const modeLabel = state.editingRuleId ? "当前为编辑模式" : "当前为新增模式";
     const targetLabel = targetOptions.length ? `可选对象 ${formatNumber(targetOptions.length)} 个` : "当前暂无可选对象";
@@ -541,6 +585,33 @@ function syncRuleFormFields() {
     if (!ruleFormHint.dataset.tone || ruleFormHint.dataset.tone === "neutral") {
       ruleFormHint.dataset.tone = "neutral";
     }
+  }
+}
+
+function syncRuleTargetSelectionFromSearch() {
+  if (!ruleTargetSearchInput || !ruleTargetInput) return;
+  const text = String(ruleTargetSearchInput.value || "").trim();
+  if (!text) {
+    ruleTargetInput.value = "";
+    if (ruleTargetMeta) {
+      ruleTargetMeta.dataset.tone = "neutral";
+    }
+    return;
+  }
+  const targetMaps = ruleTargetLookupMaps(state.ruleTargetOptions || []);
+  const resolved = targetMaps.byLabel.get(text);
+  if (resolved) {
+    ruleTargetInput.value = resolved;
+    if (ruleTargetMeta) {
+      ruleTargetMeta.textContent = `已选中：${text}`;
+      ruleTargetMeta.dataset.tone = "success";
+    }
+    return;
+  }
+  ruleTargetInput.value = "";
+  if (ruleTargetMeta) {
+    ruleTargetMeta.textContent = "请输入关键词后，从下拉候选项中选择一个具体对象；留空表示全部。";
+    ruleTargetMeta.dataset.tone = "neutral";
   }
 }
 
@@ -616,7 +687,7 @@ function renderMarketingGoalBadge(row) {
 }
 
 function notificationChannelOptions(current) {
-  const options = ["feishu", "slack", "telegram", "email", "dingtalk"];
+  const options = ["feishu", "dingtalk", "wechat"];
   if (current && !options.includes(current)) {
     options.push(current);
   }
@@ -644,14 +715,8 @@ function describeNotificationTarget(settings) {
   if (channel === "dingtalk") {
     return { label: "钉钉目标", detail: "已配置钉钉接收对象。" };
   }
-  if (channel === "slack") {
-    return { label: "Slack 目标", detail: "已配置 Slack 接收对象。" };
-  }
-  if (channel === "telegram") {
-    return { label: "Telegram 目标", detail: "已配置 Telegram 接收对象。" };
-  }
-  if (channel === "email" || target.includes("@")) {
-    return { label: "邮箱接收", detail: "已配置邮箱通知目标。" };
+  if (channel === "wechat") {
+    return { label: "微信目标", detail: "已配置微信接收对象。" };
   }
   return { label: "已配置目标", detail: "当前渠道已经设置接收对象。" };
 }
@@ -2704,6 +2769,8 @@ function bindInputs() {
   });
 
   ruleForm?.querySelector('select[name="entity_type"]')?.addEventListener("change", () => {
+    if (ruleTargetInput) ruleTargetInput.value = "";
+    if (ruleTargetSearchInput) ruleTargetSearchInput.value = "";
     syncRuleFormFields();
   });
 
@@ -2727,6 +2794,7 @@ function bindInputs() {
       ruleForm.querySelector('input[name="min_spend"]').value = minSpend;
       ruleForm.querySelector('input[name="note"]').value = note;
       ruleForm.querySelector('input[name="target_id"]').value = "";
+      if (ruleTargetSearchInput) ruleTargetSearchInput.value = "";
       if (ruleFormHint) {
         ruleFormHint.textContent = `已套用 ${button.textContent.trim()} 模板，可继续补充具体对象和阈值。`;
         ruleFormHint.dataset.tone = "neutral";
@@ -2764,7 +2832,15 @@ function bindInputs() {
 
   ruleForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    syncRuleTargetSelectionFromSearch();
     const form = new FormData(ruleForm);
+    const targetSearchValue = String(ruleTargetSearchInput?.value || "").trim();
+    const targetIdValue = String(form.get("target_id") || "").trim();
+    if (targetSearchValue && !targetIdValue) {
+      window.alert("请从下拉候选项中选择一个具体对象，或清空后按全部对象生效。");
+      ruleTargetSearchInput?.focus();
+      return;
+    }
     const ruleId = String(form.get("rule_id") || "").trim();
     const payload = {
       entity_type: form.get("entity_type"),
@@ -2796,6 +2872,14 @@ function bindInputs() {
       ruleFormHint.textContent = `已保存${savedLabel}规则。继续新增规则，或到下方列表调整状态。`;
       ruleFormHint.dataset.tone = "success";
     }
+  });
+
+  ruleTargetSearchInput?.addEventListener("input", () => {
+    syncRuleTargetSelectionFromSearch();
+  });
+
+  ruleTargetSearchInput?.addEventListener("change", () => {
+    syncRuleTargetSelectionFromSearch();
   });
 
   syncButton.addEventListener("click", async () => {
