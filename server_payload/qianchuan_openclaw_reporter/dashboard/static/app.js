@@ -146,6 +146,7 @@ const signalOverview = document.getElementById("signalOverview");
 const overviewHeroCard = document.getElementById("overviewHeroCard");
 const overviewBoardGrid = document.getElementById("overviewBoardGrid");
 const overviewAlertTitle = document.getElementById("overviewAlertTitle");
+const overviewSystemRail = document.querySelector(".system-rail");
 const viewTabs = document.getElementById("viewTabs");
 const viewSections = Array.from(document.querySelectorAll(".view-section"));
 const accountRangeSwitch = document.getElementById("accountRangeSwitch");
@@ -1175,6 +1176,8 @@ function renderKpis(latest) {
 function renderOverviewHero(latest) {
   if (!overviewHeroCard) return;
   const summary = latest?.summary || {};
+  const admin = isAdmin();
+  const supervisor = isSupervisor();
   const operatorMode = isOperator();
   const teamLabel = "运营账号";
   const activeTeamCount = formatNumber(summary.active_operator_count);
@@ -1182,15 +1185,28 @@ function renderOverviewHero(latest) {
   const planFailures = Number(summary.plan_failures || 0);
   const accountTone = accountFailures ? "danger" : "ok";
   const planTone = planFailures ? "danger" : "ok";
+  const title = operatorMode ? "今日总览" : supervisor ? "范围总览" : "今日投放概况";
+  const copy = operatorMode
+    ? "只看你当前关键词命中的素材、团队排名和今日总消耗。"
+    : supervisor
+      ? "只看授权账户范围内的消耗、支付、订单和 ROI。"
+      : "先看消耗、支付、订单和 ROI。";
+  const pillMarkup = admin
+    ? `
+        <span class="system-pill ${accountTone === "danger" ? "danger" : ""}">${accountFailures ? `账户异常 ${formatNumber(accountFailures)}` : "账户查询正常"}</span>
+        <span class="system-pill ${planTone === "danger" ? "danger" : ""}">${planFailures ? `计划异常 ${formatNumber(planFailures)}` : "计划查询正常"}</span>
+      `
+    : supervisor
+      ? `<span class="system-pill">账户范围 ${formatNumber(state.session?.scope_count || 0)}</span>`
+      : `<span class="system-pill">关键词归属视图</span>`;
   overviewHeroCard.innerHTML = `
     <div class="overview-hero-head">
       <div>
-        <h2>${operatorMode && isOperator() ? "今日总览" : "今日投放概况"}</h2>
-        <p class="overview-hero-copy">${operatorMode && isOperator() ? "先看你的总消耗、总支付、总订单和 ROI。" : "先看消耗、支付、订单和 ROI。"}</p>
+        <h2>${title}</h2>
+        <p class="overview-hero-copy">${copy}</p>
       </div>
       <div class="overview-hero-pills">
-        <span class="system-pill ${accountTone === "danger" ? "danger" : ""}">${accountFailures ? `账户异常 ${formatNumber(accountFailures)}` : "账户查询正常"}</span>
-        <span class="system-pill ${planTone === "danger" ? "danger" : ""}">${planFailures ? `计划异常 ${formatNumber(planFailures)}` : "计划查询正常"}</span>
+        ${pillMarkup}
       </div>
     </div>
     <div class="overview-hero-metrics">
@@ -1354,7 +1370,6 @@ function toggleSort(current, key, fallbackDir = "desc") {
 
 function renderAccountTable(accounts) {
   const query = accountSearch.value.trim().toLowerCase();
-  const rows = accounts.filter((row) => row.advertiser_name.toLowerCase().includes(query));
   const columns = [
     { key: "advertiser_name", label: "账户", sortable: true },
     { key: "stat_cost", label: "消耗", sortable: true },
@@ -1363,10 +1378,20 @@ function renderAccountTable(accounts) {
     { key: "roi", label: "ROI", sortable: true },
     { key: "status_text", label: "状态", sortable: false },
   ];
-  const sorted = sortRows(rows.map((row) => ({
+  const enrichedRows = accounts.map((row) => ({
     ...row,
     status_text: !row.ok ? "查询失败" : String(row.error || "").startsWith("fallback:") ? "计划聚合" : "正常",
-  })), state.accountSort);
+  }));
+  const rows = enrichedRows.filter((row) => {
+    const haystack = [
+      row.advertiser_name,
+      row.advertiser_id,
+      row.status_text,
+      row.error,
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+  const sorted = sortRows(rows, state.accountSort);
 
   accountTable.innerHTML = `
     ${makeHeader(columns, state.accountSort, "account-sort")}
@@ -1546,8 +1571,8 @@ function renderEmployeeTable(rows) {
   const query = employeeSearch.value.trim().toLowerCase();
   const visibleRows = rows.filter((row) => {
     const haystack = operatorMode
-      ? [row.operator_name, row.operator_username, row.top_plan_name].join(" ").toLowerCase()
-      : [row.employee_name, row.top_plan_name].join(" ").toLowerCase();
+      ? [row.operator_name, row.operator_username, row.top_plan_name, row.top_account_name].join(" ").toLowerCase()
+      : [row.employee_name, row.top_plan_name, row.top_account_name].join(" ").toLowerCase();
     return haystack.includes(query);
   });
   const columns = operatorMode
@@ -1611,7 +1636,7 @@ function renderEmployeeTable(rows) {
 function renderProductTable(rows) {
   const query = productSearch.value.trim().toLowerCase();
   const visibleRows = rows.filter((row) => {
-    const haystack = [row.product_name, row.product_id, row.top_plan_name].join(" ").toLowerCase();
+    const haystack = [row.product_name, row.product_id, row.top_plan_name, row.top_account_name].join(" ").toLowerCase();
     return haystack.includes(query);
   });
   const columns = [
@@ -2049,12 +2074,6 @@ function renderPlanTable(plans) {
   }
   const query = planSearch.value.trim().toLowerCase();
   const accountFilter = planAccountFilter.value;
-  const rows = plans.filter((row) => {
-    const haystack = [row.ad_name, row.product_name, row.advertiser_name, row.anchor_name].join(" ").toLowerCase();
-    const matchQuery = haystack.includes(query);
-    const matchAccount = !accountFilter || row.advertiser_name === accountFilter;
-    return matchQuery && matchAccount;
-  });
   const columns = [
     { key: "ad_name", label: "计划", sortable: true },
     { key: "product_name", label: "商品 / 主播", sortable: true },
@@ -2067,17 +2086,32 @@ function renderPlanTable(plans) {
     { key: "pay_amount", label: "支付", sortable: true },
     { key: "status_text", label: "投放状态", sortable: true },
   ];
-  const enrichedRows = rows.map((row) => ({
+  const enrichedRows = plans.map((row) => ({
     ...row,
     marketing_goal_text: row.marketing_goal_text || row.marketing_goal_label || row.marketing_goal || "-",
     status_text: row.status_text || `${row.status || ""}/${row.opt_status || ""}`,
   }));
-  const sorted = sortRows(enrichedRows, state.planSort);
+  const rows = enrichedRows.filter((row) => {
+    const haystack = [
+      row.ad_name,
+      row.product_name,
+      row.advertiser_name,
+      row.anchor_name,
+      row.ad_id,
+      row.product_id,
+      row.marketing_goal_text,
+      row.status_text,
+    ].join(" ").toLowerCase();
+    const matchQuery = haystack.includes(query);
+    const matchAccount = !accountFilter || row.advertiser_name === accountFilter;
+    return matchQuery && matchAccount;
+  });
+  const sortedRows = sortRows(rows, state.planSort);
 
   planTable.innerHTML = `
     ${makeHeader(columns, state.planSort, "plan-sort")}
     <tbody>
-      ${sorted.map((row) => `
+      ${sortedRows.map((row) => `
         <tr data-plan-id="${row.ad_id}" class="${state.selectedPlanId === row.ad_id ? "active-row" : ""}">
           <td>
             <div class="cell-primary">${escapeHtml(row.ad_name)}</div>
@@ -2496,7 +2530,6 @@ function applyRoleViewPolicy() {
   const admin = isAdmin();
   const supervisor = isSupervisor();
   const operator = isOperator();
-  const role = String(state.session?.role || "");
   const accessTab = viewTabs?.querySelector('[data-view="access"]');
   const ownershipTab = viewTabs?.querySelector('[data-view="ownership"]');
   const signalsTab = viewTabs?.querySelector('[data-view="signals"]');
@@ -2505,6 +2538,13 @@ function applyRoleViewPolicy() {
   const breakdownTab = viewTabs?.querySelector('[data-view="breakdown"]');
   const materialsTab = viewTabs?.querySelector('[data-view="materials"]');
   const uploadsTab = viewTabs?.querySelector('[data-view="uploads"]');
+  const tabOrder = admin
+    ? ["overview", "accounts", "plans", "materials", "breakdown", "uploads", "access", "ownership", "signals"]
+    : supervisor
+      ? (canUseUploadModule()
+        ? ["overview", "accounts", "plans", "materials", "breakdown", "uploads"]
+        : ["overview", "accounts", "plans", "materials", "breakdown"])
+      : ["overview", "materials", "breakdown"];
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
     accessTab.textContent = "账号与权限";
@@ -2544,6 +2584,9 @@ function applyRoleViewPolicy() {
   if (overviewBoardGrid) {
     overviewBoardGrid.classList.toggle("hidden", !admin);
   }
+  if (overviewSystemRail) {
+    overviewSystemRail.classList.toggle("hidden", !admin);
+  }
   if (overviewAlertTitle) {
     overviewAlertTitle.textContent = admin ? "老板关注" : supervisor ? "范围关注" : "今日重点";
   }
@@ -2571,6 +2614,12 @@ function applyRoleViewPolicy() {
     : supervisor
       ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials"])
       : new Set(["overview", "breakdown", "materials"]);
+  if (viewTabs) {
+    tabOrder.forEach((view) => {
+      const tab = viewTabs.querySelector(`[data-view="${view}"]`);
+      if (tab) viewTabs.appendChild(tab);
+    });
+  }
   if (!allowedViews.has(state.activeView)) {
     const fallback = allowedViews.has("overview") ? "overview" : Array.from(allowedViews)[0] || "overview";
     setActiveView(fallback);
@@ -3265,10 +3314,10 @@ function renderPerformanceSections() {
   planRangeMeta.textContent = formatDateWindowMeta(planPayload);
   breakdownRangeMeta.textContent = formatDateWindowMeta(breakdownPayload);
   if (breakdownTitle) {
-    breakdownTitle.textContent = breakdownUsesOperators(breakdownPayload) ? "商品与团队排名" : "商品与归属主体排名";
+    breakdownTitle.textContent = isOperator() ? "团队排名" : "商品与运营账号排名";
   }
   if (teamPanelTitle) {
-    teamPanelTitle.textContent = breakdownUsesOperators(breakdownPayload) ? "团队排名" : "归属主体排名";
+    teamPanelTitle.textContent = isOperator() ? "团队排名" : "运营账号排名";
   }
   if (employeeSearch) {
     employeeSearch.placeholder = breakdownSearchPlaceholder(breakdownPayload);

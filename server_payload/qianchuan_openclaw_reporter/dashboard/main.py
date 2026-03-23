@@ -6537,7 +6537,7 @@ async def delete_employee_binding(binding_id: int, _user: dict[str, Any] = Depen
 async def employee_match_preview(
     keyword: str,
     scope: str = "all",
-    user: dict[str, Any] = Depends(require_auth),
+    user: dict[str, Any] = Depends(require_admin),
 ) -> JSONResponse:
     allowed = service.allowed_advertiser_ids_for_user(user)
     try:
@@ -6842,12 +6842,12 @@ async def material_rankings(
 
 
 @app.get("/api/alert-rules")
-async def alert_rules(_auth: None = Depends(require_auth)) -> JSONResponse:
+async def alert_rules(_auth: None = Depends(require_admin)) -> JSONResponse:
     return JSONResponse({"items": service.list_alert_rules()})
 
 
 @app.get("/api/notification-settings")
-async def notification_settings(_auth: None = Depends(require_auth)) -> JSONResponse:
+async def notification_settings(_auth: None = Depends(require_admin)) -> JSONResponse:
     return JSONResponse(service.get_notification_settings())
 
 
