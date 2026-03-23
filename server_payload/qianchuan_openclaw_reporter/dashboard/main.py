@@ -67,6 +67,7 @@ PERFORMANCE_RANGES = {"day", "yesterday", "week", "month", "custom"}
 DETAIL_SYNC_INTERVAL_MINUTES = int(os.environ.get("DETAIL_SYNC_INTERVAL_MINUTES", "10"))
 ENABLE_IN_PROCESS_SCHEDULER = os.environ.get("ENABLE_IN_PROCESS_SCHEDULER", "0") == "1"
 ROLE_ADMIN = "admin"
+ROLE_SUPERVISOR = "supervisor"
 ROLE_OPERATOR = "operator"
 PUBLIC_SORT_FIELDS = {"stat_cost", "pay_amount", "order_count", "roi"}
 EMPLOYEE_KEYWORD_SCOPES = {"all", "account", "plan", "product", "material"}
@@ -262,9 +263,10 @@ class EmployeeBindingPayload(BaseModel):
 class AppUserPayload(BaseModel):
     username: str = Field(min_length=3, max_length=60, pattern=r"^[A-Za-z0-9_.-]+$")
     password: str = Field(default="", max_length=120)
-    role: str = Field(default=ROLE_OPERATOR, pattern="^(admin|operator)$")
+    role: str = Field(default=ROLE_OPERATOR, pattern="^(admin|supervisor|operator)$")
     display_name: str = Field(default="", max_length=80)
     enabled: bool = True
+    upload_materials_enabled: bool = False
 
 
 class UserScopePayload(BaseModel):
@@ -570,6 +572,7 @@ class DashboardService:
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL DEFAULT 'admin',
                     display_name TEXT NOT NULL DEFAULT '',
+                    upload_materials_enabled INTEGER NOT NULL DEFAULT 0,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -674,7 +677,31 @@ class DashboardService:
                 ON shared_wallet_account_relations (main_wallet_id, advertiser_id, snapshot_time);
                 """
             )
+            self._ensure_app_users_schema_locked(conn)
             self._ensure_notification_settings_locked(conn)
+
+    def _column_exists_locked(self, conn: Any, table_name: str, column_name: str) -> bool:
+        table = str(table_name or "").strip()
+        column = str(column_name or "").strip()
+        if not table or not column:
+            return False
+        if getattr(conn, "backend", "") == "postgres":
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+                LIMIT 1
+                """,
+                (table, column),
+            ).fetchone()
+            return bool(row)
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(str(row["name"]) == column for row in rows)
+
+    def _ensure_app_users_schema_locked(self, conn: Any) -> None:
+        if not self._column_exists_locked(conn, "app_users", "upload_materials_enabled"):
+            conn.execute("ALTER TABLE app_users ADD COLUMN upload_materials_enabled INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def db(self) -> Any:
@@ -721,17 +748,17 @@ class DashboardService:
             if row:
                 conn.execute(
                     """
-                    UPDATE app_users
-                    SET password_hash = ?, role = ?, enabled = 1, updated_at = ?
-                    WHERE id = ?
-                    """,
+                UPDATE app_users
+                SET password_hash = ?, role = ?, upload_materials_enabled = 1, enabled = 1, updated_at = ?
+                WHERE id = ?
+                """,
                     (hashed, ROLE_ADMIN, now, row["id"]),
                 )
                 return
             conn.execute(
                 """
-                INSERT INTO app_users (username, password_hash, role, display_name, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 1, ?, ?)
+                INSERT INTO app_users (username, password_hash, role, display_name, upload_materials_enabled, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 1, 1, ?, ?)
                 """,
                 (username, hashed, ROLE_ADMIN, "管理员", now, now),
             )
@@ -740,7 +767,7 @@ class DashboardService:
         with self.db() as conn:
             row = conn.execute(
                 """
-                SELECT id, username, role, display_name, enabled, created_at, updated_at
+                SELECT id, username, role, display_name, upload_materials_enabled, enabled, created_at, updated_at
                 FROM app_users
                 WHERE id = ?
                 LIMIT 1
@@ -755,7 +782,7 @@ class DashboardService:
         with self.db() as conn:
             row = conn.execute(
                 """
-                SELECT id, username, password_hash, role, display_name, enabled
+                SELECT id, username, password_hash, role, display_name, upload_materials_enabled, enabled
                 FROM app_users
                 WHERE username = ?
                 LIMIT 1
@@ -782,11 +809,21 @@ class DashboardService:
             ).fetchall()
         return {int(row["advertiser_id"]) for row in rows}
 
+    def can_upload_materials(self, user: dict[str, Any] | None) -> bool:
+        if not user:
+            return False
+        role = str(user.get("role") or "")
+        if role == ROLE_ADMIN:
+            return True
+        if role == ROLE_SUPERVISOR:
+            return bool(user.get("upload_materials_enabled"))
+        return False
+
     def list_users(self) -> list[dict[str, Any]]:
         with self.db() as conn:
             rows = conn.execute(
                 """
-                SELECT id, username, role, display_name, enabled, created_at, updated_at
+                SELECT id, username, role, display_name, upload_materials_enabled, enabled, created_at, updated_at
                 FROM app_users
                 ORDER BY role ASC, username ASC
                 """
@@ -799,6 +836,8 @@ class DashboardService:
             raise ValueError("创建账号时必须填写密码。")
         now = now_text()
         password_hash = build_password_hash(password)
+        role = str(payload.role).strip()
+        upload_enabled = 1 if role == ROLE_ADMIN else 1 if role == ROLE_SUPERVISOR and payload.upload_materials_enabled else 0
         with self.db() as conn:
             exists = conn.execute(
                 "SELECT 1 FROM app_users WHERE username = ? LIMIT 1",
@@ -808,14 +847,15 @@ class DashboardService:
                 raise ValueError("用户名已存在。")
             conn.execute(
                 """
-                INSERT INTO app_users (username, password_hash, role, display_name, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO app_users (username, password_hash, role, display_name, upload_materials_enabled, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(payload.username).strip(),
                     password_hash,
-                    str(payload.role).strip(),
+                    role,
                     str(payload.display_name).strip(),
+                    upload_enabled,
                     1 if payload.enabled else 0,
                     now,
                     now,
@@ -836,6 +876,8 @@ class DashboardService:
         current = self.get_user_by_id(user_id)
         if not current:
             raise ValueError("用户不存在。")
+        role = str(payload.role).strip()
+        upload_enabled = 1 if role == ROLE_ADMIN else 1 if role == ROLE_SUPERVISOR and payload.upload_materials_enabled else 0
         with self.db() as conn:
             exists = conn.execute(
                 """
@@ -850,14 +892,15 @@ class DashboardService:
                 raise ValueError("用户名已存在。")
         params: list[Any] = [
             str(payload.username).strip(),
-            str(payload.role).strip(),
+            role,
             str(payload.display_name).strip(),
+            upload_enabled,
             1 if payload.enabled else 0,
             now_text(),
         ]
         sql = """
             UPDATE app_users
-            SET username = ?, role = ?, display_name = ?, enabled = ?, updated_at = ?
+            SET username = ?, role = ?, display_name = ?, upload_materials_enabled = ?, enabled = ?, updated_at = ?
         """
         password = str(payload.password or "").strip()
         if password:
@@ -4839,6 +4882,8 @@ async def current_session(user: dict[str, Any] = Depends(require_auth)) -> JSONR
             "username": user["username"],
             "role": user["role"],
             "display_name": user.get("display_name") or "",
+            "upload_materials_enabled": bool(user.get("upload_materials_enabled")),
+            "can_upload_materials": service.can_upload_materials(user),
             "scope_type": "all" if allowed is None else "restricted",
             "scope_count": None if allowed is None else len(allowed),
         }
@@ -5009,6 +5054,8 @@ async def dashboard_data(user: dict[str, Any] = Depends(require_auth)) -> JSONRe
                 "username": user["username"],
                 "role": user["role"],
                 "display_name": user.get("display_name") or "",
+                "upload_materials_enabled": bool(user.get("upload_materials_enabled")),
+                "can_upload_materials": service.can_upload_materials(user),
                 "scope_type": "all" if allowed is None else "restricted",
                 "scope_count": None if allowed is None else len(allowed),
             },

@@ -178,6 +178,7 @@ const userTable = document.getElementById("userTable");
 const userForm = document.getElementById("userForm");
 const userFormReset = document.getElementById("userFormReset");
 const userEditorStatus = document.getElementById("userEditorStatus");
+const uploadPermissionField = document.getElementById("uploadPermissionField");
 const scopeAccountList = document.getElementById("scopeAccountList");
 const saveUserScopesButton = document.getElementById("saveUserScopesButton");
 const scopeEditorMeta = document.getElementById("scopeEditorMeta");
@@ -1870,6 +1871,34 @@ function isAdmin() {
   return state.session?.role === "admin";
 }
 
+function roleLabel(role) {
+  if (role === "admin") return "管理员";
+  if (role === "supervisor") return "主管";
+  if (role === "operator") return "运营";
+  return role || "--";
+}
+
+function syncUserRoleFields() {
+  if (!userForm) return;
+  const role = String(userForm.querySelector('select[name="role"]')?.value || "operator");
+  const uploadInput = userForm.querySelector('input[name="upload_materials_enabled"]');
+  if (uploadPermissionField) {
+    uploadPermissionField.classList.toggle("hidden", role !== "supervisor");
+  }
+  if (!uploadInput) return;
+  if (role === "admin") {
+    uploadInput.checked = true;
+    uploadInput.disabled = true;
+    return;
+  }
+  if (role === "supervisor") {
+    uploadInput.disabled = false;
+    return;
+  }
+  uploadInput.checked = false;
+  uploadInput.disabled = true;
+}
+
 function setFormReadOnly(formEl, readOnly) {
   if (!formEl) return;
   formEl.querySelectorAll("input, select, textarea, button").forEach((field) => {
@@ -2337,16 +2366,21 @@ function resetUserFormState() {
   state.selectedUserId = null;
   state.selectedUserScopeIds = [];
   if (userForm) userForm.reset();
+  const roleInput = userForm?.querySelector('select[name="role"]');
+  if (roleInput) roleInput.value = "operator";
   const enabledInput = userForm?.querySelector('input[name="enabled"]');
   if (enabledInput) enabledInput.checked = true;
+  const uploadInput = userForm?.querySelector('input[name="upload_materials_enabled"]');
+  if (uploadInput) uploadInput.checked = false;
+  syncUserRoleFields();
   setInlineFeedback(
     userEditorStatus,
-    isAdmin() ? "创建运营账号后，再勾选允许访问的账户范围。" : "只有管理员可以配置后台账号。",
+    isAdmin() ? "创建主管或运营账号后，再配置账户范围；主管可额外开启素材上传权限。" : "只有管理员可以配置后台账号。",
     "neutral",
   );
   setInlineFeedback(
     scopeEditorMeta,
-    isAdmin() ? "管理员默认全量可见；运营需要明确勾选账户范围。" : "当前账号无权修改账户范围。",
+    isAdmin() ? "管理员默认全量可见；主管和运营都需要明确勾选账户范围。" : "当前账号无权修改账户范围。",
     "neutral",
   );
   renderScopeChecklist();
@@ -2360,9 +2394,11 @@ function fillUserForm(user) {
   userForm.querySelector('select[name="role"]').value = user?.role || "operator";
   userForm.querySelector('input[name="password"]').value = "";
   userForm.querySelector('input[name="enabled"]').checked = Boolean(user?.enabled);
+  userForm.querySelector('input[name="upload_materials_enabled"]').checked = Boolean(user?.upload_materials_enabled);
+  syncUserRoleFields();
   setInlineFeedback(
     userEditorStatus,
-    user ? `当前编辑：${user.username} · ${user.role === "admin" ? "管理员" : "运营"}` : "创建运营账号后，再勾选允许访问的账户范围。",
+    user ? `当前编辑：${user.username} · ${roleLabel(user.role)}` : "创建主管或运营账号后，再配置账户范围。",
     "neutral",
   );
 }
@@ -2379,6 +2415,7 @@ function renderUserTable() {
         <th>用户名</th>
         <th>显示名</th>
         <th>角色</th>
+        <th>上传</th>
         <th>状态</th>
       </tr>
     </thead>
@@ -2387,10 +2424,11 @@ function renderUserTable() {
         <tr data-user-id="${item.id}" class="${Number(state.selectedUserId) === Number(item.id) ? "active-row" : ""}">
           <td>${escapeHtml(item.username)}</td>
           <td>${escapeHtml(item.display_name || "--")}</td>
-          <td>${escapeHtml(item.role === "admin" ? "管理员" : "运营")}</td>
+          <td>${escapeHtml(roleLabel(item.role))}</td>
+          <td>${item.role === "supervisor" ? `<span class="pill ${item.upload_materials_enabled ? "active" : ""}">${item.upload_materials_enabled ? "允许" : "关闭"}</span>` : "--"}</td>
           <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
         </tr>
-      `).join("") : '<tr><td colspan="4" class="empty-cell">还没有后台账号。</td></tr>'}
+      `).join("") : '<tr><td colspan="5" class="empty-cell">还没有后台账号。</td></tr>'}
     </tbody>
   `;
   userTable.querySelectorAll("tbody tr[data-user-id]").forEach((row) => {
@@ -2935,6 +2973,7 @@ function bindInputs() {
       role: String(form.get("role") || "operator"),
       password: String(form.get("password") || ""),
       enabled: form.get("enabled") === "on",
+      upload_materials_enabled: form.get("upload_materials_enabled") === "on",
     };
     const url = state.selectedUserId ? `/api/users/${state.selectedUserId}` : "/api/users";
     const method = state.selectedUserId ? "PUT" : "POST";
@@ -2954,7 +2993,7 @@ function bindInputs() {
       await selectUserManager(Number(item.id));
       setInlineFeedback(userEditorStatus, `已保存账号：${item.username || payload.username}。`, "success");
       if (item.role !== "admin") {
-        setInlineFeedback(scopeEditorMeta, "下一步勾选该账号允许访问的账户范围。", "success");
+        setInlineFeedback(scopeEditorMeta, `下一步勾选该${item.role === "supervisor" ? "主管" : "运营"}账号允许访问的账户范围。`, "success");
         scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
       }
     } else {
@@ -2965,6 +3004,10 @@ function bindInputs() {
   userFormReset?.addEventListener("click", () => {
     resetUserFormState();
     renderUserTable();
+  });
+
+  userForm?.querySelector('select[name="role"]')?.addEventListener("change", () => {
+    syncUserRoleFields();
   });
 
   saveUserScopesButton?.addEventListener("click", async () => {

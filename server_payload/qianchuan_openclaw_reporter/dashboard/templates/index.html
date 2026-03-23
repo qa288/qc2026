@@ -445,12 +445,12 @@
                 <div>
                   <h3>账号配置</h3>
                 </div>
-                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">管理员可配置运营账号和账户范围。</div>
+                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">管理员可配置主管、运营账号以及素材上传权限。</div>
               </div>
               <form id="userForm" class="ownership-form-grid">
                 <label>
                   <span>用户名</span>
-                  <input name="username" type="text" placeholder="operator_a" required />
+                  <input name="username" type="text" placeholder="operator_a / supervisor_a" required />
                 </label>
                 <label>
                   <span>显示名</span>
@@ -459,6 +459,7 @@
                 <label>
                   <span>角色</span>
                   <select name="role">
+                    <option value="supervisor">主管</option>
                     <option value="operator">运营</option>
                     <option value="admin">管理员</option>
                   </select>
@@ -470,6 +471,10 @@
                 <label class="toggle-chip">
                   <input name="enabled" type="checkbox" checked />
                   <span>启用</span>
+                </label>
+                <label class="toggle-chip" id="uploadPermissionField">
+                  <input name="upload_materials_enabled" type="checkbox" />
+                  <span>允许上传素材</span>
                 </label>
                 <div class="ownership-form-actions">
                   <button type="submit" class="button primary">保存账号</button>
@@ -483,7 +488,7 @@
                     <h3>账户范围</h3>
                   </div>
                 </div>
-                <div id="scopeEditorMeta" class="section-range-meta compact-inline inline-feedback">管理员默认拥有全量权限；运营默认无数据，需勾选账户范围。</div>
+                <div id="scopeEditorMeta" class="section-range-meta compact-inline inline-feedback">管理员默认拥有全量权限；主管和运营默认无数据，需勾选账户范围。</div>
                 <div id="scopeAccountList" class="scope-checklist"></div>
                 <div class="ownership-form-actions ownership-actions-end">
                   <button type="button" id="saveUserScopesButton" class="button primary">保存账户范围</button>
