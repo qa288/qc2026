@@ -2155,12 +2155,12 @@ function renderPlanTable(plans) {
     { key: "ad_name", label: "计划", sortable: true },
     { key: "stat_cost", label: "消耗", sortable: true },
     { key: "roi", label: "ROI", sortable: true },
+    { key: "roi_goal", label: "目标ROI", sortable: true },
     { key: "pay_amount", label: "支付", sortable: true },
     { key: "order_count", label: "订单", sortable: true },
     { key: "product_name", label: "商品 / 主播", sortable: true },
     { key: "advertiser_name", label: "账户", sortable: true },
     { key: "status_text", label: "投放状态", sortable: true },
-    { key: "roi_goal", label: "目标ROI", sortable: true },
     { key: "marketing_goal_text", label: "营销目标", sortable: true },
   ];
   const enrichedRows = plans.map((row) => ({
@@ -2199,6 +2199,7 @@ function renderPlanTable(plans) {
           </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
+          <td class="mono">${formatRate(row.roi_goal)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td>
@@ -2210,7 +2211,6 @@ function renderPlanTable(plans) {
           </td>
           <td>${escapeHtml(row.advertiser_name)}</td>
           <td>${renderPlanStatusBadge(row)}</td>
-          <td class="mono">${formatRate(row.roi_goal)}</td>
           <td>${renderMarketingGoalBadge(row)}</td>
         </tr>
       `).join("")}
