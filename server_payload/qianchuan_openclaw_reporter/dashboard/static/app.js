@@ -955,6 +955,24 @@ function normalizeUploadJobNote(note) {
   return text;
 }
 
+function uploadJobStatusLabel(status) {
+  const value = String(status || "").trim().toLowerCase();
+  if (value === "ok") return "完成";
+  if (value === "running") return "进行中";
+  if (value === "partial") return "部分完成";
+  if (value === "failed") return "失败";
+  if (value === "prepared") return "待执行";
+  return status || "--";
+}
+
+function uploadJobStatusClass(status) {
+  const value = String(status || "").trim().toLowerCase();
+  if (value === "ok") return "live";
+  if (value === "running" || value === "prepared") return "paused";
+  if (value === "partial" || value === "failed") return "system";
+  return "neutral";
+}
+
 function renderUploadJobNote(item) {
   const base = normalizeUploadJobNote(item.note);
   const failedItems = Array.isArray(item.failed_items) ? item.failed_items : [];
@@ -1048,21 +1066,18 @@ function renderUploadJobTable() {
   if (!uploadJobTable) return;
   const items = state.uploadJobs || [];
   if (!items.length) {
-    uploadJobTable.innerHTML = '<tbody><tr><td colspan="11" class="empty-cell">还没有上传任务。</td></tr></tbody>';
+    uploadJobTable.innerHTML = '<tbody><tr><td colspan="8" class="empty-cell">还没有上传任务。</td></tr></tbody>';
     return;
   }
   uploadJobTable.innerHTML = `
     <thead>
       <tr>
-        <th>ID</th>
+        <th>任务</th>
         <th>状态</th>
         <th>范围</th>
-        <th class="mono">文件数</th>
-        <th class="mono">已传文件</th>
-        <th class="mono">失败文件</th>
-        <th class="mono">计划数</th>
-        <th class="mono">已处理计划</th>
-        <th>创建人</th>
+        <th class="mono">文件进度</th>
+        <th class="mono">计划进度</th>
+        <th>失败</th>
         <th>时间</th>
         <th>备注</th>
       </tr>
@@ -1070,15 +1085,27 @@ function renderUploadJobTable() {
     <tbody>
       ${items.map((item) => `
         <tr>
-          <td class="mono">#${escapeHtml(item.id)}</td>
-          <td>${escapeHtml(item.status || "--")}</td>
-          <td>${escapeHtml(uploadScopeLabel(item.scope || "plan"))}</td>
-          <td class="mono">${formatNumber(item.total_files)}</td>
+          <td>
+            <div class="cell-primary mono">#${escapeHtml(item.id)}</div>
+            <div class="cell-subline">
+              <span class="cell-subitem">${escapeHtml(item.created_by_label || "--")}</span>
+            </div>
+          </td>
+          <td><span class="status-pill ${uploadJobStatusClass(item.status)}">${escapeHtml(uploadJobStatusLabel(item.status))}</span></td>
+          <td>
+            <div class="cell-primary">${escapeHtml(uploadScopeLabel(item.scope || "plan"))}</div>
+            <div class="cell-subline">
+              <span class="cell-subitem">${formatNumber(item.total_targets || 0)} 个计划</span>
+            </div>
+          </td>
           <td class="mono">${formatNumber(item.success_files || item.uploaded_files || 0)} / ${formatNumber(item.total_files || 0)}</td>
-          <td class="mono">${formatNumber(item.failed_files || 0)}</td>
-          <td class="mono">${formatNumber(item.total_targets)}</td>
           <td class="mono">${formatNumber(item.processed_targets || 0)} / ${formatNumber(item.total_targets || 0)}</td>
-          <td>${escapeHtml(item.created_by_label || "--")}</td>
+          <td>
+            <div class="cell-primary mono">${formatNumber(item.failed_files || 0)}</div>
+            <div class="cell-subline">
+              <span class="cell-subitem">${item.failed_files ? "查看备注" : "--"}</span>
+            </div>
+          </td>
           <td>${escapeHtml(item.created_at || "--")}</td>
           <td>${renderUploadJobNote(item)}</td>
         </tr>
@@ -1336,7 +1363,7 @@ function renderSystemCards(latest, extendedSync, tokenInfo) {
       <span class="system-pill ${detailTone === "warn" ? "warn" : detailTone === "danger" ? "danger" : ""}">${escapeHtml(detailStatus === "ok" ? "完整" : detailStatus === "partial" ? "部分完成" : "未同步")}</span>
     </div>
     <div class="system-card-value">${escapeHtml(extendedSync?.snapshot_time || "等待明细同步")}</div>
-    <div class="system-card-copy">计划、商品、素材和首发标记按 10 分钟级同步。</div>
+    <div class="system-card-copy">明细按 10 分钟级同步。</div>
     <div class="system-stat-grid">
       <div class="system-stat"><span>计划数</span><strong class="mono">${formatNumber(extendedSync?.plan_count || 0)}</strong></div>
       <div class="system-stat"><span>商品行</span><strong class="mono">${formatNumber(extendedSync?.product_row_count || 0)}</strong></div>
@@ -2240,10 +2267,7 @@ function renderRuleTable(rules) {
     <thead>
       <tr>
         <th>对象</th>
-        <th>指标</th>
-        <th>对象范围</th>
-        <th>规则</th>
-        <th>最低消耗</th>
+        <th>条件</th>
         <th>冷却</th>
         <th>状态</th>
         <th>备注</th>
@@ -2253,21 +2277,29 @@ function renderRuleTable(rules) {
     <tbody>
       ${rules.length ? rules.map((rule) => `
         <tr>
-          <td>${escapeHtml(entityLabel(rule.entity_type))}</td>
-          <td>${escapeHtml(metricLabel(rule.metric))}</td>
-          <td>${escapeHtml(targetDisplayLabel(rule.entity_type, rule.target_id))}</td>
-          <td class="mono">${escapeHtml(operatorLabel(rule.operator))} ${escapeHtml(rule.threshold)}</td>
-          <td class="mono">${["account", "plan"].includes(rule.entity_type) ? formatMoney(rule.min_spend) : "--"}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(entityLabel(rule.entity_type))}</div>
+            <div class="cell-subline">
+              <span class="cell-subitem">${escapeHtml(targetDisplayLabel(rule.entity_type, rule.target_id))}</span>
+            </div>
+          </td>
+          <td>
+            <div class="cell-primary">${escapeHtml(metricLabel(rule.metric))}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">${escapeHtml(operatorLabel(rule.operator))} ${escapeHtml(rule.threshold)}</span>
+              ${["account", "plan"].includes(rule.entity_type) ? `<span class="cell-subitem">最低消耗 ${formatMoney(rule.min_spend)}</span>` : ""}
+            </div>
+          </td>
           <td class="mono">${formatNumber(rule.cooldown_minutes)} 分钟</td>
           <td><span class="pill">${rule.enabled ? "启用" : "关闭"}</span></td>
           <td>${escapeHtml(rule.note || "--")}</td>
           <td>
-            <button class="button ghost edit-rule" data-id="${rule.id}">编辑</button>
-            <button class="button ghost toggle-rule" data-id="${rule.id}">${rule.enabled ? "停用" : "启用"}</button>
-            <button class="button ghost delete-rule" data-id="${rule.id}">删除</button>
+            <button class="button ghost compact edit-rule" data-id="${rule.id}">编辑</button>
+            <button class="button ghost compact toggle-rule" data-id="${rule.id}">${rule.enabled ? "停用" : "启用"}</button>
+            <button class="button ghost compact delete-rule" data-id="${rule.id}">删除</button>
           </td>
         </tr>
-      `).join("") : '<tr><td colspan="9" class="empty-cell">还没有预警规则，先从账户余额、共享钱包、消耗或爆单规则开始。</td></tr>'}
+      `).join("") : '<tr><td colspan="6" class="empty-cell">还没有预警规则，先从账户余额、共享钱包、消耗或爆单规则开始。</td></tr>'}
     </tbody>
   `;
 
