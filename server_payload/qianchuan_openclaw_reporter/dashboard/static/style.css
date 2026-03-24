@@ -932,6 +932,10 @@ body {
   grid-template-columns: minmax(0, 1fr) minmax(148px, 180px) auto;
 }
 
+.toolbar-inline-material {
+  grid-template-columns: minmax(0, 1fr) minmax(336px, 430px);
+}
+
 .toolbar-secondary {
   width: auto;
   justify-content: flex-end;
@@ -1104,6 +1108,10 @@ body {
 
 .toolbar-search-actions > .button {
   flex: 0 0 auto;
+}
+
+.toolbar-inline-material .toolbar-search-actions {
+  justify-self: stretch;
 }
 
 .toolbar-inline-triple > .select-input,

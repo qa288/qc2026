@@ -1196,7 +1196,7 @@ function renderAlertSummary(events) {
         <span class="summary-chip">${latest.status === "pending" ? "优先处理" : "最近已发送"}</span>
         <span class="summary-chip subtle">${escapeHtml(entityLabel(latest.entity_type))}</span>
       </div>
-      <div class="summary-label">当前重点</div>
+      <div class="summary-label">重点</div>
       <div class="summary-value compact">${escapeHtml(latest.entity_name)}</div>
       <div class="summary-sub">${escapeHtml(metricLabel(latest.metric))} ${escapeHtml(operatorLabel(latest.operator))} ${escapeHtml(latest.threshold)} · ${escapeHtml(latest.created_at)}</div>
       <div class="summary-metric-row">
@@ -1209,7 +1209,7 @@ function renderAlertSummary(events) {
     <div class="alert-summary-card stat">
       <div class="summary-label">待处理</div>
       <div class="summary-value mono">${formatNumber(pendingCount)}</div>
-      <div class="summary-sub">${pendingCount ? "建议尽快复核" : "当前无待处理"}</div>
+      <div class="summary-sub">${pendingCount ? "待复核" : "暂无待处理"}</div>
     </div>
     <div class="alert-summary-card stat">
       <div class="summary-label">最近触发</div>
@@ -1251,7 +1251,7 @@ function renderOverviewHero(latest) {
   const planFailures = Number(summary.plan_failures || 0);
   const accountTone = accountFailures ? "danger" : "ok";
   const planTone = planFailures ? "danger" : "ok";
-  const title = operatorMode ? "今日总览" : supervisor ? "范围总览" : "今日投放概况";
+  const title = operatorMode ? "今日总览" : supervisor ? "范围总览" : "今日概况";
   const copy = operatorMode
     ? "只看关键词命中的素材和团队表现。"
     : supervisor
@@ -1339,7 +1339,7 @@ function renderSystemCards(latest, extendedSync, tokenInfo) {
     heroStatusText.textContent = latest?.snapshot_time || "等待首次同步";
   }
   if (heroStatusHint) {
-    heroStatusHint.textContent = `1 分钟刷新 · token ${tokenAgeText}`;
+    heroStatusHint.textContent = `1 分钟 · token ${tokenAgeText}`;
   }
 
   systemStatusCard.innerHTML = `
@@ -1776,7 +1776,7 @@ function clearMaterialDetail() {
   if (!materialDetail) return;
   materialDetailStage?.classList.add("hidden");
   materialDetail.className = "detail-panel empty";
-  materialDetail.textContent = "点击素材行，查看覆盖范围、代表计划和预览。";
+  materialDetail.textContent = "选中素材后查看补充信息。";
 }
 
 function renderMaterialDetail(materialKey) {
@@ -1973,7 +1973,7 @@ function fillPlanAccountFilter(accountNames) {
 function clearPlanAssetSummary() {
   if (!planAssetSummary) return;
   planAssetSummary.className = "detail-panel empty";
-  planAssetSummary.textContent = "点击计划行，查看该计划最新同步到本地的商品、素材和视频摘要。";
+  planAssetSummary.textContent = "选中计划后查看商品和素材摘要。";
 }
 
 function planAssetCacheKey(adId, snapshotTime) {
@@ -2133,7 +2133,7 @@ function clearPlanDetail() {
   if (!planDetail || !planAssetSummary) return;
   planDetailStage?.classList.add("hidden");
   planDetail.className = "detail-panel empty";
-  planDetail.textContent = "点击计划行，查看补充配置和异常判断。";
+  planDetail.textContent = "选中计划后查看补充信息。";
   clearPlanAssetSummary();
 }
 
@@ -2419,7 +2419,12 @@ function selectedMaterialRow(materialKey) {
 }
 
 function canPreviewMaterial(row) {
-  return Boolean(row);
+  if (!row) return false;
+  return Boolean(
+    String(row.video_url || "").trim()
+    || String(row.cover_url || "").trim()
+    || materialAwemeLink(row)
+  );
 }
 
 function materialAwemeLink(row) {
@@ -2443,7 +2448,7 @@ function openMaterialPreviewFromRow(row) {
     materialPreviewTitle.textContent = row.material_name || "素材预览";
   }
   if (materialPreviewMeta) {
-    materialPreviewMeta.textContent = [row.top_account_name || "", row.top_plan_name || ""].filter(Boolean).join(" / ") || "当前素材预览";
+    materialPreviewMeta.textContent = [row.top_account_name || "", row.top_plan_name || ""].filter(Boolean).join(" / ") || "素材预览";
   }
   const previewBlock = directVideoUrl
     ? `<video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>`
@@ -2469,6 +2474,26 @@ function openMaterialPreviewFromRow(row) {
     </div>
     ${extraActions ? `<div class="preview-actions">${extraActions}</div>` : ""}
   `;
+  const previewMediaShell = materialPreviewBody.querySelector(".preview-media-shell");
+  const previewVideo = materialPreviewBody.querySelector(".preview-video");
+  const previewCover = materialPreviewBody.querySelector(".preview-cover");
+  previewVideo?.addEventListener("error", () => {
+    if (!previewMediaShell) return;
+    previewMediaShell.innerHTML = coverUrl
+      ? `
+        <img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row.material_name || "素材封面")}" />
+        <div class="preview-empty">当前视频地址无法直接播放，已降级为封面预览。</div>
+      `
+      : '<div class="preview-empty">当前视频地址无法直接播放，请尝试下方入口。</div>';
+    const fallbackCover = previewMediaShell.querySelector(".preview-cover");
+    fallbackCover?.addEventListener("error", () => {
+      previewMediaShell.innerHTML = '<div class="preview-empty">当前素材没有可站外访问的预览地址，请尝试打开抖音作品。</div>';
+    }, { once: true });
+  }, { once: true });
+  previewCover?.addEventListener("error", () => {
+    if (!previewMediaShell) return;
+    previewMediaShell.innerHTML = '<div class="preview-empty">当前素材没有可站外访问的预览地址，请尝试打开抖音作品。</div>';
+  }, { once: true });
   materialPreviewModal.classList.remove("hidden");
   materialPreviewModal.setAttribute("aria-hidden", "false");
 }
@@ -3968,15 +3993,15 @@ function bindInputs() {
         await fetchUserKeywords(item.id, true);
       }
       const keywordSuffix = addedKeywordCount ? `，并新增 ${addedKeywordCount} 个关键词` : "";
-      setInlineFeedback(userEditorStatus, `已保存账号：${item.username || payload.username}${keywordSuffix}。`, "success");
+      setInlineFeedback(userEditorStatus, `已保存账号 ${item.username || payload.username}${keywordSuffix}。`, "success");
       if (item.role === "supervisor") {
-        setInlineFeedback(scopeEditorMeta, "下一步勾选该主管可见的账户。", "success");
+        setInlineFeedback(scopeEditorMeta, "继续勾选该主管可见账户。", "success");
         scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
       } else if (item.role === "operator") {
         if (addedKeywordCount) {
-          setInlineFeedback(operatorKeywordStatus, "关键词已保存，可继续追加或查看命中素材。", "success");
+          setInlineFeedback(operatorKeywordStatus, "关键词已保存，可继续追加。", "success");
         } else {
-          setInlineFeedback(operatorKeywordStatus, "还可以继续追加关键词。", "success");
+          setInlineFeedback(operatorKeywordStatus, "可继续追加关键词。", "success");
           focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
         }
       }
