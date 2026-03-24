@@ -1759,7 +1759,7 @@ function renderMaterialDetail(materialKey) {
       <span>补充信息</span>
     </div>
     <div class="detail-inline-actions">
-      <button type="button" class="button ghost compact ${canPreviewMaterial(row) ? "" : "disabled"}" data-action="open-material-preview" data-material-key="${escapeHtml(row.material_key)}" ${canPreviewMaterial(row) ? "" : "disabled"}>预览素材</button>
+      <button type="button" class="button ghost compact" data-action="open-material-preview" data-material-key="${escapeHtml(row.material_key)}">预览素材</button>
     </div>
     <div class="detail-stats">
       <div class="detail-stat"><span class="label">覆盖账户数</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
@@ -2377,7 +2377,7 @@ function selectedMaterialRow(materialKey) {
 }
 
 function canPreviewMaterial(row) {
-  return Boolean(row?.video_url || row?.cover_url || row?.aweme_item_id);
+  return Boolean(row);
 }
 
 function materialAwemeLink(row) {
@@ -2541,7 +2541,6 @@ function renderUserMatchedMaterialTable() {
               class="button ghost compact"
               data-action="preview-user-material"
               data-material-key="${escapeHtml(item.material_key || "")}"
-              ${canPreviewMaterial(item) ? "" : "disabled"}
             >预览</button>
           </td>
           <td class="mono">${formatMoney(item.stat_cost)}</td>
@@ -2585,7 +2584,7 @@ function syncAccessRolePanels() {
   if (!isAdmin()) return;
   if (!user) {
     setInlineFeedback(scopeEditorMeta, "先选账号，再配范围。", "neutral");
-    setInlineFeedback(operatorKeywordStatus, "先选运营，再加关键词。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "新建运营时可直接填关键词，也可后续追加。", "neutral");
     setInlineFeedback(operatorMaterialStatus, "先选运营，再看命中素材。", "neutral");
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
@@ -2595,8 +2594,8 @@ function syncAccessRolePanels() {
     setInlineFeedback(scopeEditorMeta, "主管只看勾选账户；需要时再开上传。", "neutral");
   } else if (isOperator) {
     setInlineFeedback(scopeEditorMeta, "运营不配置账户范围，只看关键词命中结果。", "neutral");
-    setInlineFeedback(operatorKeywordStatus, "加关键词后，该账号只看命中结果。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "只按素材名称命中，默认收起。", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "新建运营时可直接填关键词，也可后续追加。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "只按素材名称关键词命中，默认收起。", "neutral");
   } else {
     setInlineFeedback(scopeEditorMeta, "管理员默认全量可见。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "当前角色不使用运营关键词。", "neutral");
@@ -3162,7 +3161,7 @@ function resetUserFormState() {
   syncUserRoleFields();
   setInlineFeedback(
     userEditorStatus,
-    isAdmin() ? "新建账号后，再补范围或关键词。" : "只有管理员可以配置账号。",
+    isAdmin() ? "新建账号时可同时填写关键词。" : "只有管理员可以配置账号。",
     "neutral",
   );
   setInlineFeedback(
@@ -3170,7 +3169,7 @@ function resetUserFormState() {
     isAdmin() ? "管理员默认全量；主管需要勾选范围。" : "当前账号无权修改范围。",
     "neutral",
   );
-  setInlineFeedback(operatorKeywordStatus, "先选运营，再加关键词。", "neutral");
+  setInlineFeedback(operatorKeywordStatus, "新建运营时可直接填关键词，也可后续追加。", "neutral");
   setInlineFeedback(operatorMaterialStatus, "先选运营，再看命中素材。", "neutral");
   setOperatorMaterialVisibility(false);
   renderScopeChecklist();
@@ -3193,7 +3192,7 @@ function fillUserForm(user) {
   syncUserRoleFields();
   setInlineFeedback(
     userEditorStatus,
-    user ? `当前编辑：${user.username} · ${roleLabel(user.role)}` : "新建账号后，再补范围或关键词。",
+    user ? `当前编辑：${user.username} · ${roleLabel(user.role)}` : "新建账号时可同时填写关键词。",
     "neutral",
   );
   syncAccessRolePanels();
@@ -3933,7 +3932,7 @@ function bindInputs() {
         if (addedKeywordCount) {
           setInlineFeedback(operatorKeywordStatus, "关键词已保存，可继续追加或查看命中素材。", "success");
         } else {
-          setInlineFeedback(operatorKeywordStatus, "下一步给该运营添加关键词。", "success");
+          setInlineFeedback(operatorKeywordStatus, "还可以继续追加关键词。", "success");
           focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
         }
       }

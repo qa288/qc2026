@@ -178,7 +178,7 @@
               <h2>计划效果明细</h2>
             </div>
             <div class="head-control-stack">
-              <div class="toolbar toolbar-inline toolbar-inline-primary">
+              <div class="toolbar toolbar-inline toolbar-inline-primary toolbar-inline-triple">
                 <div class="range-filter-group">
                   <div class="range-switch" id="planRangeSwitch">
                     <button type="button" class="range-button" data-range="day">日</button>
@@ -194,8 +194,6 @@
                   </div>
                 </div>
                 <input id="planSearch" class="search-input" type="search" placeholder="搜索计划" />
-              </div>
-              <div class="toolbar toolbar-secondary">
                 <select id="planAccountFilter" class="select-input">
                   <option value="">全部账户</option>
                 </select>
@@ -216,7 +214,7 @@
               <h2 id="materialsPanelTitle">素材效果排行</h2>
             </div>
             <div class="head-control-stack">
-              <div class="toolbar toolbar-inline toolbar-inline-primary">
+              <div class="toolbar toolbar-inline toolbar-inline-primary toolbar-inline-triple">
                 <div class="range-filter-group">
                   <div class="range-switch" id="materialRangeSwitch">
                     <button type="button" class="range-button" data-range="day">日</button>
@@ -232,9 +230,7 @@
                   </div>
                 </div>
                 <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材" />
-              </div>
-              <div class="toolbar toolbar-secondary">
-                <button id="syncExtendedButton" class="button ghost" type="button">刷新明细</button>
+                <button id="syncExtendedButton" class="button ghost compact" type="button">刷新明细</button>
               </div>
             </div>
           </div>
@@ -506,7 +502,7 @@
                 <div>
                   <h3>账号配置</h3>
                 </div>
-                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">新建或编辑账号。</div>
+                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">新建账号时可同时填写关键词。</div>
               </div>
               <form id="userForm" class="ownership-form-grid">
                 <label>
@@ -566,7 +562,7 @@
                     <h3>运营关键词</h3>
                   </div>
                 </div>
-                <div id="operatorKeywordStatus" class="section-range-meta compact-inline inline-feedback">先选运营，再加关键词。</div>
+                <div id="operatorKeywordStatus" class="section-range-meta compact-inline inline-feedback">新建运营时可直接填关键词，也可后续追加。</div>
                 <form id="operatorKeywordForm" class="ownership-inline-form">
                   <input name="keyword" type="text" placeholder="例如：小宇 / 小宇剪辑 / XY" />
                   <label class="toggle-chip">
@@ -589,7 +585,7 @@
                     <button type="button" id="toggleOperatorMaterialsButton" class="button ghost compact">显示列表</button>
                   </div>
                 </div>
-                <div id="operatorMaterialStatus" class="section-range-meta compact-inline inline-feedback">只按素材名称命中，默认收起。</div>
+                <div id="operatorMaterialStatus" class="section-range-meta compact-inline inline-feedback">只按素材名称关键词命中，默认收起。</div>
                 <div id="operatorMaterialContent" class="hidden">
                   <div class="ownership-inline-form simple-inline-form">
                     <input id="operatorMaterialSearch" type="search" placeholder="搜索素材名称" />

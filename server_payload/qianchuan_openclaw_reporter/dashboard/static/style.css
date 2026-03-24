@@ -543,14 +543,18 @@ body {
 }
 
 .panel-head-compact > :first-child {
-  flex: 0 0 100%;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .head-control-stack {
-  display: grid;
-  gap: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 10px;
   min-width: 0;
-  flex: 1 1 100%;
+  flex: 1 1 720px;
 }
 
 .panel-kicker {
@@ -917,14 +921,21 @@ body {
 
 .toolbar-inline-primary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(176px, 228px);
+  grid-template-columns: minmax(0, 1fr) minmax(148px, 180px);
   gap: 8px 10px;
   align-items: center;
+  flex: 1 1 720px;
+  min-width: 0;
+}
+
+.toolbar-inline-triple {
+  grid-template-columns: minmax(0, 1fr) minmax(148px, 180px) auto;
 }
 
 .toolbar-secondary {
-  width: 100%;
-  justify-content: flex-start;
+  width: auto;
+  justify-content: flex-end;
+  flex: 0 0 auto;
 }
 
 .toolbar.wide {
@@ -940,7 +951,7 @@ body {
 .range-filter-group {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
   min-width: 0;
   flex: 1 1 auto;
@@ -1007,7 +1018,7 @@ body {
 
 .range-switch {
   display: inline-flex;
-  padding: 3px;
+  padding: 2px;
   border-radius: 999px;
   background: rgba(20, 59, 47, 0.08);
   border: 1px solid rgba(77, 57, 36, 0.1);
@@ -1016,9 +1027,9 @@ body {
 
 .range-button {
   border: 0;
-  min-width: 40px;
-  height: 32px;
-  padding: 0 10px;
+  min-width: 36px;
+  height: 30px;
+  padding: 0 8px;
   border-radius: 999px;
   background: transparent;
   color: var(--muted);
@@ -1071,8 +1082,14 @@ body {
 .toolbar-inline-primary > .search-input {
   grid-column: 2;
   width: 100%;
-  min-width: 0;
+  min-width: 148px;
   max-width: none;
+  justify-self: end;
+}
+
+.toolbar-inline-triple > .select-input,
+.toolbar-inline-triple > .button {
+  grid-column: 3;
   justify-self: end;
 }
 
@@ -1085,7 +1102,7 @@ body {
 .date-range-inline {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
   flex-wrap: wrap;
 }
@@ -1107,7 +1124,7 @@ body {
 }
 
 .date-input {
-  width: 110px;
+  width: 102px;
   min-width: 0;
 }
 
