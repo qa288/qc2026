@@ -1321,7 +1321,7 @@ function renderSystemCards(latest, extendedSync, tokenInfo) {
       <span class="system-pill ${failureTone === "danger" ? "danger" : ""}">${hardAccountFailures || planFailures ? "有异常" : "运行正常"}</span>
     </div>
     <div class="system-card-value">${escapeHtml(latest?.snapshot_time || "等待首次同步")}</div>
-    <div class="system-card-copy">总览按分钟级主快照更新，账户汇总异常会自动回退。</div>
+    <div class="system-card-copy">按分钟级主快照更新，异常时自动回退。</div>
     <div class="system-stat-grid">
       <div class="system-stat"><span>账户异常</span><strong class="mono">${formatNumber(hardAccountFailures)}</strong></div>
       <div class="system-stat"><span>计划异常</span><strong class="mono">${formatNumber(planFailures)}</strong></div>

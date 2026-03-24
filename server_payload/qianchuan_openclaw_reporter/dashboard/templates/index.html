@@ -19,7 +19,7 @@
             </div>
             <div class="top-title-row top-title-inline">
               <h1>{{ app_name }}</h1>
-              <p class="hero-copy" id="heroCopy">账户、计划、素材、运营与预警。</p>
+              <p class="hero-copy" id="heroCopy">账户、计划、素材、运营。</p>
             </div>
           </div>
 
@@ -250,7 +250,7 @@
               <h2>素材上传</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>先选计划，再上传视频。</span>
+              <span>选计划后上传视频。</span>
             </div>
           </div>
 
@@ -302,7 +302,7 @@
                 </label>
                 <div id="uploadFileSummary" class="section-range-meta compact-inline">未选择文件</div>
                 <div class="ownership-form-actions">
-                  <button id="uploadJobSubmit" type="submit" class="button primary compact">创建上传任务</button>
+                  <button id="uploadJobSubmit" type="submit" class="button primary compact">创建任务</button>
                 </div>
               </form>
             </section>
@@ -329,7 +329,7 @@
               <h2>账号与权限</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>维护账号、范围、关键词、命中素材和上传权限。</span>
+              <span>维护账号、范围、关键词和上传权限。</span>
             </div>
           </div>
           <div class="access-stack">
@@ -386,8 +386,8 @@
                   <span>允许上传素材</span>
                 </label>
                 <div class="ownership-form-actions">
-                  <button type="submit" class="button primary">保存账号</button>
-                  <button type="button" id="userFormReset" class="button ghost">新建</button>
+                  <button type="submit" class="button primary compact">保存账号</button>
+                  <button type="button" id="userFormReset" class="button ghost compact">新建</button>
                 </div>
               </form>
 
@@ -455,7 +455,7 @@
               <h2>预警</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>先定规则，再决定是否外发。</span>
+              <span>先定规则，再开通知。</span>
             </div>
           </div>
           <div id="signalOverview" class="signal-summary-strip"></div>
@@ -477,7 +477,7 @@
                   <button type="button" class="signal-template-button" data-entity="plan" data-metric="stat_cost" data-operator="gte" data-threshold="1000" data-min-spend="0" data-note="计划消耗过快，及时复核">计划消耗</button>
                   <button type="button" class="signal-template-button" data-entity="burst_plan" data-metric="burst_order_count" data-operator="gte" data-threshold="10" data-note="计划短时爆单，及时放量或复核">爆单计划</button>
               </div>
-              <div id="ruleFormHint" class="signal-form-hint">先选对象和指标，再填阈值。</div>
+              <div id="ruleFormHint" class="signal-form-hint">先选对象，再填阈值。</div>
               <form id="ruleForm" class="signal-compact-form">
                 <input name="rule_id" type="hidden" />
                 <div class="signal-form-row signal-form-row-main">
@@ -503,7 +503,7 @@
                     <datalist id="ruleTargetOptions"></datalist>
                   </label>
                 </div>
-                <div id="ruleTargetMeta" class="signal-form-hint compact">先搜关键词，再从候选项里选对象；留空表示全部。</div>
+                <div id="ruleTargetMeta" class="signal-form-hint compact">先搜索，再选对象。</div>
                 <div class="signal-form-row signal-form-row-aux">
                   <label>
                     <span>比较</span>
@@ -545,7 +545,7 @@
                 </div>
                 <button type="submit" form="notificationForm" class="button primary compact">保存通知</button>
               </div>
-              <div class="signal-form-hint compact">先把规则配好，再决定是否发到飞书、钉钉或微信。</div>
+              <div class="signal-form-hint compact">规则先在站内生效，再决定是否外发。</div>
               <div id="notificationStatus" class="notify-inline-status"></div>
               <form id="notificationForm" class="signal-compact-form">
                 <div class="signal-form-row signal-form-row-notify">
