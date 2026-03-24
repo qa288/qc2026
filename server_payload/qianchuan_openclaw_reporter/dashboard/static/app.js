@@ -79,7 +79,7 @@ const state = {
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
   employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
   productSort: loadSort("product-sort", { key: "order_count", dir: "desc" }),
-  materialSort: loadSort("material-sort", { key: "order_count", dir: "desc" }),
+  materialSort: loadSort("material-sort", { key: "stat_cost", dir: "desc" }),
   activeView: loadPreference("active-view", "overview"),
   ruleTargetOptions: [],
   performanceFilters: {
@@ -1852,6 +1852,8 @@ function renderMaterialTable(rows) {
         { key: "roi", label: "ROI", sortable: true },
         { key: "pay_amount", label: "支付", sortable: true },
         { key: "order_count", label: "订单", sortable: true },
+        { key: "top_account_name", label: "归属账户", sortable: true },
+        { key: "top_plan_name", label: "归属计划", sortable: true },
         { key: "plan_count", label: "计划数", sortable: true },
         { key: "advertiser_count", label: "账户数", sortable: true },
       ];
@@ -1888,6 +1890,8 @@ function renderMaterialTable(rows) {
           <td class="mono">${formatRate(row.roi)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
+          <td>${escapeHtml(row.top_account_name || "--")}</td>
+          <td>${escapeHtml(row.top_plan_name || "--")}</td>
           <td class="mono">${formatNumber(row.plan_count)}</td>
           <td class="mono">${formatNumber(row.advertiser_count)}</td>
           `}
@@ -2410,7 +2414,7 @@ function openMaterialPreviewFromRow(row) {
     materialPreviewMeta.textContent = [row.top_account_name || "", row.top_plan_name || ""].filter(Boolean).join(" / ") || "当前素材预览";
   }
   const previewBlock = directVideoUrl
-    ? `<video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls autoplay playsinline></video>`
+    ? `<video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>`
     : coverUrl
       ? `<img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row.material_name || "素材封面")}" />`
       : '<div class="preview-empty">当前素材没有可直接预览的地址。</div>';
@@ -2421,7 +2425,8 @@ function openMaterialPreviewFromRow(row) {
   materialPreviewBody.innerHTML = `
     <div class="preview-media-shell">${previewBlock}</div>
     <div class="preview-detail-grid">
-      <div class="preview-stat"><span>素材类型</span><strong>${escapeHtml(row.material_type || "-")}</strong></div>
+      <div class="preview-stat"><span>归属账户</span><strong>${escapeHtml(row.top_account_name || "--")}</strong></div>
+      <div class="preview-stat"><span>归属计划</span><strong>${escapeHtml(row.top_plan_name || "--")}</strong></div>
       <div class="preview-stat"><span>消耗</span><strong class="mono">${formatMoney(row.stat_cost)}</strong></div>
       <div class="preview-stat"><span>支付</span><strong class="mono">${formatMoney(row.pay_amount)}</strong></div>
       <div class="preview-stat"><span>订单</span><strong class="mono">${formatNumber(row.order_count)}</strong></div>
@@ -3439,8 +3444,9 @@ async function refreshMaterialSection(force = false) {
   syncSelectedMaterial(payload?.items || []);
   const meta = payload?.meta || {};
   const rangeText = formatDateWindowMeta(payload);
+  const materialCount = Array.isArray(payload?.items) ? payload.items.length : Number(meta.material_row_count || 0);
   const syncText = payload?.snapshot_time
-    ? `${rangeText} · 汇总 ${formatNumber(payload?.snapshot_count || 0)} 个日快照 · 最近明细同步 ${payload.snapshot_time} · 素材 ${formatNumber(meta.material_count || meta.material_row_count || 0)} 行 · 错误 ${formatNumber(meta.error_count || 0)}`
+    ? `${rangeText} · 汇总 ${formatNumber(payload?.snapshot_count || 0)} 个日快照 · 最近明细同步 ${payload.snapshot_time} · 素材 ${formatNumber(materialCount)} 条 · 错误 ${formatNumber(meta.error_count || 0)}`
     : `${rangeText} · 当前时间范围内暂无素材快照`;
   materialSyncMeta.textContent = syncText;
 }

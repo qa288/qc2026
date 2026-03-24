@@ -31,7 +31,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from report_qianchuan import (  # noqa: E402
+    PLAN_MATERIAL_FIELDS,
     PLAN_MATERIAL_TYPES,
+    PLAN_PRODUCT_FIELDS,
     AccountSummary,
     OceanEngineClient,
     PlanSummary,
@@ -90,6 +92,41 @@ ALERT_ENTITY_METRICS = {
     "account_balance": {"account_balance"},
     "shared_wallet": {"wallet_balance"},
     "burst_plan": {"burst_order_count"},
+}
+MATERIAL_REPORT_TOPIC_CONFIGS = {
+    "VIDEO": {
+        "data_topic": "SITE_PROMOTION_PRODUCT_POST_DATA_VIDEO",
+        "dimensions": ["roi2_material_video_name", "material_id"],
+        "name_fields": ["roi2_material_video_name"],
+        "metrics": [
+            "stat_cost_for_roi2",
+            "total_pay_order_gmv_for_roi2",
+            "total_pay_order_count_for_roi2",
+            "total_prepay_and_pay_order_roi2",
+        ],
+    },
+    "IMAGE": {
+        "data_topic": "SITE_PROMOTION_PRODUCT_POST_DATA_IMAGE",
+        "dimensions": ["material_id", "roi2_material_image_name"],
+        "name_fields": ["roi2_material_image_name"],
+        "metrics": [
+            "stat_cost_for_roi2",
+            "total_pay_order_gmv_for_roi2",
+            "total_pay_order_count_for_roi2",
+            "total_prepay_and_pay_order_roi2",
+        ],
+    },
+    "TITLE": {
+        "data_topic": "SITE_PROMOTION_PRODUCT_POST_DATA_TITLE",
+        "dimensions": ["roi2_title_material_v3"],
+        "name_fields": ["roi2_title_material_v3"],
+        "metrics": [
+            "stat_cost_for_roi2",
+            "total_pay_order_gmv_for_roi2",
+            "total_pay_order_count_for_roi2",
+            "total_prepay_and_pay_order_roi2",
+        ],
+    },
 }
 
 
@@ -1601,6 +1638,152 @@ class DashboardService:
     def _normalize_match_text(*values: Any) -> str:
         return " ".join(str(value or "").strip() for value in values if str(value or "").strip()).casefold()
 
+    @staticmethod
+    def _report_dimension_value(payload: dict[str, Any], field: str) -> str:
+        node = (payload or {}).get(field) or {}
+        if isinstance(node, dict):
+            return str(node.get("ValueStr") or node.get("Value") or "").strip()
+        return str(node or "").strip()
+
+    @staticmethod
+    def _report_metric_value(payload: dict[str, Any], field: str) -> float:
+        node = (payload or {}).get(field) or {}
+        value = node.get("Value") if isinstance(node, dict) else node
+        try:
+            return round(float(value or 0.0), 2)
+        except Exception:
+            return 0.0
+
+    def _collect_material_report_metrics_for_advertisers(
+        self,
+        client: OceanEngineClient,
+        advertiser_ids: set[int],
+        start_time: str,
+        end_time: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        rows: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for advertiser_id in sorted(int(item) for item in advertiser_ids if int(item or 0)):
+            for material_type, config in MATERIAL_REPORT_TOPIC_CONFIGS.items():
+                page = 1
+                while True:
+                    try:
+                        response = client.get_uni_promotion_data(
+                            advertiser_id=advertiser_id,
+                            data_topic=str(config["data_topic"]),
+                            dimensions=list(config["dimensions"]),
+                            metrics=list(config["metrics"]),
+                            start_time=start_time,
+                            end_time=end_time,
+                            filters=[],
+                            order_by=[{"field": str(config["metrics"][0]), "type": 1}],
+                            page=page,
+                            page_size=200,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(
+                            {
+                                "stage": "material_report_topic",
+                                "advertiser_id": advertiser_id,
+                                "material_type": material_type,
+                                "data_topic": str(config["data_topic"]),
+                                "error": str(exc),
+                            }
+                        )
+                        break
+                    data = response.get("data") or {}
+                    page_rows = data.get("rows") or data.get("list") or []
+                    for item in page_rows:
+                        dimensions = item.get("dimensions") or {}
+                        metrics = item.get("metrics") or {}
+                        material_id = self._report_dimension_value(dimensions, "material_id")
+                        material_name = ""
+                        for field in config["name_fields"]:
+                            material_name = self._report_dimension_value(dimensions, str(field))
+                            if material_name:
+                                break
+                        stat_cost = self._report_metric_value(metrics, "stat_cost_for_roi2")
+                        pay_amount = self._report_metric_value(metrics, "total_pay_order_gmv_for_roi2")
+                        order_count = int(self._report_metric_value(metrics, "total_pay_order_count_for_roi2"))
+                        roi = self._report_metric_value(metrics, "total_prepay_and_pay_order_roi2")
+                        rows.append(
+                            {
+                                "advertiser_id": advertiser_id,
+                                "material_type": material_type,
+                                "material_id": material_id,
+                                "material_name": material_name,
+                                "stat_cost": stat_cost,
+                                "pay_amount": pay_amount,
+                                "order_count": order_count,
+                                "roi": roi,
+                            }
+                        )
+                    page_info = data.get("page_info") or {}
+                    total_page = int(page_info.get("total_page", 1) or 1)
+                    if page >= total_page or not page_rows:
+                        break
+                    page += 1
+        return rows, errors
+
+    def _apply_material_report_metrics(
+        self,
+        groups: dict[str, dict[str, Any]],
+        source_rows: list[dict[str, Any]],
+        report_rows: list[dict[str, Any]],
+    ) -> None:
+        if not groups or not source_rows or not report_rows:
+            return
+        by_id: dict[tuple[int, str, str], dict[str, Any]] = {}
+        by_name: dict[tuple[int, str, str], dict[str, Any]] = {}
+        report_by_key: dict[str, dict[str, Any]] = {}
+        for item in report_rows:
+            advertiser_id = int(item.get("advertiser_id", 0) or 0)
+            material_type = str(item.get("material_type") or "").strip().upper()
+            material_id = str(item.get("material_id") or "").strip()
+            material_name = self._normalize_match_text(item.get("material_name"))
+            report_key = f"{advertiser_id}:{material_type}:{material_id or material_name}"
+            report_by_key[report_key] = item
+            if material_id:
+                by_id[(advertiser_id, material_type, material_id)] = item
+            if material_name:
+                by_name[(advertiser_id, material_type, material_name)] = item
+
+        grouped_report_keys: dict[str, set[str]] = {}
+        for row in source_rows:
+            material_key = str(row.get("material_key") or "").strip()
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            material_type = str(row.get("material_type") or "").strip().upper()
+            material_id = str(row.get("material_id") or "").strip()
+            material_name = self._normalize_match_text(row.get("material_name"))
+            matched = None
+            if material_id:
+                matched = by_id.get((advertiser_id, material_type, material_id))
+            if matched is None and material_name:
+                matched = by_name.get((advertiser_id, material_type, material_name))
+            if not matched:
+                continue
+            report_key = f"{advertiser_id}:{material_type}:{str(matched.get('material_id') or '').strip() or self._normalize_match_text(matched.get('material_name'))}"
+            grouped_report_keys.setdefault(material_key, set()).add(report_key)
+
+        for material_key, report_keys in grouped_report_keys.items():
+            group = groups.get(material_key)
+            if not group:
+                continue
+            stat_cost = 0.0
+            pay_amount = 0.0
+            order_count = 0
+            for report_key in report_keys:
+                item = report_by_key.get(report_key)
+                if not item:
+                    continue
+                stat_cost = round(stat_cost + float(item.get("stat_cost", 0.0) or 0.0), 2)
+                pay_amount = round(pay_amount + float(item.get("pay_amount", 0.0) or 0.0), 2)
+                order_count += int(item.get("order_count", 0) or 0)
+            if stat_cost > 0 or pay_amount > 0 or order_count > 0:
+                group["stat_cost"] = stat_cost
+                group["pay_amount"] = pay_amount
+                group["order_count"] = order_count
+
     def preview_keyword_matches(self, keyword: str, scope: str = "all", allowed_advertiser_ids: set[int] | None = None) -> dict[str, Any]:
         needle = str(keyword or "").strip()
         scope_value = str(scope or "all").strip().lower()
@@ -2048,6 +2231,7 @@ class DashboardService:
             "video_url": cls._first_text(
                 chosen.get("video_url"),
                 chosen.get("play_url"),
+                chosen.get("url"),
                 chosen.get("material_url"),
             ),
         }
@@ -2839,11 +3023,12 @@ class DashboardService:
         snapshot_time: str,
         window_start: str,
         window_end: str,
-        rows: list[dict[str, Any]],
+        rows: list[dict[str, Any]] | None = None,
+        groups: dict[str, dict[str, Any]] | None = None,
     ) -> list[tuple[Any, ...]]:
-        groups = self._group_material_rows(rows)
+        material_groups = groups if groups is not None else self._group_material_rows(rows or [])
         rollups: list[tuple[Any, ...]] = []
-        for group in groups.values():
+        for group in material_groups.values():
             stat_cost = round(float(group["stat_cost"] or 0.0), 2)
             pay_amount = round(float(group["pay_amount"] or 0.0), 2)
             order_count = int(group["order_count"] or 0)
@@ -4880,6 +5065,7 @@ class DashboardService:
                 ad_id=ad_id,
                 start_date=start_date,
                 end_date=end_date,
+                fields=PLAN_PRODUCT_FIELDS,
             )
             result["product_rows"] = [
                 self._normalize_product_row(snapshot_time, window_start, window_end, plan_row, row)
@@ -4913,6 +5099,7 @@ class DashboardService:
                     advertiser_id=advertiser_id,
                     ad_id=ad_id,
                     filtering=filtering,
+                    fields=PLAN_MATERIAL_FIELDS,
                 )
                 for row in materials:
                     normalized = self._normalize_material_row(
@@ -4964,6 +5151,7 @@ class DashboardService:
         material_rows: list[tuple[Any, ...]] = []
         errors: list[dict[str, Any]] = []
         video_material_ids_by_advertiser: dict[int, set[str]] = {}
+        material_report_rows: list[dict[str, Any]] = []
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             future_map = {
@@ -5002,6 +5190,16 @@ class DashboardService:
                 advertiser_id = int(plan_row["advertiser_id"])
                 bucket = video_material_ids_by_advertiser.setdefault(advertiser_id, set())
                 bucket.update(payload["video_material_ids"])
+
+        advertiser_ids = {int(row.get("advertiser_id", 0) or 0) for row in plans if int(row.get("advertiser_id", 0) or 0)}
+        report_rows, report_errors = self._collect_material_report_metrics_for_advertisers(
+            client,
+            advertiser_ids,
+            window_start,
+            window_end,
+        )
+        material_report_rows.extend(report_rows)
+        errors.extend(report_errors)
 
         video_flag_rows: list[tuple[Any, ...]] = []
         for advertiser_id, material_ids in sorted(video_material_ids_by_advertiser.items()):
@@ -5051,6 +5249,7 @@ class DashboardService:
             "detail_rows": detail_rows,
             "product_rows": product_rows,
             "material_rows": material_rows,
+            "material_report_rows": material_report_rows,
             "video_flag_rows": video_flag_rows,
             "errors": errors,
         }
@@ -5103,17 +5302,26 @@ class DashboardService:
                     "material_id": material_id,
                     "material_name": row[10],
                     "video_id": row[11],
-                    "stat_cost": row[14],
-                    "pay_amount": row[15],
-                    "order_count": row[16],
+                    "cover_url": row[12],
+                    "aweme_item_id": row[13],
+                    "video_url": row[14],
+                    "stat_cost": row[17],
+                    "pay_amount": row[18],
+                    "order_count": row[19],
                     "is_original": (advertiser_id, material_id) in original_material_keys,
                 }
             )
+        material_groups = self._group_material_rows(material_source_rows)
+        self._apply_material_report_metrics(
+            material_groups,
+            material_source_rows,
+            list(payload.get("material_report_rows") or []),
+        )
         material_rollup_rows = self._build_material_rollup_rows(
             payload["snapshot_time"],
             payload["window_start"],
             payload["window_end"],
-            material_source_rows,
+            groups=material_groups,
         )
         with self.db() as conn:
             conn.execute("DELETE FROM plan_detail_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
