@@ -1074,15 +1074,15 @@ body {
 
 .toolbar > .search-input,
 .toolbar.wide > .search-input {
-  flex: 0 1 240px;
-  min-width: 190px;
+  flex: 0 1 288px;
+  min-width: 240px;
   width: auto;
 }
 
 .toolbar-inline-primary > .search-input {
   grid-column: 2;
   width: 100%;
-  min-width: 148px;
+  min-width: 240px;
   max-width: none;
   justify-self: end;
 }
@@ -1124,7 +1124,7 @@ body {
 }
 
 .date-input {
-  width: 102px;
+  width: 126px;
   min-width: 0;
 }
 
