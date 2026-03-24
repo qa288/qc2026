@@ -3532,11 +3532,11 @@ function bindInputs() {
     });
   }
 
-  accountSearch.addEventListener("input", () => renderAccountTable(rangePayload(sectionFilter("account"))?.accounts || []));
-  planSearch.addEventListener("input", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
-  employeeSearch.addEventListener("input", () => renderEmployeeTable(breakdownRows(rangePayload(sectionFilter("breakdown")))));
-  productSearch.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
-  materialSearch.addEventListener("input", () => renderMaterialTable(materialRangePayload(sectionFilter("material"))?.items || []));
+  accountSearch?.addEventListener("input", () => renderAccountTable(rangePayload(sectionFilter("account"))?.accounts || []));
+  planSearch?.addEventListener("input", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
+  employeeSearch?.addEventListener("input", () => renderEmployeeTable(breakdownRows(rangePayload(sectionFilter("breakdown")))));
+  productSearch?.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
+  materialSearch?.addEventListener("input", () => renderMaterialTable(materialRangePayload(sectionFilter("material"))?.items || []));
   operatorMaterialSearch?.addEventListener("input", () => renderUserMatchedMaterialTable());
   toggleOperatorMaterialsButton?.addEventListener("click", async () => {
     const nextVisible = operatorMaterialContent?.classList.contains("hidden");
@@ -3546,7 +3546,7 @@ function bindInputs() {
       renderUserMatchedMaterialTable();
     }
   });
-  planAccountFilter.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
+  planAccountFilter?.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
   uploadSearchForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     await fetchUploadTargets(true);
@@ -3753,7 +3753,7 @@ function bindInputs() {
     });
   });
 
-  notificationForm.addEventListener("submit", async (event) => {
+  notificationForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(notificationForm);
     const payload = {
@@ -3781,7 +3781,7 @@ function bindInputs() {
     await fetchDashboard();
   });
 
-  ruleForm.addEventListener("submit", async (event) => {
+  ruleForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     syncRuleTargetSelectionFromSearch();
     const form = new FormData(ruleForm);
@@ -3833,7 +3833,7 @@ function bindInputs() {
     syncRuleTargetSelectionFromSearch();
   });
 
-  syncButton.addEventListener("click", async () => {
+  syncButton?.addEventListener("click", async () => {
     syncButton.disabled = true;
     syncButton.textContent = "刷新中...";
     try {
