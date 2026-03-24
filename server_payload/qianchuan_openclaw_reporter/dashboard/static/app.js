@@ -1089,7 +1089,7 @@ async function fetchUploadTargets(force = false) {
     renderUploadTargetTable();
     return;
   }
-  setInlineFeedback(uploadTargetMeta, `正在按${uploadScopeLabel(scope)}搜索目标计划…`, "neutral");
+  setInlineFeedback(uploadTargetMeta, `正在按${uploadScopeLabel(scope)}搜索…`, "neutral");
   const params = new URLSearchParams({ scope, q: query });
   const response = await fetch(`/api/upload/targets?${params.toString()}`);
   if (!response.ok) {
@@ -1103,7 +1103,7 @@ async function fetchUploadTargets(force = false) {
   renderUploadTargetTable();
   setInlineFeedback(
     uploadTargetMeta,
-    `已命中 ${formatNumber(state.uploadTargets.plan_count || 0)} 个计划，覆盖 ${formatNumber(state.uploadTargets.account_count || 0)} 个账户。`,
+    `命中 ${formatNumber(state.uploadTargets.plan_count || 0)} 个计划，覆盖 ${formatNumber(state.uploadTargets.account_count || 0)} 个账户。`,
     "success",
   );
 }
@@ -2906,8 +2906,8 @@ function renderMatchPreview() {
   setInlineFeedback(
     matchPreviewMeta,
     employee
-      ? `当前归属主体：${employee.display_name} · 当前命中 ${formatNumber(rows.length)} 条，可直接人工绑定。`
-      : "先选归属主体，再预览命中。",
+      ? `当前归属主体：${employee.display_name} · 命中 ${formatNumber(rows.length)} 条。`
+      : "先选归属主体，再预览。",
     "neutral",
   );
   matchPreviewTable.innerHTML = `
@@ -3017,7 +3017,7 @@ function renderUnassignedTable() {
   if (!state.employees.length) {
     unassignedMeta.textContent = "当前还没有归属主体。请先创建归属主体，再配置关键词或人工绑定；未归属池会基于这些规则生成。";
   } else {
-    unassignedMeta.textContent = `查看当前时间范围内未命中归属规则的数据 · ${rangeText} · 未归属计划 ${formatNumber(state.unassignedPool?.total_plan_count || 0)} 条 · 当前对象 ${formatNumber(state.unassignedPool?.item_count || 0)} 条`;
+    unassignedMeta.textContent = `${rangeText} · 未归属计划 ${formatNumber(state.unassignedPool?.total_plan_count || 0)} 条 · 当前对象 ${formatNumber(state.unassignedPool?.item_count || 0)} 条`;
   }
   unassignedTable.innerHTML = `
     <thead>
@@ -3641,7 +3641,7 @@ function bindInputs() {
     if (item?.id) {
       await selectEmployeeManager(Number(item.id));
       setInlineFeedback(employeeEditorStatus, `已保存归属主体：${item.display_name || payload.display_name}。`, "success");
-      setInlineFeedback(keywordStatus, "可以继续添加关键词，或先预览命中结果。", "success");
+      setInlineFeedback(keywordStatus, "可以继续加关键词，或先预览命中。", "success");
       focusFirstInput(keywordForm, 'input[name="keyword"]');
     } else {
       await ensureOwnershipData(true);
@@ -3687,7 +3687,7 @@ function bindInputs() {
     renderEmployeeManagerTable();
     await fetchDashboard();
     setInlineFeedback(keywordStatus, `已新增关键词“${payload.keyword}”。`, "success");
-    setInlineFeedback(matchPreviewMeta, "可继续预览命中，或等待榜单按新规则刷新。", "success");
+    setInlineFeedback(matchPreviewMeta, "可继续预览命中，或等待榜单刷新。", "success");
     focusFirstInput(keywordForm, 'input[name="keyword"]');
   });
 
@@ -3820,7 +3820,7 @@ function bindInputs() {
     resetRuleFormState();
     await fetchDashboard();
     if (ruleFormHint) {
-      ruleFormHint.textContent = `已保存${savedLabel}规则。继续新增规则，或到下方列表调整状态。`;
+      ruleFormHint.textContent = `已保存${savedLabel}规则。可继续新增，或到下方调整状态。`;
       ruleFormHint.dataset.tone = "success";
     }
   });

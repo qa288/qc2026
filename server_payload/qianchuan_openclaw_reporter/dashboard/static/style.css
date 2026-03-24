@@ -254,6 +254,11 @@ body {
   transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
 }
 
+.button.compact {
+  padding: 6px 11px;
+  font-size: 12px;
+}
+
 .button:hover {
   transform: translateY(-1px);
 }
@@ -1578,7 +1583,7 @@ body {
 }
 
 .signal-config-card {
-  padding: 14px 14px 15px;
+  padding: 12px 12px 13px;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid rgba(22, 119, 255, 0.08);
@@ -1599,7 +1604,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .signal-head-actions {
@@ -1614,12 +1619,12 @@ body {
 }
 
 .signal-form-hint {
-  padding: 12px 14px;
+  padding: 10px 12px;
   border-radius: 12px;
   background: rgba(22, 119, 255, 0.06);
   color: var(--muted);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.45;
 }
 
 .signal-form-hint[data-tone="success"] {
@@ -1633,7 +1638,7 @@ body {
 }
 
 .signal-form-hint.compact {
-  padding: 10px 12px;
+  padding: 8px 10px;
 }
 
 .signal-template-strip {
@@ -2733,7 +2738,7 @@ body {
   border: 1px solid rgba(13, 42, 77, 0.08);
   background: rgba(255, 255, 255, 0.96);
   border-radius: 18px;
-  padding: 16px 16px 15px;
+  padding: 14px 14px 13px;
   box-shadow: 0 12px 34px rgba(18, 42, 67, 0.06);
 }
 
@@ -2748,7 +2753,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
 }
 
 .upload-form-grid {

@@ -252,7 +252,7 @@
               <h2>素材上传</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>搜索目标后勾选计划，再上传视频。</span>
+              <span>先选计划，再上传视频。</span>
             </div>
           </div>
 
@@ -262,7 +262,7 @@
                 <div>
                   <h3>选择投放目标</h3>
                 </div>
-                <div id="uploadTargetMeta" class="section-range-meta compact-inline inline-feedback">先筛计划，再勾选。</div>
+                <div id="uploadTargetMeta" class="section-range-meta compact-inline inline-feedback">先查再勾选。</div>
               </div>
               <form id="uploadSearchForm" class="ownership-inline-form">
                 <label>
@@ -276,7 +276,7 @@
                   <span>关键词</span>
                   <input id="uploadKeywordInput" name="query" type="search" placeholder="留空表示当前范围全部计划" />
                 </label>
-                <button type="submit" class="button ghost">查找</button>
+                <button type="submit" class="button ghost compact">查找</button>
               </form>
               <div class="upload-target-toolbar">
                 <label class="toggle-chip">
@@ -295,7 +295,7 @@
                 <div>
                   <h3>选择视频并创建任务</h3>
                 </div>
-                <div id="uploadJobStatus" class="section-range-meta compact-inline inline-feedback">选计划后，再传 1 到 50 个视频。</div>
+                <div id="uploadJobStatus" class="section-range-meta compact-inline inline-feedback">先选计划，再传视频。</div>
               </div>
               <form id="uploadJobForm" class="upload-form-grid">
                 <label class="wide-field upload-file-picker">
@@ -304,7 +304,7 @@
                 </label>
                 <div id="uploadFileSummary" class="section-range-meta compact-inline">未选择文件</div>
                 <div class="ownership-form-actions">
-                  <button id="uploadJobSubmit" type="submit" class="button primary">创建上传任务</button>
+                  <button id="uploadJobSubmit" type="submit" class="button primary compact">创建上传任务</button>
                 </div>
               </form>
             </section>
@@ -314,7 +314,7 @@
                 <div>
                   <h3>最近任务</h3>
                 </div>
-                <div class="section-range-meta compact-inline">只显示当前账号可见的任务。</div>
+                <div class="section-range-meta compact-inline">只显示当前可见任务。</div>
               </div>
               <div class="table-shell">
                 <table id="uploadJobTable" class="data-table compact"></table>
@@ -556,7 +556,7 @@
                 <div id="scopeEditorMeta" class="section-range-meta compact-inline inline-feedback">主管看勾选账户，运营不在这里配。</div>
                 <div id="scopeAccountList" class="scope-checklist"></div>
                 <div class="ownership-form-actions ownership-actions-end">
-                  <button type="button" id="saveUserScopesButton" class="button primary">保存账户范围</button>
+                  <button type="button" id="saveUserScopesButton" class="button primary compact">保存账户范围</button>
                 </div>
               </section>
 
@@ -573,7 +573,7 @@
                     <input name="enabled" type="checkbox" checked />
                     <span>启用</span>
                   </label>
-                  <button type="submit" class="button primary">添加关键词</button>
+                  <button type="submit" class="button primary compact">添加关键词</button>
                 </form>
                 <div class="table-shell">
                   <table id="operatorKeywordTable" class="data-table compact"></table>
@@ -623,8 +623,8 @@
                   <h3>规则编辑器</h3>
                 </div>
                 <div class="signal-head-actions">
-                  <button type="submit" form="ruleForm" id="ruleFormSubmitButton" class="button primary">新增规则</button>
-                  <button type="button" id="ruleFormCancelButton" class="button ghost hidden">取消编辑</button>
+                  <button type="submit" form="ruleForm" id="ruleFormSubmitButton" class="button primary compact">新增规则</button>
+                  <button type="button" id="ruleFormCancelButton" class="button ghost compact hidden">取消编辑</button>
                 </div>
               </div>
               <div class="signal-template-strip" id="ruleTemplateStrip">
@@ -633,7 +633,7 @@
                   <button type="button" class="signal-template-button" data-entity="plan" data-metric="stat_cost" data-operator="gte" data-threshold="1000" data-min-spend="0" data-note="计划消耗过快，及时复核">计划消耗</button>
                   <button type="button" class="signal-template-button" data-entity="burst_plan" data-metric="burst_order_count" data-operator="gte" data-threshold="10" data-note="计划短时爆单，及时放量或复核">爆单计划</button>
               </div>
-              <div id="ruleFormHint" class="signal-form-hint">先选对象和指标，再填阈值。余额、共享钱包和爆单规则会自动收起无关字段。</div>
+              <div id="ruleFormHint" class="signal-form-hint">先选对象和指标，再填阈值。</div>
               <form id="ruleForm" class="signal-compact-form">
                 <input name="rule_id" type="hidden" />
                 <div class="signal-form-row signal-form-row-main">
@@ -659,7 +659,7 @@
                     <datalist id="ruleTargetOptions"></datalist>
                   </label>
                 </div>
-                <div id="ruleTargetMeta" class="signal-form-hint compact">输入账户名、计划名或钱包名关键词后，从下拉候选项中选择；留空表示全部。</div>
+                <div id="ruleTargetMeta" class="signal-form-hint compact">先搜关键词，再从候选项里选对象；留空表示全部。</div>
                 <div class="signal-form-row signal-form-row-aux">
                   <label>
                     <span>比较</span>
@@ -699,9 +699,9 @@
                 <div>
                   <h3>通知渠道</h3>
                 </div>
-                <button type="submit" form="notificationForm" class="button primary">保存通知</button>
+                <button type="submit" form="notificationForm" class="button primary compact">保存通知</button>
               </div>
-              <div class="signal-form-hint compact">先把阈值告警规则配好，再决定是否发到飞书、钉钉或微信。</div>
+              <div class="signal-form-hint compact">先把规则配好，再决定是否发到飞书、钉钉或微信。</div>
               <div id="notificationStatus" class="notify-inline-status"></div>
               <form id="notificationForm" class="signal-compact-form">
                 <div class="signal-form-row signal-form-row-notify">
