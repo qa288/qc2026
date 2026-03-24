@@ -1267,6 +1267,10 @@ body {
   align-items: start;
 }
 
+.access-stack {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .decision-main,
 .decision-side {
   min-width: 0;
@@ -2764,6 +2768,11 @@ body {
 .upload-card {
   display: grid;
   gap: 12px;
+}
+
+.access-list-card,
+.access-editor-card {
+  max-width: 100%;
 }
 
 .upload-target-toolbar {

@@ -860,7 +860,8 @@ function setSectionFilter(sectionKey, nextFilter) {
 }
 
 function setActiveView(view) {
-  const next = String(view || "overview");
+  const normalizedView = String(view || "overview");
+  const next = normalizedView === "ownership" ? "access" : normalizedView;
   state.activeView = next;
   savePreference("active-view", next);
   if (viewTabs) {
@@ -963,8 +964,11 @@ function renderUploadJobNote(item) {
   const failedNames = failedItems
     .map((row) => String(row.original_name || "").trim())
     .filter(Boolean)
-    .slice(0, 3);
-  const summary = failedNames.length ? `失败文件：${failedNames.join("、")}` : "存在失败文件";
+    .slice(0, 5);
+  const extraCount = Math.max(0, failedItems.length - failedNames.length);
+  const summary = failedNames.length
+    ? `失败文件：${failedNames.join("、")}${extraCount ? ` 等 ${formatNumber(failedItems.length)} 个` : ""}`
+    : `失败文件：${formatNumber(failedItems.length)} 个`;
   return `
     <div class="cell-primary">${escapeHtml(base)}</div>
     <div class="cell-subline">
@@ -1044,7 +1048,7 @@ function renderUploadJobTable() {
   if (!uploadJobTable) return;
   const items = state.uploadJobs || [];
   if (!items.length) {
-    uploadJobTable.innerHTML = '<tbody><tr><td colspan="9" class="empty-cell">还没有上传任务。</td></tr></tbody>';
+    uploadJobTable.innerHTML = '<tbody><tr><td colspan="11" class="empty-cell">还没有上传任务。</td></tr></tbody>';
     return;
   }
   uploadJobTable.innerHTML = `
@@ -1055,6 +1059,7 @@ function renderUploadJobTable() {
         <th>范围</th>
         <th class="mono">文件数</th>
         <th class="mono">已传文件</th>
+        <th class="mono">失败文件</th>
         <th class="mono">计划数</th>
         <th class="mono">已处理计划</th>
         <th>创建人</th>
@@ -1070,6 +1075,7 @@ function renderUploadJobTable() {
           <td>${escapeHtml(uploadScopeLabel(item.scope || "plan"))}</td>
           <td class="mono">${formatNumber(item.total_files)}</td>
           <td class="mono">${formatNumber(item.success_files || item.uploaded_files || 0)} / ${formatNumber(item.total_files || 0)}</td>
+          <td class="mono">${formatNumber(item.failed_files || 0)}</td>
           <td class="mono">${formatNumber(item.total_targets)}</td>
           <td class="mono">${formatNumber(item.processed_targets || 0)} / ${formatNumber(item.total_targets || 0)}</td>
           <td>${escapeHtml(item.created_by_label || "--")}</td>
