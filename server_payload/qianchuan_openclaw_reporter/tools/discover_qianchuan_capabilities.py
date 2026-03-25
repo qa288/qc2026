@@ -17,7 +17,6 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from report_qianchuan import (  # noqa: E402
-    PLAN_MATERIAL_FIELDS,
     PLAN_MATERIAL_TYPES,
     PLAN_PRODUCT_FIELDS,
     UNI_PROMOTION_DATA_TOPICS,
@@ -27,6 +26,7 @@ from report_qianchuan import (  # noqa: E402
     PlanSummary,
     dump_json,
     load_runtime_config,
+    plan_material_fields_for_type,
 )
 
 
@@ -564,7 +564,7 @@ def main() -> int:
                     advertiser_id=plan.advertiser_id,
                     ad_id=plan.ad_id,
                     filtering=filtering,
-                    fields=PLAN_MATERIAL_FIELDS,
+                    fields=plan_material_fields_for_type(material_type),
                     page=1,
                     page_size=normalize_allowed_page_size(args.sample_rows, [10, 20, 50, 100]),
                 )

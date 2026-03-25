@@ -97,6 +97,16 @@ PLAN_MATERIAL_FIELDS = [
     "total_prepay_and_pay_order_roi2",
 ]
 
+PLAN_MATERIAL_FIELDS_BY_TYPE = {
+    # TITLE accepts the core performance metrics but rejects product exposure/click fields.
+    "TITLE": [
+        "stat_cost_for_roi2",
+        "total_pay_order_count_for_roi2",
+        "total_pay_order_gmv_for_roi2",
+        "total_prepay_and_pay_order_roi2",
+    ],
+}
+
 PLAN_MATERIAL_TYPES = ["VIDEO", "IMAGE", "TITLE", "CAROUSEL", "LIVE_ROOM"]
 TOKEN_LOCK_KEY = os.environ.get("OCEANENGINE_TOKEN_LOCK_KEY", "qianchuan:oauth:refresh")
 TOKEN_LOCK_TIMEOUT_SECONDS = int(os.environ.get("OCEANENGINE_TOKEN_LOCK_TIMEOUT_SECONDS", "120") or 120)
@@ -1203,6 +1213,12 @@ def normalize_plan_page_size(config: dict[str, Any]) -> int:
     if value in {10, 20, 50, 100, 200}:
         return value
     return 100
+
+
+def plan_material_fields_for_type(material_type: str) -> list[str]:
+    normalized = str(material_type or "").strip().upper()
+    fields = PLAN_MATERIAL_FIELDS_BY_TYPE.get(normalized, PLAN_MATERIAL_FIELDS)
+    return list(fields)
 
 
 def fetch_account_bundle(

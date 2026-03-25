@@ -25,7 +25,6 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from report_qianchuan import (  # noqa: E402
-    PLAN_MATERIAL_FIELDS,
     PLAN_MATERIAL_TYPES,
     PLAN_PRODUCT_FIELDS,
     AccountSummary,
@@ -38,6 +37,7 @@ from report_qianchuan import (  # noqa: E402
     load_runtime_config,
     normalize_account_fund_money,
     normalize_plan_money,
+    plan_material_fields_for_type,
     plan_delivery_status_label,
     plan_marketing_goal_label,
     plan_opt_status_label,
@@ -3164,7 +3164,7 @@ class DashboardService:
                     advertiser_id=advertiser_id,
                     ad_id=ad_id,
                     filtering=filtering,
-                    fields=PLAN_MATERIAL_FIELDS,
+                    fields=plan_material_fields_for_type(material_type),
                 )
                 for row in materials:
                     normalized = self._normalize_material_row(
