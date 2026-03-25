@@ -1202,7 +1202,22 @@ body {
 .date-input {
   width: 132px;
   min-width: 132px;
+  padding-right: 8px;
+  font-size: 14px;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
+}
+
+.date-input::-webkit-datetime-edit {
+  padding: 0;
+}
+
+.date-input::-webkit-datetime-edit-fields-wrapper {
+  padding: 0;
+}
+
+.date-input::-webkit-calendar-picker-indicator {
+  margin-left: 4px;
 }
 
 .date-range-sep {

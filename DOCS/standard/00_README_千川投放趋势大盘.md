@@ -66,6 +66,7 @@
 20. [20_角色模型与运营工作台方案.md](/Users/xy/千川/DOCS/standard/20_角色模型与运营工作台方案.md)
 21. [21_管理员预警规则页方案.md](/Users/xy/千川/DOCS/standard/21_管理员预警规则页方案.md)
 22. [22_工作台重构与完整开发计划.md](/Users/xy/千川/DOCS/standard/22_工作台重构与完整开发计划.md)
+23. [23_技术架构优化与分阶段推进计划.md](/Users/xy/千川/docs/standard/23_技术架构优化与分阶段推进计划.md)
 
 ---
 

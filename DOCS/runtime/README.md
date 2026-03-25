@@ -108,6 +108,13 @@ docker-compose -f docker-compose.dashboard.yml up -d --build
 - 线上目录 `/opt/qianchuan/qianchuan_openclaw_reporter` 不是 Git 工作树
 - 正式发布通过“同步文件 + Compose 重建”完成，不依赖线上目录直接 `git pull`
 
+当前运行检查接口：
+
+- `GET /healthz`
+  - 用于进程存活检查
+- `GET /readyz`
+  - 用于数据库、Redis、Celery 与 schema 版本就绪检查
+
 服务拆分：
 
 - `web`
@@ -150,6 +157,7 @@ Dashboard 当前包含：
 - 10 分钟级细粒度：`plan_detail_snapshots / product_snapshots / material_snapshots / video_origin_flags`
 - 素材预聚合：`material_rollups`
 - 细粒度同步状态：`extended_sync_runs`
+- schema 版本记录：`schema_migrations`
 
 当前页面 API 额外可直接读取：
 

@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import os
-
 from celery import Celery
 from celery.schedules import crontab
 
-TIMEZONE = os.environ.get("TIMEZONE", "Asia/Shanghai")
-DETAIL_SYNC_INTERVAL_MINUTES = int(os.environ.get("DETAIL_SYNC_INTERVAL_MINUTES", "10"))
-HISTORY_BACKFILL_DAYS = int(os.environ.get("HISTORY_BACKFILL_DAYS", "30"))
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL") or os.environ.get("REDIS_URL", "redis://redis:6379/1")
-CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND") or os.environ.get(
-    "REDIS_URL", "redis://redis:6379/2"
-)
+from dashboard.settings import settings
+
+TIMEZONE = settings.timezone
+DETAIL_SYNC_INTERVAL_MINUTES = settings.detail_sync_interval_minutes
+HISTORY_BACKFILL_DAYS = settings.history_backfill_days
+CELERY_BROKER_URL = settings.celery_broker_url
+CELERY_RESULT_BACKEND = settings.celery_result_backend
 
 celery_app = Celery(
     "qianchuan_dashboard",

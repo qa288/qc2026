@@ -29,8 +29,9 @@
 5. [角色模型与运营工作台方案](/Users/xy/千川/DOCS/standard/20_角色模型与运营工作台方案.md)
 6. [管理员预警规则页方案](/Users/xy/千川/DOCS/standard/21_管理员预警规则页方案.md)
 7. [工作台重构与完整开发计划](/Users/xy/千川/DOCS/standard/22_工作台重构与完整开发计划.md)
-8. [运行目录说明](/Users/xy/千川/DOCS/runtime/README.md)
-9. [官方能力目录](/Users/xy/千川/DOCS/runtime/capabilities/QIANCHUAN_CAPABILITY_CATALOG.md)
+8. [技术架构优化与分阶段推进计划](/Users/xy/千川/docs/standard/23_技术架构优化与分阶段推进计划.md)
+9. [运行目录说明](/Users/xy/千川/DOCS/runtime/README.md)
+10. [官方能力目录](/Users/xy/千川/DOCS/runtime/capabilities/QIANCHUAN_CAPABILITY_CATALOG.md)
 
 ## 使用规则
 
@@ -55,6 +56,8 @@
   - [21_管理员预警规则页方案](/Users/xy/千川/DOCS/standard/21_管理员预警规则页方案.md)
 - 实施阶段与排期：
   - [22_工作台重构与完整开发计划](/Users/xy/千川/DOCS/standard/22_工作台重构与完整开发计划.md)
+- 技术架构优化推进：
+  - [23_技术架构优化与分阶段推进计划](/Users/xy/千川/docs/standard/23_技术架构优化与分阶段推进计划.md)
 - 当前线上运行事实：
   - [runtime/README.md](/Users/xy/千川/DOCS/runtime/README.md)
   - [runtime/STANDARD.md](/Users/xy/千川/DOCS/runtime/STANDARD.md)

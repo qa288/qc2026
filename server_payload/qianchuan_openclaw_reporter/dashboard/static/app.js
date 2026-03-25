@@ -73,7 +73,6 @@ const state = {
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
   employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
-  productSort: loadSort("product-sort", { key: "order_count", dir: "desc" }),
   materialSort: loadSort("material-sort", { key: "stat_cost", dir: "desc" }),
   activeView: loadPreference("active-view", "overview"),
   ruleTargetOptions: [],
@@ -85,8 +84,6 @@ const state = {
   },
   rangeEditorOpen: {},
   selectedPlanId: null,
-  selectedEmployeeName: null,
-  selectedProductKey: null,
   selectedMaterialKey: null,
   selectedUserId: null,
   selectedUserScopeIds: [],
@@ -98,24 +95,14 @@ const alertStream = document.getElementById("alertStream");
 const accountTable = document.getElementById("accountTable");
 const planTable = document.getElementById("planTable");
 const employeeTable = document.getElementById("employeeTable");
-const productTable = document.getElementById("productTable");
 const ruleTable = document.getElementById("ruleTable");
-const planDetail = document.getElementById("planDetail");
-const planDetailStage = document.getElementById("planDetailStage");
-const employeeDetail = document.getElementById("employeeDetail");
-const productDetail = document.getElementById("productDetail");
-const planAssetSummary = document.getElementById("planAssetSummary");
 const materialTable = document.getElementById("materialTable");
-const materialDetail = document.getElementById("materialDetail");
-const materialDetailStage = document.getElementById("materialDetailStage");
 const alertSummary = document.getElementById("alertSummary");
 const accountSearch = document.getElementById("accountSearch");
 const planSearch = document.getElementById("planSearch");
 const employeeSearch = document.getElementById("employeeSearch");
-const productSearch = document.getElementById("productSearch");
 const breakdownTitle = document.getElementById("breakdownTitle");
 const teamPanelTitle = document.getElementById("teamPanelTitle");
-const productRankPanel = document.getElementById("productRankPanel");
 const materialSearch = document.getElementById("materialSearch");
 const planAccountFilter = document.getElementById("planAccountFilter");
 const notificationForm = document.getElementById("notificationForm");

@@ -2,7 +2,7 @@
 
 版本：`v2.0`  
 状态：`生效中`  
-最后更新：`2026-03-22`
+最后更新：`2026-03-25`
 
 ## 1. 文档定位
 
@@ -37,6 +37,56 @@
   - 官方接口共享客户端与核心采集逻辑
 - `dashboard/main.py`
   - 页面服务、内部 API、落库查询接口
+- `dashboard/auth.py`
+  - 密码哈希校验与登录依赖组装
+- `dashboard/user_access.py`
+  - 后台账号、账户范围、运营关键词的访问层
+- `dashboard/user_schemas.py`
+  - 后台账号与运营关键词相关请求模型
+- `dashboard/user_routes.py`
+  - `/api/users*` 管理路由注册
+- `dashboard/employee_access.py`
+  - 归属人、关键词、手工绑定的访问层
+- `dashboard/employee_schemas.py`
+  - 归属人管理相关请求模型
+- `dashboard/employee_routes.py`
+  - `/api/employees*` 与匹配预览路由注册
+- `dashboard/alert_access.py`
+  - 通知设置、告警规则、告警事件的访问层
+- `dashboard/alert_schemas.py`
+  - 告警规则与通知设置相关请求模型和校验
+- `dashboard/alert_routes.py`
+  - `/api/alert-rules*` 与 `/api/notification-settings` 路由注册
+- `dashboard/system_schemas.py`
+  - 同步触发与 OceanEngine 换码相关请求模型
+- `dashboard/system_routes.py`
+  - `/api/sync*` 与 OceanEngine token 管理路由注册
+- `dashboard/query_routes.py`
+  - `dashboard / performance / history / material` 查询路由注册
+- `dashboard/upload_routes.py`
+  - 素材上传与上传任务查询路由注册
+- `dashboard/page_routes.py`
+  - 登录页、首页与兼容入口路由注册
+- `dashboard/health_routes.py`
+  - `healthz / readyz` 运行检查路由注册
+- `dashboard/snapshot_access.py`
+  - 快照详情、历史曲线与计划资产查询访问层
+- `dashboard/token_access.py`
+  - OAuth token 存储、脱敏读取与换码访问层
+- `dashboard/catalog_access.py`
+  - 账户/计划/商品/素材目录与关键词匹配预览访问层
+- `dashboard/upload_access.py`
+  - 上传目标选择、上传任务计数汇总与素材资产关联访问层
+- `dashboard/balance_access.py`
+  - 账户余额、共享钱包与钱包关联快照访问层
+- `dashboard/performance_access.py`
+  - summary/account/plan 快照窗口聚合、最新快照读取与账户范围裁剪访问层
+- `dashboard/history_access.py`
+  - extended sync 窗口读取、按天去重、缺失天判断与 summary 日元数据访问层
+- `dashboard/migrations.py`
+  - 运行期 schema migration 骨架与版本记录
+- `dashboard/runtime_checks.py`
+  - DB / Redis / Celery readiness 检查
 - `dashboard/tasks.py`
   - Celery 任务入口
 - `dashboard/celery_app.py`
@@ -111,9 +161,17 @@
 ## 6. Token 规则
 
 - 逻辑真源：PostgreSQL `oauth_tokens`
+- schema 版本记录：PostgreSQL `schema_migrations`
 - 缓存副本：`/app/data/qianchuan_latest_token.json`
 - 刷新锁：Redis
 - 对外读取接口：`GET /api/system/integrations/ocean-engine/token-latest`
+
+运维检查接口：
+
+- `GET /healthz`
+  - 进程存活检查
+- `GET /readyz`
+  - 数据库、Redis、Celery 连接与 schema 版本检查
 
 强约束：
 
