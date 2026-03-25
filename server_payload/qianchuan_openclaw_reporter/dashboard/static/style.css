@@ -1151,8 +1151,9 @@ body {
 }
 
 .date-input {
-  width: 126px;
-  min-width: 0;
+  width: 152px;
+  min-width: 152px;
+  font-variant-numeric: tabular-nums;
 }
 
 .date-range-sep {
@@ -2610,8 +2611,9 @@ body {
   }
 
   .date-input {
-    flex: 1 1 160px;
+    flex: 1 1 172px;
     width: auto;
+    min-width: 0;
   }
 
   .rank-search {
