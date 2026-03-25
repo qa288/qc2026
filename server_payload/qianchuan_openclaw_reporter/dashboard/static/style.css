@@ -955,7 +955,7 @@ body {
 .range-filter-group {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
   min-width: 0;
   flex: 1 1 auto;
@@ -963,7 +963,7 @@ body {
 
 .toolbar-inline-primary .range-filter-group {
   grid-column: 1;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
 }
 
 .workspace-grid {
@@ -1129,7 +1129,7 @@ body {
 .date-range-inline {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 0;
   min-width: 0;
   flex-wrap: wrap;
 }
@@ -1139,10 +1139,44 @@ body {
 }
 
 .custom-date-inline {
-  padding: 3px 6px;
+  gap: 0;
+  max-width: 100%;
+  padding: 3px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.76);
   border: 1px solid rgba(77, 57, 36, 0.1);
+}
+
+.custom-date-toggle {
+  min-width: 54px;
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.custom-date-toggle:hover {
+  transform: translateY(-1px);
+}
+
+.custom-date-fields {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 0;
+  margin-left: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: max-width 180ms ease, opacity 140ms ease, margin-left 180ms ease;
 }
 
 .custom-date-inline.active {
@@ -1150,9 +1184,24 @@ body {
   border-color: rgba(22, 119, 255, 0.18);
 }
 
+.custom-date-inline.active .custom-date-toggle,
+.custom-date-inline.expanded .custom-date-toggle {
+  background: rgba(22, 119, 255, 0.12);
+  color: var(--brand);
+}
+
+.custom-date-inline.active .custom-date-fields,
+.custom-date-inline.expanded .custom-date-fields,
+.custom-date-inline:focus-within .custom-date-fields {
+  max-width: 360px;
+  margin-left: 6px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .date-input {
-  width: 152px;
-  min-width: 152px;
+  width: 132px;
+  min-width: 132px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1163,9 +1212,9 @@ body {
 }
 
 .date-apply-button {
-  min-width: 52px;
+  min-width: 46px;
   height: 32px;
-  padding: 0 10px;
+  padding: 0 8px;
   border: 0;
   border-radius: 999px;
   background: rgba(22, 119, 255, 0.1);
@@ -2581,6 +2630,28 @@ body {
     flex-wrap: wrap;
   }
 
+  .custom-date-inline {
+    width: 100%;
+    border-radius: 18px;
+  }
+
+  .custom-date-toggle {
+    width: 100%;
+  }
+
+  .custom-date-fields {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .custom-date-inline.active .custom-date-fields,
+  .custom-date-inline.expanded .custom-date-fields,
+  .custom-date-inline:focus-within .custom-date-fields {
+    max-width: 100%;
+    margin-top: 6px;
+    margin-left: 0;
+  }
+
   .toolbar > .search-input,
   .toolbar.wide > .search-input,
   .toolbar-inline-primary > .search-input,
@@ -2611,7 +2682,7 @@ body {
   }
 
   .date-input {
-    flex: 1 1 172px;
+    flex: 1 1 156px;
     width: auto;
     min-width: 0;
   }

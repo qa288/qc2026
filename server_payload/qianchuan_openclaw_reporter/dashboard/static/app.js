@@ -83,6 +83,7 @@ const state = {
     breakdown: loadRangeFilter("breakdown-range-filter", "day"),
     material: loadRangeFilter("material-range-filter", "day"),
   },
+  rangeEditorOpen: {},
   selectedPlanId: null,
   selectedEmployeeName: null,
   selectedProductKey: null,
@@ -237,6 +238,10 @@ const PERFORMANCE_SECTION_CONFIG = {
     applyEl: materialDateApply,
   },
 };
+
+Object.entries(state.performanceFilters).forEach(([sectionKey, filter]) => {
+  state.rangeEditorOpen[sectionKey] = filter.mode === "custom";
+});
 
 function loadSort(key, fallback) {
   try {
@@ -857,6 +862,10 @@ function renderRangeSwitch(container, activeRange) {
   });
 }
 
+function setRangeEditorOpen(sectionKey, open) {
+  state.rangeEditorOpen[sectionKey] = Boolean(open);
+}
+
 function syncSectionRangeControls(sectionKey) {
   const config = PERFORMANCE_SECTION_CONFIG[sectionKey];
   if (!config) return;
@@ -864,7 +873,13 @@ function syncSectionRangeControls(sectionKey) {
   renderRangeSwitch(config.switchEl, filter.mode);
   const customInline = config.startEl?.closest(".custom-date-inline");
   if (customInline) {
+    const expanded = filter.mode === "custom" || Boolean(state.rangeEditorOpen[sectionKey]);
     customInline.classList.toggle("active", filter.mode === "custom");
+    customInline.classList.toggle("expanded", expanded);
+    const toggle = customInline.querySelector('[data-role="custom-range-toggle"]');
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    }
   }
   if (config.startEl && document.activeElement !== config.startEl) config.startEl.value = filter.start || "";
   if (config.endEl && document.activeElement !== config.endEl) config.endEl.value = filter.end || "";
@@ -3058,6 +3073,7 @@ async function refreshMaterialSection(force = false) {
 async function applyQuickRange(sectionKey, mode) {
   const current = sectionFilter(sectionKey);
   if (current.mode === mode) return;
+  setRangeEditorOpen(sectionKey, false);
   setSectionFilter(sectionKey, { mode });
   try {
     if (sectionKey === "material") {
@@ -3083,6 +3099,7 @@ async function applyCustomRange(sectionKey) {
     window.alert("开始日期不能晚于结束日期");
     return;
   }
+  setRangeEditorOpen(sectionKey, true);
   setSectionFilter(sectionKey, { mode: "custom", start, end });
   try {
     if (sectionKey === "material") {
@@ -3107,7 +3124,21 @@ function bindRangeFilterControls(sectionKey) {
   config.applyEl?.addEventListener("click", async () => {
     await applyCustomRange(sectionKey);
   });
+  const toggle = config.startEl?.closest(".custom-date-inline")?.querySelector('[data-role="custom-range-toggle"]');
+  toggle?.addEventListener("click", () => {
+    const current = sectionFilter(sectionKey);
+    const nextOpen = !(current.mode === "custom" || state.rangeEditorOpen[sectionKey]);
+    setRangeEditorOpen(sectionKey, nextOpen);
+    syncSectionRangeControls(sectionKey);
+    if (nextOpen) {
+      config.startEl?.focus();
+    }
+  });
   [config.startEl, config.endEl].forEach((input) => {
+    input?.addEventListener("focus", () => {
+      setRangeEditorOpen(sectionKey, true);
+      syncSectionRangeControls(sectionKey);
+    });
     input?.addEventListener("keydown", async (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
