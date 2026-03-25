@@ -38,3 +38,25 @@
 - `DOCS/runtime/` 只记录当前实现事实，不替代正式方案。
 - 任何新文档都必须归类到 `DOCS/` 的现有分层中，禁止再新建平行文档根目录。
 - 代码、部署、运维调整后，必须同步回写 `DOCS/`，不能只改代码不改文档。
+
+## 专题真源
+
+同类信息只能有一个专题真源，其它文档只做摘要或引用，不重复展开。
+
+- 决策基线：
+  - [13_已确认决策基线](/Users/xy/千川/DOCS/standard/13_已确认决策基线.md)
+- 技术架构与部署基线：
+  - [03_目标技术架构与部署基线](/Users/xy/千川/DOCS/standard/03_目标技术架构与部署基线.md)
+- 角色、权限、关键词归属：
+  - [20_角色模型与运营工作台方案](/Users/xy/千川/DOCS/standard/20_角色模型与运营工作台方案.md)
+- 素材上传：
+  - [19_素材上传与批量投放方案](/Users/xy/千川/DOCS/standard/19_素材上传与批量投放方案.md)
+- 预警规则：
+  - [21_管理员预警规则页方案](/Users/xy/千川/DOCS/standard/21_管理员预警规则页方案.md)
+- 实施阶段与排期：
+  - [22_工作台重构与完整开发计划](/Users/xy/千川/DOCS/standard/22_工作台重构与完整开发计划.md)
+- 当前线上运行事实：
+  - [runtime/README.md](/Users/xy/千川/DOCS/runtime/README.md)
+  - [runtime/STANDARD.md](/Users/xy/千川/DOCS/runtime/STANDARD.md)
+
+如果同类信息在多份文档同时出现，以对应专题真源为准。

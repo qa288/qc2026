@@ -46,12 +46,23 @@
 - `docker-compose.dashboard.yml`
   - 现网编排基线
 
+当前线上部署边界：
+
+- `1Panel`
+  - 域名、证书、反向代理、容器观察
+- `docker-compose.dashboard.yml`
+  - 应用编排真源
+- 线上目录 `/opt/qianchuan/qianchuan_openclaw_reporter`
+  - 不是 Git 工作树
+  - 发布依赖“同步文件 + Compose 重建”
+
 禁止事项：
 
 - 不允许切回浏览器抓取、Cookie、`/nbs/api/*`
 - 不允许把正式业务调度放回 Web 进程
 - 不允许多实例独立刷新同一套 `refresh_token`
 - 不允许为了新功能再开一套平行页面或平行采集系统
+- 不允许只在 `1Panel` 页面手工改容器参数而不回写 Compose 文件
 
 ## 4. 同步与调度规则
 
