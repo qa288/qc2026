@@ -32,6 +32,8 @@
 - 前端：`Jinja2 + 原生 JS/CSS`
 - 访问端口：`9898`
 - 访问方式：公网访问 + 登录保护
+- 接口联调参考：
+  - [API_REFERENCE.md](./API_REFERENCE.md)
 - 运维检查接口：
   - `GET /healthz`
   - `GET /readyz`

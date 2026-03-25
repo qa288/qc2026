@@ -24,6 +24,7 @@
 
 - [FUNCTIONAL_SPEC.md](./FUNCTIONAL_SPEC.md)
 - [STANDARD.md](./STANDARD.md)
+- [API_REFERENCE.md](./API_REFERENCE.md)
 - [AGENTS.md](./AGENTS.md)
 - [QIANCHUAN_OFFICIAL_API_STANDARD.md](./capabilities/QIANCHUAN_OFFICIAL_API_STANDARD.md)
 - [QIANCHUAN_CAPABILITY_CATALOG.md](./capabilities/QIANCHUAN_CAPABILITY_CATALOG.md)
@@ -53,6 +54,8 @@
   - 长期标准文档
 - `FUNCTIONAL_SPEC.md`
   - 功能规格、已实现能力与重构验收基线
+- `API_REFERENCE.md`
+  - 当前线上接口参考，给前后端联调和同事开发直接使用
 - `AGENTS.md`
   - 当前目录的强制约束
 
