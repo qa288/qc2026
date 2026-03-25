@@ -101,9 +101,13 @@ const alertSummary = document.getElementById("alertSummary");
 const accountSearch = document.getElementById("accountSearch");
 const planSearch = document.getElementById("planSearch");
 const employeeSearch = document.getElementById("employeeSearch");
+const productSearch = document.getElementById("productSearch");
 const breakdownTitle = document.getElementById("breakdownTitle");
 const teamPanelTitle = document.getElementById("teamPanelTitle");
 const materialSearch = document.getElementById("materialSearch");
+const productTable = document.getElementById("productTable");
+const productDetail = document.getElementById("productDetail");
+const productRankPanel = document.getElementById("productRankPanel");
 const planAccountFilter = document.getElementById("planAccountFilter");
 const notificationForm = document.getElementById("notificationForm");
 const notificationStatus = document.getElementById("notificationStatus");
@@ -1636,7 +1640,7 @@ function renderEmployeeInteractions(rows) {
 }
 
 function renderProductInteractions(rows) {
-  if (!productDetail) return;
+  if (!productDetail || !productTable) return;
   productTable.querySelectorAll("tbody tr").forEach((rowEl) => {
     rowEl.addEventListener("click", () => {
       setSelectedProduct(String(rowEl.dataset.productKey || ""));
@@ -1722,7 +1726,7 @@ function renderEmployeeTable(rows) {
 
 function renderProductTable(rows) {
   if (!productTable || productRankPanel?.classList.contains("hidden")) return;
-  const query = productSearch.value.trim().toLowerCase();
+  const query = productSearch?.value.trim().toLowerCase() || "";
   const visibleRows = rows.filter((row) => {
     const haystack = [row.product_name, row.product_id, row.top_plan_name, row.top_account_name].join(" ").toLowerCase();
     return haystack.includes(query);

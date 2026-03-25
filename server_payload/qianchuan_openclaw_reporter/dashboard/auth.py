@@ -6,6 +6,8 @@ import hmac
 import secrets
 from typing import Any, Protocol
 
+from fastapi import Depends, HTTPException, Request, status
+
 
 def build_password_hash(password: str, iterations: int = 390000) -> str:
     salt = secrets.token_bytes(16)
@@ -44,8 +46,6 @@ def build_auth_dependencies(
     role_admin: str,
     role_supervisor: str,
 ):
-    from fastapi import Depends, HTTPException, Request, status
-
     def require_auth(request: Request) -> dict[str, Any]:
         user_id = request.session.get("user_id")
         if not user_id:
