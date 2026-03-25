@@ -54,12 +54,17 @@ const RULE_ENTITY_CONFIG = {
   },
 };
 
+const MATERIAL_PAGE_SIZE = 100;
+const MATERIAL_CACHE_TTL_MS = 55 * 1000;
+const MATERIAL_SEARCH_DEBOUNCE_MS = 180;
+
 const state = {
   payload: null,
   session: null,
   rangePayloads: {},
   planAssetCache: {},
   materialPayloads: {},
+  materialPayloadFetchedAt: {},
   users: [],
   catalogAccounts: [],
   userScopes: {},
@@ -83,6 +88,7 @@ const state = {
     material: loadRangeFilter("material-range-filter", "day"),
   },
   rangeEditorOpen: {},
+  materialPage: 1,
   selectedPlanId: null,
   selectedMaterialKey: null,
   selectedUserId: null,
@@ -97,6 +103,7 @@ const planTable = document.getElementById("planTable");
 const employeeTable = document.getElementById("employeeTable");
 const ruleTable = document.getElementById("ruleTable");
 const materialTable = document.getElementById("materialTable");
+const materialTablePager = document.getElementById("materialTablePager");
 const alertSummary = document.getElementById("alertSummary");
 const accountSearch = document.getElementById("accountSearch");
 const planSearch = document.getElementById("planSearch");
@@ -262,6 +269,14 @@ function loadPreference(key, fallback) {
 
 function savePreference(key, value) {
   localStorage.setItem(key, value);
+}
+
+function debounce(callback, waitMs) {
+  let timeoutId = 0;
+  return (...args) => {
+    window.clearTimeout(timeoutId);
+    timeoutId = window.setTimeout(() => callback(...args), waitMs);
+  };
 }
 
 function formatDateInputValue(value) {
@@ -937,6 +952,14 @@ function rangePayload(filter) {
 
 function materialRangePayload(filter) {
   return state.materialPayloads[performanceFilterKey(filter)] || null;
+}
+
+function latestMaterialSnapshotToken() {
+  return String(state.payload?.extendedSync?.snapshot_time || state.payload?.latest?.extendedSync?.snapshot_time || "").trim();
+}
+
+function materialRowsForCurrentFilter() {
+  return materialRangePayload(sectionFilter("material"))?.items || [];
 }
 
 function rangeLabel(filter) {
@@ -1846,6 +1869,56 @@ function syncSelectedMaterial(rows) {
   renderMaterialDetail(state.selectedMaterialKey);
 }
 
+function materialPagerPages(totalPages, currentPage) {
+  const pages = new Set([1, totalPages, currentPage - 1, currentPage, currentPage + 1]);
+  return [...pages].filter((page) => page >= 1 && page <= totalPages).sort((left, right) => left - right);
+}
+
+function renderMaterialPager(totalRows, currentPage, totalPages, startIndex, endIndex) {
+  if (!materialTablePager) return;
+  if (totalRows <= MATERIAL_PAGE_SIZE) {
+    materialTablePager.innerHTML = "";
+    materialTablePager.classList.add("hidden");
+    return;
+  }
+  const pages = materialPagerPages(totalPages, currentPage);
+  materialTablePager.classList.remove("hidden");
+  materialTablePager.innerHTML = `
+    <div class="table-pager-summary">显示 ${formatNumber(startIndex)}-${formatNumber(endIndex)} / ${formatNumber(totalRows)}，按页渲染以减少卡顿。</div>
+    <div class="table-pager-actions">
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage - 1}"
+        ${currentPage <= 1 ? "disabled" : ""}
+      >上一页</button>
+      ${pages.map((page, index) => `
+        ${index > 0 && page - pages[index - 1] > 1 ? '<span class="table-pager-ellipsis">...</span>' : ""}
+        <button
+          type="button"
+          class="button ghost compact table-page-button ${page === currentPage ? "is-active" : ""}"
+          data-page="${page}"
+          ${page === currentPage ? 'aria-current="page"' : ""}
+        >${formatNumber(page)}</button>
+      `).join("")}
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage + 1}"
+        ${currentPage >= totalPages ? "disabled" : ""}
+      >下一页</button>
+    </div>
+  `;
+  materialTablePager.querySelectorAll("button[data-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextPage = Number(button.dataset.page || 0);
+      if (!nextPage || nextPage === state.materialPage) return;
+      state.materialPage = nextPage;
+      renderMaterialTable(materialRowsForCurrentFilter());
+    });
+  });
+}
+
 function renderMaterialInteractions(rows) {
   if (materialDetail) {
     materialTable.querySelectorAll("tbody tr").forEach((rowEl) => {
@@ -1900,11 +1973,17 @@ function renderMaterialTable(rows) {
         { key: "advertiser_count", label: "账户数", sortable: true },
       ];
   const sorted = sortRows(visibleRows, state.materialSort);
+  const totalRows = sorted.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / MATERIAL_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(Number(state.materialPage) || 1, 1), totalPages);
+  const pageStart = totalRows ? (currentPage - 1) * MATERIAL_PAGE_SIZE : 0;
+  const pageRows = sorted.slice(pageStart, pageStart + MATERIAL_PAGE_SIZE);
+  state.materialPage = currentPage;
   const supportsMaterialDetail = Boolean(materialDetail);
   materialTable.innerHTML = `
     ${makeHeader(columns, state.materialSort, "material-sort")}
     <tbody>
-      ${sorted.map((row) => `
+      ${pageRows.map((row) => `
         <tr data-material-key="${escapeHtml(row.material_key)}" class="${supportsMaterialDetail && state.selectedMaterialKey === row.material_key ? "active-row" : ""}">
           <td>
             <div class="cell-primary">${escapeHtml(row.material_name || "未命名素材")}</div>
@@ -1951,14 +2030,29 @@ function renderMaterialTable(rows) {
       renderMaterialTable(rows);
     });
   });
+  renderMaterialPager(
+    totalRows,
+    currentPage,
+    totalPages,
+    totalRows ? pageStart + 1 : 0,
+    pageStart + pageRows.length,
+  );
   renderMaterialInteractions(rows);
 }
 
 async function fetchMaterialRankings(force = false) {
   const filter = sectionFilter("material");
   const cacheKey = performanceFilterKey(filter);
-  if (!force && state.materialPayloads[cacheKey]) {
-    return state.materialPayloads[cacheKey];
+  const cachedPayload = state.materialPayloads[cacheKey];
+  if (!force && cachedPayload) {
+    const expectedSnapshot = latestMaterialSnapshotToken();
+    const cachedSnapshot = String(cachedPayload.snapshot_time || "").trim();
+    const cachedAt = Number(state.materialPayloadFetchedAt[cacheKey] || 0);
+    const freshBySnapshot = Boolean(expectedSnapshot) && cachedSnapshot === expectedSnapshot;
+    const freshByAge = !expectedSnapshot && cachedAt > 0 && Date.now() - cachedAt < MATERIAL_CACHE_TTL_MS;
+    if (freshBySnapshot || freshByAge) {
+      return cachedPayload;
+    }
   }
   const params = new URLSearchParams();
   params.set("range", filter.mode);
@@ -1966,12 +2060,17 @@ async function fetchMaterialRankings(force = false) {
     params.set("start_date", filter.start);
     params.set("end_date", filter.end);
   }
-  const response = await fetch(`/api/material-rankings?${params.toString()}`);
-  if (!response.ok) {
-    throw new Error("material rankings fetch failed");
+  const response = await fetch(`/api/material-rankings?${params.toString()}`).catch(() => null);
+  if (!response || !response.ok) {
+    const errorPayload = response ? await response.json().catch(() => ({})) : {};
+    if (cachedPayload) {
+      return cachedPayload;
+    }
+    throw new Error(errorPayload.detail || "material rankings fetch failed");
   }
   const payload = await response.json();
   state.materialPayloads[cacheKey] = payload;
+  state.materialPayloadFetchedAt[cacheKey] = Date.now();
   return payload;
 }
 
@@ -3112,7 +3211,8 @@ async function applyQuickRange(sectionKey, mode) {
   setSectionFilter(sectionKey, { mode });
   try {
     if (sectionKey === "material") {
-      await refreshMaterialSection(true);
+      state.materialPage = 1;
+      await refreshMaterialSection(false);
       return;
     }
     await refreshPerformanceSections(true);
@@ -3138,7 +3238,8 @@ async function applyCustomRange(sectionKey) {
   setSectionFilter(sectionKey, { mode: "custom", start, end });
   try {
     if (sectionKey === "material") {
-      await refreshMaterialSection(true);
+      state.materialPage = 1;
+      await refreshMaterialSection(false);
       return;
     }
     await refreshPerformanceSections(true);
@@ -3183,6 +3284,10 @@ function bindRangeFilterControls(sectionKey) {
 }
 
 function bindInputs() {
+  const debouncedMaterialSearch = debounce(() => {
+    state.materialPage = 1;
+    renderMaterialTable(materialRowsForCurrentFilter());
+  }, MATERIAL_SEARCH_DEBOUNCE_MS);
   materialPreviewModal?.addEventListener("click", (event) => {
     const trigger = event.target.closest('[data-action="close-preview"]');
     if (trigger) {
@@ -3200,7 +3305,7 @@ function bindInputs() {
         const view = button.dataset.view || "overview";
         setActiveView(view);
         if (view === "materials") {
-          await refreshMaterialSection(true);
+          await refreshMaterialSection(false);
         }
         if (view === "uploads") {
           await fetchUploadTargets(true);
@@ -3217,7 +3322,7 @@ function bindInputs() {
   planSearch?.addEventListener("input", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
   employeeSearch?.addEventListener("input", () => renderEmployeeTable(breakdownRows(rangePayload(sectionFilter("breakdown")))));
   productSearch?.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
-  materialSearch?.addEventListener("input", () => renderMaterialTable(materialRangePayload(sectionFilter("material"))?.items || []));
+  materialSearch?.addEventListener("input", debouncedMaterialSearch);
   operatorMaterialSearch?.addEventListener("input", () => renderUserMatchedMaterialTable());
   toggleOperatorMaterialsButton?.addEventListener("click", async () => {
     const nextVisible = operatorMaterialContent?.classList.contains("hidden");
@@ -3651,7 +3756,7 @@ async function render(payload) {
   }
   if (state.activeView === "materials") {
     try {
-      await refreshMaterialSection(true);
+      await refreshMaterialSection(false);
     } catch (error) {
       console.error("refreshMaterialSection failed", error);
     }

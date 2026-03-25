@@ -1306,6 +1306,43 @@ body {
   background: rgba(20, 59, 47, 0.08);
 }
 
+.table-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.table-pager-summary {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.table-pager-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.table-page-button.is-active {
+  background: var(--brand);
+  color: #f8f3ea;
+  border-color: transparent;
+  box-shadow: 0 10px 18px rgba(20, 59, 47, 0.18);
+}
+
+.table-pager-ellipsis {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
 .th-sort::after {
   content: attr(data-sort-hint);
   display: inline-block;
