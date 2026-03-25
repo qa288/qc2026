@@ -345,6 +345,10 @@ function formatRate(value) {
   return Number(value || 0).toFixed(2);
 }
 
+function formatPercent(value) {
+  return `${Number(value || 0).toFixed(2)}%`;
+}
+
 function formatDateTime(value) {
   if (!value) return "-";
   return String(value).replace("T", " ").slice(0, 19);
@@ -719,6 +723,29 @@ function renderMarketingGoalBadge(row) {
   const tone = marketingGoalTone(text);
   const title = row.marketing_goal || text;
   return `<span class="pill marketing-goal-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
+}
+
+function enrichPlanRow(row) {
+  const statCost = Number(row?.stat_cost || 0);
+  const totalPayAmount = Number(row?.total_pay_amount || 0);
+  const settledPayAmount = Number(row?.settled_pay_amount || 0);
+  const orderCount = Number(row?.order_count || 0);
+  const settledOrderCount = Number(row?.settled_order_count || 0);
+  const refundAmount1h = Number(row?.refund_amount_1h || 0);
+  return {
+    ...row,
+    marketing_goal_text: row?.marketing_goal_text || row?.marketing_goal_label || row?.marketing_goal || "-",
+    status_text: row?.status_text || `${row?.status || ""}/${row?.opt_status || ""}`,
+    settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
+    settled_order_count: settledOrderCount,
+    pay_order_cost: orderCount > 0 ? Number((statCost / orderCount).toFixed(2)) : Number(row?.pay_order_cost || 0),
+    settled_amount_rate: totalPayAmount > 0
+      ? Number((settledPayAmount / totalPayAmount * 100).toFixed(2))
+      : Number(row?.settled_amount_rate || 0),
+    refund_rate_1h: totalPayAmount > 0
+      ? Number((refundAmount1h / totalPayAmount * 100).toFixed(2))
+      : Number(row?.refund_rate_1h || 0),
+  };
 }
 
 function notificationChannelOptions(current) {
@@ -2088,11 +2115,10 @@ async function renderPlanDetail(adId) {
   if (!planDetail || !planAssetSummary) return;
   const planFilter = sectionFilter("plan");
   const rows = rangePayload(planFilter)?.plans || [];
-  const row = rows.find((item) => item.ad_id === adId);
-  if (!row) return;
-  const orderCost = Number(row.order_count || 0) > 0 ? Number(row.stat_cost || 0) / Number(row.order_count || 0) : null;
+  const sourceRow = rows.find((item) => item.ad_id === adId);
+  if (!sourceRow) return;
+  const row = enrichPlanRow(sourceRow);
   const roiGap = Number(row.roi || 0) - Number(row.roi_goal || 0);
-  const payGap = Number(row.pay_amount || 0) - Number(row.stat_cost || 0);
   const currentRangeLabel = rangeLabel(planFilter);
   planDetailStage?.classList.remove("hidden");
   planDetail.className = "detail-panel";
@@ -2112,9 +2138,17 @@ async function renderPlanDetail(adId) {
       <div class="detail-stat"><span class="label">账户 ID</span><span class="value compact mono">${formatNumber(row.advertiser_id)}</span></div>
       <div class="detail-stat"><span class="label">目标 ROI</span><span class="value mono">${formatRate(row.roi_goal)}</span></div>
       <div class="detail-stat"><span class="label">ROI 差值</span><span class="value mono ${roiGap >= 0 ? "positive" : "negative"}">${roiGap >= 0 ? "+" : ""}${formatRate(roiGap)}</span></div>
-      <div class="detail-stat"><span class="label">单均成本</span><span class="value mono">${orderCost === null ? "-" : formatMoney(orderCost)}</span></div>
-      <div class="detail-stat"><span class="label">支付减消耗</span><span class="value mono ${payGap >= 0 ? "positive" : "negative"}">${payGap >= 0 ? "+" : ""}${formatMoney(payGap)}</span></div>
-      <div class="detail-stat detail-stat-wide"><span class="label">${escapeHtml(currentRangeLabel)}补充判断</span><span class="value compact">当前区间 ROI ${formatRate(row.roi)}，订单 ${formatNumber(row.order_count)}，支付 ${formatMoney(row.pay_amount)}。</span></div>
+      <div class="detail-stat"><span class="label">支付金额</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
+      <div class="detail-stat"><span class="label">整体成交金额</span><span class="value mono">${formatMoney(row.total_pay_amount)}</span></div>
+      <div class="detail-stat"><span class="label">净成交金额</span><span class="value mono">${formatMoney(row.settled_pay_amount)}</span></div>
+      <div class="detail-stat"><span class="label">整体支付 ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+      <div class="detail-stat"><span class="label">净成交 ROI</span><span class="value mono">${formatRate(row.settled_roi)}</span></div>
+      <div class="detail-stat"><span class="label">整体成交订单数</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
+      <div class="detail-stat"><span class="label">净成交订单数</span><span class="value mono">${formatNumber(row.settled_order_count)}</span></div>
+      <div class="detail-stat"><span class="label">整体成交订单成本</span><span class="value mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</span></div>
+      <div class="detail-stat"><span class="label">净成交金额结算率</span><span class="value mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</span></div>
+      <div class="detail-stat"><span class="label">1 小时内退款率</span><span class="value mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}</span></div>
+      <div class="detail-stat detail-stat-wide"><span class="label">${escapeHtml(currentRangeLabel)}补充判断</span><span class="value compact">当前区间整体支付 ROI ${formatRate(row.roi)}，整体成交 ${formatMoney(row.total_pay_amount)}，净成交 ${formatMoney(row.settled_pay_amount)}，1 小时内退款率 ${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}。</span></div>
     </div>
   `;
   await renderPlanAssets(adId);
@@ -2176,20 +2210,20 @@ function renderPlanTable(plans) {
   const columns = [
     { key: "ad_name", label: "计划", sortable: true },
     { key: "stat_cost", label: "消耗", sortable: true },
-    { key: "roi", label: "ROI", sortable: true },
-    { key: "roi_goal", label: "目标ROI", sortable: true },
-    { key: "pay_amount", label: "支付", sortable: true },
-    { key: "order_count", label: "订单", sortable: true },
+    { key: "total_pay_amount", label: "整体成交", sortable: true },
+    { key: "settled_pay_amount", label: "净成交", sortable: true },
+    { key: "roi", label: "支付ROI", sortable: true },
+    { key: "settled_roi", label: "净ROI", sortable: true },
+    { key: "order_count", label: "整体订单", sortable: true },
+    { key: "settled_order_count", label: "净订单", sortable: true },
+    { key: "pay_order_cost", label: "订单成本", sortable: true },
+    { key: "settled_amount_rate", label: "结算率", sortable: true },
+    { key: "refund_rate_1h", label: "1h退款率", sortable: true },
     { key: "product_name", label: "商品 / 主播", sortable: true },
     { key: "advertiser_name", label: "账户", sortable: true },
     { key: "status_text", label: "投放状态", sortable: true },
-    { key: "marketing_goal_text", label: "营销目标", sortable: true },
   ];
-  const enrichedRows = plans.map((row) => ({
-    ...row,
-    marketing_goal_text: row.marketing_goal_text || row.marketing_goal_label || row.marketing_goal || "-",
-    status_text: row.status_text || `${row.status || ""}/${row.opt_status || ""}`,
-  }));
+  const enrichedRows = plans.map((row) => enrichPlanRow(row));
   const rows = enrichedRows.filter((row) => {
     const haystack = [
       row.ad_name,
@@ -2220,10 +2254,15 @@ function renderPlanTable(plans) {
             </div>
           </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
+          <td class="mono">${formatMoney(row.total_pay_amount)}</td>
+          <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
-          <td class="mono">${formatRate(row.roi_goal)}</td>
-          <td class="mono">${formatMoney(row.pay_amount)}</td>
+          <td class="mono">${formatRate(row.settled_roi)}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
+          <td class="mono">${formatNumber(row.settled_order_count)}</td>
+          <td class="mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</td>
+          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</td>
+          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}</td>
           <td>
             <div class="cell-primary">${escapeHtml(row.product_name || "-")}</div>
             <div class="cell-subline">
@@ -2233,7 +2272,6 @@ function renderPlanTable(plans) {
           </td>
           <td>${escapeHtml(row.advertiser_name)}</td>
           <td>${renderPlanStatusBadge(row)}</td>
-          <td>${renderMarketingGoalBadge(row)}</td>
         </tr>
       `).join("")}
     </tbody>

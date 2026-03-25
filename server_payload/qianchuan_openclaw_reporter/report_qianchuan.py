@@ -54,6 +54,14 @@ PLAN_REPORT_FIELDS = [
     "total_prepay_and_pay_order_roi2",
     "total_pay_order_count_for_roi2",
     "total_pay_order_gmv_for_roi2",
+    "total_pay_order_gmv_include_coupon_for_roi2",
+    "total_order_settle_amount_for_roi2_1h",
+    "total_prepay_and_pay_settle_roi2_1h",
+    "total_order_settle_count_for_roi2_1h",
+    "total_cost_per_pay_order_for_roi2",
+    "total_order_settle_amount_rate_for_roi2_1h",
+    "total_refund_order_gmv_for_roi2_1h_rate",
+    "total_refund_order_gmv_for_roi2_1h_all",
 ]
 
 UNI_PROMOTION_DATA_TOPICS = [
@@ -158,6 +166,14 @@ class PlanSummary:
     roi: float
     order_count: int
     pay_amount: float
+    total_pay_amount: float
+    settled_pay_amount: float
+    settled_roi: float
+    settled_order_count: int
+    pay_order_cost: float
+    settled_amount_rate: float
+    refund_rate_1h: float
+    refund_amount_1h: float
 
 
 class ApiError(RuntimeError):
@@ -1069,6 +1085,13 @@ class OceanEngineClient:
                     room_items = item.get("room_info") or []
                     first_product = product_items[0] if product_items else {}
                     first_room = room_items[0] if room_items else {}
+                    stat_cost = normalize_plan_money(stats_info.get("stat_cost"))
+                    order_count = int(float(stats_info.get("total_pay_order_count_for_roi2", 0.0) or 0.0))
+                    pay_amount = normalize_plan_money(stats_info.get("total_pay_order_gmv_for_roi2"))
+                    total_pay_amount = normalize_plan_money(stats_info.get("total_pay_order_gmv_include_coupon_for_roi2"))
+                    settled_pay_amount = normalize_plan_money(stats_info.get("total_order_settle_amount_for_roi2_1h"))
+                    settled_order_count = int(float(stats_info.get("total_order_settle_count_for_roi2_1h", 0.0) or 0.0))
+                    refund_amount_1h = normalize_plan_money(stats_info.get("total_refund_order_gmv_for_roi2_1h_all"))
                     plans.append(
                         PlanSummary(
                             advertiser_id=advertiser_id,
@@ -1082,10 +1105,34 @@ class OceanEngineClient:
                             status=str(ad_info.get("status") or ""),
                             opt_status=str(ad_info.get("opt_status") or ""),
                             roi_goal=round(float(ad_info.get("roi2_goal", 0.0) or 0.0), 2),
-                            stat_cost=normalize_plan_money(stats_info.get("stat_cost")),
+                            stat_cost=stat_cost,
                             roi=round(float(stats_info.get("total_prepay_and_pay_order_roi2", 0.0) or 0.0), 2),
-                            order_count=int(float(stats_info.get("total_pay_order_count_for_roi2", 0.0) or 0.0)),
-                            pay_amount=normalize_plan_money(stats_info.get("total_pay_order_gmv_for_roi2")),
+                            order_count=order_count,
+                            pay_amount=pay_amount,
+                            total_pay_amount=total_pay_amount,
+                            settled_pay_amount=settled_pay_amount,
+                            settled_roi=derive_ratio(
+                                settled_pay_amount,
+                                stat_cost,
+                                stats_info.get("total_prepay_and_pay_settle_roi2_1h"),
+                            ),
+                            settled_order_count=settled_order_count,
+                            pay_order_cost=derive_ratio(
+                                stat_cost,
+                                order_count,
+                                normalize_plan_money(stats_info.get("total_cost_per_pay_order_for_roi2")),
+                            ),
+                            settled_amount_rate=derive_percent(
+                                settled_pay_amount,
+                                total_pay_amount,
+                                stats_info.get("total_order_settle_amount_rate_for_roi2_1h"),
+                            ),
+                            refund_rate_1h=derive_percent(
+                                refund_amount_1h,
+                                total_pay_amount,
+                                stats_info.get("total_refund_order_gmv_for_roi2_1h_rate"),
+                            ),
+                            refund_amount_1h=refund_amount_1h,
                         )
                     )
                 page_info = data.get("page_info") or {}
@@ -1123,6 +1170,22 @@ def normalize_plan_money(value: Any) -> float:
 
 def normalize_account_fund_money(value: Any) -> float:
     return round(float(value or 0.0) / ACCOUNT_FUND_MONEY_SCALE, 2)
+
+
+def normalize_metric(value: Any) -> float:
+    return round(float(value or 0.0), 2)
+
+
+def derive_ratio(numerator: float, denominator: float, fallback: Any = 0.0) -> float:
+    if float(denominator or 0.0) > 0:
+        return round(float(numerator or 0.0) / float(denominator or 0.0), 2)
+    return normalize_metric(fallback)
+
+
+def derive_percent(numerator: float, denominator: float, fallback: Any = 0.0) -> float:
+    if float(denominator or 0.0) > 0:
+        return round(float(numerator or 0.0) / float(denominator or 0.0) * 100.0, 2)
+    return normalize_metric(fallback)
 
 
 def get_plan_marketing_goals(config: dict[str, Any]) -> list[str]:

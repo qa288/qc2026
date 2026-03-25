@@ -423,6 +423,14 @@ class DashboardService:
                     roi REAL NOT NULL,
                     order_count INTEGER NOT NULL,
                     pay_amount REAL NOT NULL,
+                    total_pay_amount REAL NOT NULL DEFAULT 0,
+                    settled_pay_amount REAL NOT NULL DEFAULT 0,
+                    settled_roi REAL NOT NULL DEFAULT 0,
+                    settled_order_count INTEGER NOT NULL DEFAULT 0,
+                    pay_order_cost REAL NOT NULL DEFAULT 0,
+                    settled_amount_rate REAL NOT NULL DEFAULT 0,
+                    refund_rate_1h REAL NOT NULL DEFAULT 0,
+                    refund_amount_1h REAL NOT NULL DEFAULT 0,
                     PRIMARY KEY (snapshot_time, ad_id)
                 );
 
@@ -885,6 +893,7 @@ class DashboardService:
                 ON shared_wallet_account_relations (main_wallet_id, advertiser_id, snapshot_time);
                 """
             )
+            self._ensure_plan_snapshot_schema_locked(conn)
             self._ensure_app_users_schema_locked(conn)
             self._ensure_material_upload_schema_locked(conn)
             self._ensure_material_preview_schema_locked(conn)
@@ -942,6 +951,16 @@ class DashboardService:
             self._ensure_column_locked(conn, table_name, "cover_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column_locked(conn, table_name, "aweme_item_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column_locked(conn, table_name, "video_url", "TEXT NOT NULL DEFAULT ''")
+
+    def _ensure_plan_snapshot_schema_locked(self, conn: Any) -> None:
+        self._ensure_column_locked(conn, "plan_snapshots", "total_pay_amount", "REAL NOT NULL DEFAULT 0")
+        self._ensure_column_locked(conn, "plan_snapshots", "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
+        self._ensure_column_locked(conn, "plan_snapshots", "settled_roi", "REAL NOT NULL DEFAULT 0")
+        self._ensure_column_locked(conn, "plan_snapshots", "settled_order_count", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column_locked(conn, "plan_snapshots", "pay_order_cost", "REAL NOT NULL DEFAULT 0")
+        self._ensure_column_locked(conn, "plan_snapshots", "settled_amount_rate", "REAL NOT NULL DEFAULT 0")
+        self._ensure_column_locked(conn, "plan_snapshots", "refund_rate_1h", "REAL NOT NULL DEFAULT 0")
+        self._ensure_column_locked(conn, "plan_snapshots", "refund_amount_1h", "REAL NOT NULL DEFAULT 0")
 
     @contextmanager
     def db(self) -> Any:
@@ -1956,6 +1975,20 @@ class DashboardService:
         item["status_text"] = format_plan_status_text(item["status"], item["opt_status"])
         item["status_code_text"] = f"{item['status']} / {item['opt_status']}".strip(" /")
         return item
+
+    @staticmethod
+    def _plan_ratio(numerator: Any, denominator: Any) -> float:
+        denominator_value = float(denominator or 0.0)
+        if denominator_value <= 0:
+            return 0.0
+        return round(float(numerator or 0.0) / denominator_value, 2)
+
+    @staticmethod
+    def _plan_percent(numerator: Any, denominator: Any) -> float:
+        denominator_value = float(denominator or 0.0)
+        if denominator_value <= 0:
+            return 0.0
+        return round(float(numerator or 0.0) / denominator_value * 100.0, 2)
 
     @staticmethod
     def _employee_name(value: Any) -> str:
@@ -4496,21 +4529,52 @@ class DashboardService:
                 group["stat_cost"] = 0.0
                 group["pay_amount"] = 0.0
                 group["order_count"] = 0
+                group["total_pay_amount"] = 0.0
+                group["settled_pay_amount"] = 0.0
+                group["settled_order_count"] = 0
+                group["refund_amount_1h"] = 0.0
                 groups[ad_id] = group
             group["stat_cost"] = round(float(group.get("stat_cost", 0.0) or 0.0) + float(row.get("stat_cost", 0.0) or 0.0), 2)
             group["pay_amount"] = round(float(group.get("pay_amount", 0.0) or 0.0) + float(row.get("pay_amount", 0.0) or 0.0), 2)
             group["order_count"] = int(group.get("order_count", 0) or 0) + int(float(row.get("order_count", 0.0) or 0.0))
+            group["total_pay_amount"] = round(
+                float(group.get("total_pay_amount", 0.0) or 0.0) + float(row.get("total_pay_amount", 0.0) or 0.0),
+                2,
+            )
+            group["settled_pay_amount"] = round(
+                float(group.get("settled_pay_amount", 0.0) or 0.0) + float(row.get("settled_pay_amount", 0.0) or 0.0),
+                2,
+            )
+            group["settled_order_count"] = int(group.get("settled_order_count", 0) or 0) + int(
+                float(row.get("settled_order_count", 0.0) or 0.0)
+            )
+            group["refund_amount_1h"] = round(
+                float(group.get("refund_amount_1h", 0.0) or 0.0) + float(row.get("refund_amount_1h", 0.0) or 0.0),
+                2,
+            )
 
         items: list[dict[str, Any]] = []
         for ad_id, group in groups.items():
             stat_cost = round(float(group.get("stat_cost", 0.0) or 0.0), 2)
             pay_amount = round(float(group.get("pay_amount", 0.0) or 0.0), 2)
             order_count = int(group.get("order_count", 0) or 0)
+            total_pay_amount = round(float(group.get("total_pay_amount", 0.0) or 0.0), 2)
+            settled_pay_amount = round(float(group.get("settled_pay_amount", 0.0) or 0.0), 2)
+            settled_order_count = int(group.get("settled_order_count", 0) or 0)
+            refund_amount_1h = round(float(group.get("refund_amount_1h", 0.0) or 0.0), 2)
             group["ad_id"] = ad_id
             group["stat_cost"] = stat_cost
             group["pay_amount"] = pay_amount
             group["order_count"] = order_count
-            group["roi"] = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            group["total_pay_amount"] = total_pay_amount
+            group["settled_pay_amount"] = settled_pay_amount
+            group["settled_order_count"] = settled_order_count
+            group["refund_amount_1h"] = refund_amount_1h
+            group["roi"] = self._plan_ratio(pay_amount, stat_cost)
+            group["settled_roi"] = self._plan_ratio(settled_pay_amount, stat_cost)
+            group["pay_order_cost"] = self._plan_ratio(stat_cost, order_count)
+            group["settled_amount_rate"] = self._plan_percent(settled_pay_amount, total_pay_amount)
+            group["refund_rate_1h"] = self._plan_percent(refund_amount_1h, total_pay_amount)
             items.append(group)
         items.sort(
             key=lambda item: (
@@ -4581,7 +4645,7 @@ class DashboardService:
             wallet_relation_items = self._snapshot_wallet_relations(conn, latest_snapshot_time)
 
         account_items = self._aggregate_account_snapshots([dict(row) for row in account_rows])
-        plan_items = self._aggregate_plan_snapshots([dict(row) for row in plan_rows])
+        plan_items = [self._decorate_plan_item(item) for item in self._aggregate_plan_snapshots([dict(row) for row in plan_rows])]
 
         total_cost = round(sum(float(item.get("stat_cost", 0.0) or 0.0) for item in account_items if bool(item.get("ok", True))), 2)
         total_pay = round(sum(float(item.get("pay_amount", 0.0) or 0.0) for item in account_items if bool(item.get("ok", True))), 2)
@@ -4938,8 +5002,10 @@ class DashboardService:
                 INSERT INTO plan_snapshots (
                     snapshot_time, advertiser_id, advertiser_name, ad_id, ad_name,
                     product_id, product_name, anchor_name, marketing_goal, status,
-                    opt_status, roi_goal, stat_cost, roi, order_count, pay_amount
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    opt_status, roi_goal, stat_cost, roi, order_count, pay_amount,
+                    total_pay_amount, settled_pay_amount, settled_roi, settled_order_count,
+                    pay_order_cost, settled_amount_rate, refund_rate_1h, refund_amount_1h
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -4959,6 +5025,14 @@ class DashboardService:
                         item["roi"],
                         item["order_count"],
                         item["pay_amount"],
+                        item.get("total_pay_amount", 0.0),
+                        item.get("settled_pay_amount", 0.0),
+                        item.get("settled_roi", 0.0),
+                        item.get("settled_order_count", 0),
+                        item.get("pay_order_cost", 0.0),
+                        item.get("settled_amount_rate", 0.0),
+                        item.get("refund_rate_1h", 0.0),
+                        item.get("refund_amount_1h", 0.0),
                     )
                     for item in payload["plans"]
                 ],
