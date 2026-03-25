@@ -60,11 +60,8 @@ const state = {
   rangePayloads: {},
   planAssetCache: {},
   materialPayloads: {},
-  employees: [],
   users: [],
   catalogAccounts: [],
-  employeeKeywords: {},
-  employeeBindings: {},
   userScopes: {},
   userKeywords: {},
   userMatchedMaterials: {},
@@ -72,8 +69,6 @@ const state = {
   uploadJobs: [],
   uploadSelectedPlanIds: [],
   uploadFiles: [],
-  matchPreview: null,
-  unassignedPool: null,
   unassignedScope: "all",
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
@@ -92,7 +87,6 @@ const state = {
   selectedEmployeeName: null,
   selectedProductKey: null,
   selectedMaterialKey: null,
-  selectedEmployeeId: null,
   selectedUserId: null,
   selectedUserScopeIds: [],
   editingRuleId: null,
@@ -172,24 +166,6 @@ const materialDateEnd = document.getElementById("materialDateEnd");
 const materialDateApply = document.getElementById("materialDateApply");
 const materialSyncMeta = document.getElementById("materialSyncMeta");
 const materialsPanelTitle = document.getElementById("materialsPanelTitle");
-const employeeManagerTable = document.getElementById("employeeManagerTable");
-const employeeForm = document.getElementById("employeeForm");
-const employeeFormReset = document.getElementById("employeeFormReset");
-const employeeEditorStatus = document.getElementById("employeeEditorStatus");
-const ownershipHeadMeta = document.getElementById("ownershipHeadMeta");
-const ownershipReadonlyBanner = document.getElementById("ownershipReadonlyBanner");
-const keywordForm = document.getElementById("keywordForm");
-const keywordStatus = document.getElementById("keywordStatus");
-const keywordTable = document.getElementById("keywordTable");
-const matchPreviewForm = document.getElementById("matchPreviewForm");
-const matchKeywordInput = document.getElementById("matchKeywordInput");
-const matchScopeSelect = document.getElementById("matchScopeSelect");
-const matchPreviewMeta = document.getElementById("matchPreviewMeta");
-const matchPreviewTable = document.getElementById("matchPreviewTable");
-const bindingTable = document.getElementById("bindingTable");
-const unassignedScopeSelect = document.getElementById("unassignedScopeSelect");
-const unassignedMeta = document.getElementById("unassignedMeta");
-const unassignedTable = document.getElementById("unassignedTable");
 const userTable = document.getElementById("userTable");
 const userForm = document.getElementById("userForm");
 const userFormReset = document.getElementById("userFormReset");
@@ -2739,26 +2715,26 @@ function applyRoleViewPolicy() {
     overviewSystemRail.classList.toggle("hidden", !admin);
   }
   if (overviewAlertTitle) {
-    overviewAlertTitle.textContent = admin ? "老板关注" : supervisor ? "范围关注" : "今日重点";
+    overviewAlertTitle.textContent = operator ? "今日重点" : "重点";
   }
   if (breakdownTitle) {
     breakdownTitle.textContent = operator ? "团队排名" : "运营排名";
   }
   if (teamPanelTitle) {
-    teamPanelTitle.textContent = operator ? "团队排名" : "运营账号排名";
+    teamPanelTitle.textContent = operator ? "团队排名" : "运营账号";
   }
   if (materialsPanelTitle) {
-    materialsPanelTitle.textContent = operator ? "我的素材" : "素材效果排行";
+    materialsPanelTitle.textContent = operator ? "我的素材" : "素材排行";
   }
   if (materialSearch) {
     materialSearch.placeholder = operator ? "搜索素材名称" : "搜索素材";
   }
   if (heroCopy) {
     heroCopy.textContent = admin
-      ? "账户、计划、素材、运营、上传、权限和预警。"
+      ? "账户、计划、素材、运营。"
       : supervisor
-        ? "查看授权范围内的账户、计划、素材和运营排名；按需上传素材。"
-        : "查看我的素材、团队排名和今日总消耗。";
+        ? "范围内账户、计划、素材。"
+        : "我的素材、团队排名。";
   }
   const allowedViews = admin
     ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "uploads", "access", "signals"])
@@ -2775,442 +2751,13 @@ function applyRoleViewPolicy() {
     const fallback = allowedViews.has("overview") ? "overview" : Array.from(allowedViews)[0] || "overview";
     setActiveView(fallback);
   }
-  setFormReadOnly(employeeForm, !admin);
-  setFormReadOnly(keywordForm, !admin);
-  matchPreviewForm?.querySelectorAll("button").forEach((button) => {
-    button.disabled = false;
-  });
-  employeeFormReset && (employeeFormReset.disabled = !admin);
   userFormReset && (userFormReset.disabled = !admin);
-}
-
-function selectedEmployeeRecord() {
-  return state.employees.find((item) => Number(item.id) === Number(state.selectedEmployeeId)) || null;
 }
 
 function selectedUserRecord() {
   return state.users.find((item) => Number(item.id) === Number(state.selectedUserId)) || null;
 }
 
-function resetEmployeeFormState() {
-  state.selectedEmployeeId = null;
-  if (employeeForm) employeeForm.reset();
-  const enabledInput = employeeForm?.querySelector('input[name="enabled"]');
-  if (enabledInput) enabledInput.checked = true;
-  setInlineFeedback(
-    employeeEditorStatus,
-    isAdmin() ? "新建归属主体后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。",
-    "neutral",
-  );
-  setInlineFeedback(keywordStatus, "先选归属主体，再加关键词。", "neutral");
-  keywordTable.innerHTML = '<tbody><tr><td colspan="6" class="empty-cell">先选择归属主体，再维护关键词。</td></tr></tbody>';
-  bindingTable.innerHTML = '<tbody><tr><td colspan="5" class="empty-cell">先选择归属主体，再维护人工绑定。</td></tr></tbody>';
-  if (isAdmin()) focusFirstInput(employeeForm, 'input[name="display_name"]');
-}
-
-function fillEmployeeForm(employee) {
-  if (!employeeForm) return;
-  employeeForm.querySelector('input[name="display_name"]').value = employee?.display_name || "";
-  employeeForm.querySelector('input[name="note"]').value = employee?.note || "";
-  employeeForm.querySelector('input[name="enabled"]').checked = Boolean(employee?.enabled);
-  setInlineFeedback(
-    employeeEditorStatus,
-    employee
-      ? `${isAdmin() ? "当前编辑" : "当前查看"}：${employee.display_name} · 关键词 ${formatNumber(employee.keyword_count || 0)} · 绑定 ${formatNumber(employee.binding_count || 0)}`
-      : (isAdmin() ? "新建归属主体后，再继续配置关键词和人工绑定。" : "当前账号只读，可查看归属结果与命中明细。"),
-    "neutral",
-  );
-  setInlineFeedback(
-    keywordStatus,
-    employee ? `正在为 ${employee.display_name} 维护关键词。` : "先选归属主体，再加关键词。",
-    "neutral",
-  );
-}
-
-function renderEmployeeManagerTable() {
-  if (!employeeManagerTable) return;
-  employeeManagerTable.innerHTML = `
-    <thead>
-      <tr>
-        <th>归属主体</th>
-        <th>关键词</th>
-        <th>绑定</th>
-        <th>状态</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${state.employees.length ? state.employees.map((item) => `
-        <tr data-employee-id="${item.id}" class="${Number(state.selectedEmployeeId) === Number(item.id) ? "active-row" : ""}">
-          <td>${escapeHtml(item.display_name)}</td>
-          <td class="mono">${formatNumber(item.keyword_count || 0)}</td>
-          <td class="mono">${formatNumber(item.binding_count || 0)}</td>
-          <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
-        </tr>
-      `).join("") : '<tr><td colspan="4" class="empty-cell">还没有归属主体，请先创建。</td></tr>'}
-    </tbody>
-  `;
-  employeeManagerTable.querySelectorAll("tbody tr[data-employee-id]").forEach((row) => {
-    row.addEventListener("click", async () => {
-      await selectEmployeeManager(Number(row.dataset.employeeId));
-    });
-  });
-}
-
-function renderKeywordTable() {
-  const employee = selectedEmployeeRecord();
-  const rows = employee ? state.employeeKeywords[employee.id] || [] : [];
-  keywordTable.innerHTML = `
-    <thead>
-      <tr>
-        <th>关键词</th>
-        <th>范围</th>
-        <th>优先级</th>
-        <th>状态</th>
-        <th>操作</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${employee ? (rows.length ? rows.map((item) => `
-        <tr>
-          <td>${escapeHtml(item.keyword)}</td>
-          <td>${escapeHtml(keywordScopeLabel(item.scope))}</td>
-          <td class="mono">${formatNumber(item.priority)}</td>
-          <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
-          <td>
-            ${isAdmin() ? `<button type="button" class="button ghost delete-keyword" data-id="${item.id}">删除</button>` : '<span class="detail-sub">只读</span>'}
-          </td>
-        </tr>
-      `).join("") : '<tr><td colspan="5" class="empty-cell">当前还没有关键词。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属主体。</td></tr>'}
-    </tbody>
-  `;
-  keywordTable.querySelectorAll(".delete-keyword").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await fetch(`/api/employee-keywords/${button.dataset.id}`, { method: "DELETE" });
-      if (employee) {
-        await fetchEmployeeKeywords(employee.id, true);
-        await fetchEmployees(true);
-        fillEmployeeForm(selectedEmployeeRecord());
-        renderEmployeeManagerTable();
-        await fetchDashboard();
-        setInlineFeedback(keywordStatus, `已删除关键词，${employee.display_name} 的归属规则已刷新。`, "success");
-      }
-    });
-  });
-}
-
-function renderBindingTable() {
-  const employee = selectedEmployeeRecord();
-  const rows = employee ? state.employeeBindings[employee.id] || [] : [];
-  bindingTable.innerHTML = `
-    <thead>
-      <tr>
-        <th>类型</th>
-        <th>对象</th>
-        <th>标识</th>
-        <th>备注</th>
-        <th>操作</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${employee ? (rows.length ? rows.map((item) => `
-        <tr>
-          <td>${escapeHtml(bindingTypeLabel(item.object_type))}</td>
-          <td>${escapeHtml(item.object_label || "--")}</td>
-          <td class="mono">${escapeHtml(item.object_key)}</td>
-          <td>${escapeHtml(item.note || "--")}</td>
-          <td>${isAdmin() ? `<button type="button" class="button ghost delete-binding" data-id="${item.id}">删除</button>` : '<span class="detail-sub">只读</span>'}</td>
-        </tr>
-      `).join("") : '<tr><td colspan="5" class="empty-cell">当前还没有人工绑定。</td></tr>') : '<tr><td colspan="5" class="empty-cell">先选择归属主体。</td></tr>'}
-    </tbody>
-  `;
-  bindingTable.querySelectorAll(".delete-binding").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await fetch(`/api/employee-bindings/${button.dataset.id}`, { method: "DELETE" });
-      if (employee) {
-        await fetchEmployeeBindings(employee.id, true);
-        await fetchEmployees(true);
-        fillEmployeeForm(selectedEmployeeRecord());
-        renderEmployeeManagerTable();
-        await fetchDashboard();
-        setInlineFeedback(matchPreviewMeta, `已删除人工绑定，${employee.display_name} 的归属结果已刷新。`, "success");
-      }
-    });
-  });
-}
-
-function flattenMatchPreview(preview) {
-  if (!preview?.items) return [];
-  const sections = [
-    ["account", preview.items.accounts || []],
-    ["plan", preview.items.plans || []],
-    ["product", preview.items.products || []],
-    ["material", preview.items.materials || []],
-  ];
-  return sections.flatMap(([objectType, rows]) => rows.map((row) => ({
-    object_type: objectType,
-    object_key: objectType === "account"
-      ? String(row.advertiser_id)
-      : objectType === "plan"
-        ? String(row.ad_id)
-        : objectType === "product"
-          ? String(row.product_key || row.product_id || row.product_name || "")
-          : String(row.material_key || row.material_id || row.material_name || ""),
-    object_label: objectType === "account"
-      ? String(row.advertiser_name || "")
-      : objectType === "plan"
-        ? String(row.ad_name || "")
-        : objectType === "product"
-          ? String(row.product_name || row.product_id || "")
-          : String(row.material_name || row.material_id || ""),
-    account_name: String(row.advertiser_name || ""),
-    plan_name: String(row.ad_name || ""),
-  })));
-}
-
-function renderMatchPreview() {
-  const employee = selectedEmployeeRecord();
-  const rows = flattenMatchPreview(state.matchPreview);
-  setInlineFeedback(
-    matchPreviewMeta,
-    employee
-      ? `当前归属主体：${employee.display_name} · 命中 ${formatNumber(rows.length)} 条。`
-      : "先选归属主体，再预览。",
-    "neutral",
-  );
-  matchPreviewTable.innerHTML = `
-    <thead>
-      <tr>
-        <th>类型</th>
-        <th>对象</th>
-        <th>所属账户 / 计划</th>
-        <th>操作</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${rows.length ? rows.map((row) => `
-        <tr>
-          <td>${escapeHtml(bindingTypeLabel(row.object_type))}</td>
-          <td>${escapeHtml(row.object_label || "--")}<br /><span class="detail-sub mono">${escapeHtml(row.object_key || "--")}</span></td>
-          <td>${escapeHtml([row.account_name, row.plan_name].filter(Boolean).join(" / ") || "--")}</td>
-          <td>
-            ${employee && isAdmin() ? `<button type="button" class="button ghost bind-preview" data-type="${escapeHtml(row.object_type)}" data-key="${escapeHtml(row.object_key)}" data-label="${escapeHtml(row.object_label)}">绑定到当前归属主体</button>` : employee ? '<span class="detail-sub">当前账号只读</span>' : '<span class="detail-sub">先选择归属主体</span>'}
-          </td>
-        </tr>
-      `).join("") : '<tr><td colspan="4" class="empty-cell">输入关键词并预览后，这里会展示命中的账户、计划、商品和素材。</td></tr>'}
-    </tbody>
-  `;
-  matchPreviewTable.querySelectorAll(".bind-preview").forEach((button) => {
-    button.addEventListener("click", async () => {
-      if (!employee) return;
-      const payload = {
-        object_type: button.dataset.type,
-        object_key: button.dataset.key,
-        object_label: button.dataset.label,
-        note: "由命中预览一键绑定",
-      };
-      const response = await fetch(`/api/employees/${employee.id}/bindings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) {
-        const errorPayload = await response.json().catch(() => ({}));
-        window.alert(errorPayload.detail || "人工绑定失败");
-        return;
-      }
-      await fetchEmployeeBindings(employee.id, true);
-      await fetchEmployees(true);
-      fillEmployeeForm(selectedEmployeeRecord());
-      renderEmployeeManagerTable();
-      await fetchDashboard();
-      setInlineFeedback(matchPreviewMeta, `已绑定到 ${employee.display_name}，榜单会按新归属刷新。`, "success");
-    });
-  });
-}
-
-async function fetchUnassignedPool(force = false) {
-  const filter = sectionFilter("plan");
-  const params = new URLSearchParams({ range: filter.mode, scope: state.unassignedScope || "all" });
-  if (filter.mode === "custom") {
-    params.set("start_date", filter.start);
-    params.set("end_date", filter.end);
-  }
-  if (!force && state.unassignedPool && state.unassignedPool.cacheKey === params.toString()) {
-    return state.unassignedPool;
-  }
-  const response = await fetch(`/api/unassigned-candidates?${params.toString()}`);
-  if (!response.ok) {
-    const errorPayload = await response.json().catch(() => ({}));
-    throw new Error(errorPayload.detail || "未归属池加载失败");
-  }
-  const payload = await response.json();
-  state.unassignedPool = { ...payload, cacheKey: params.toString() };
-  return state.unassignedPool;
-}
-
-async function bindUnassignedCandidate(option) {
-  const employee = selectedEmployeeRecord();
-  if (!employee) {
-    window.alert("请先选择归属主体");
-    return;
-  }
-  const response = await fetch(`/api/employees/${employee.id}/bindings`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      object_type: option.object_type,
-      object_key: option.object_key,
-      object_label: option.object_label,
-      note: "由未归属池一键绑定",
-    }),
-  });
-  if (!response.ok) {
-    const errorPayload = await response.json().catch(() => ({}));
-    window.alert(errorPayload.detail || "绑定失败");
-    return;
-  }
-  await fetchEmployeeBindings(employee.id, true);
-  await fetchEmployees(true);
-  fillEmployeeForm(selectedEmployeeRecord());
-  renderEmployeeManagerTable();
-  await fetchDashboard();
-  setInlineFeedback(matchPreviewMeta, `已绑定到 ${employee.display_name}，未归属池已刷新。`, "success");
-}
-
-function renderUnassignedTable() {
-  const employee = selectedEmployeeRecord();
-  const items = state.unassignedPool?.items || [];
-  const rangeText = state.unassignedPool?.range_label || rangeLabel(sectionFilter("plan"));
-  if (!state.employees.length) {
-    unassignedMeta.textContent = "当前还没有归属主体。请先创建归属主体，再配置关键词或人工绑定；未归属池会基于这些规则生成。";
-  } else {
-    unassignedMeta.textContent = `${rangeText} · 未归属计划 ${formatNumber(state.unassignedPool?.total_plan_count || 0)} 条 · 当前对象 ${formatNumber(state.unassignedPool?.item_count || 0)} 条`;
-  }
-  unassignedTable.innerHTML = `
-    <thead>
-      <tr>
-        <th>对象</th>
-        <th>账户 / 代表计划</th>
-        <th>消耗</th>
-        <th>支付</th>
-        <th>订单</th>
-        <th>ROI</th>
-        <th>操作</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${items.length ? items.map((row, index) => `
-        <tr>
-          <td>
-            <div class="cell-primary">${escapeHtml(row.object_label || "--")}</div>
-            <div class="cell-subline">
-              <span class="cell-subitem">${escapeHtml(row.object_type_label || "--")}</span>
-              <span class="cell-subitem mono">${escapeHtml(row.object_key || "--")}</span>
-            </div>
-          </td>
-          <td>
-            <div class="cell-primary">${escapeHtml(row.advertiser_name || "-")}</div>
-            <div class="cell-subline">
-              <span class="cell-subitem">${escapeHtml(row.plan_name || "暂无代表计划")}</span>
-              ${row.product_name ? `<span class="cell-subitem">${escapeHtml(row.product_name)}</span>` : ""}
-              ${row.material_type ? `<span class="cell-subitem">${escapeHtml(row.material_type)}</span>` : ""}
-            </div>
-          </td>
-          <td class="mono">${formatMoney(row.stat_cost)}</td>
-          <td class="mono">${formatMoney(row.pay_amount)}</td>
-          <td class="mono">${formatNumber(row.order_count)}</td>
-          <td class="mono">${formatRate(row.roi)}</td>
-          <td>
-            <div class="inline-button-row">
-              ${row.binding_options?.length && employee && isAdmin()
-                ? row.binding_options.map((option, optionIndex) => `
-                  <button
-                    type="button"
-                    class="button ghost bind-unassigned"
-                    data-row-index="${index}"
-                    data-option-index="${optionIndex}"
-                  >${escapeHtml(option.action_label || "绑定")}</button>
-                `).join("")
-                : employee
-                  ? '<span class="detail-sub">当前账号只读</span>'
-                  : '<span class="detail-sub">先选择归属主体</span>'}
-            </div>
-          </td>
-        </tr>
-      `).join("") : '<tr><td colspan="7" class="empty-cell">当前时间范围内没有未归属对象。</td></tr>'}
-    </tbody>
-  `;
-
-  unassignedTable.querySelectorAll(".bind-unassigned").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const row = items[Number(button.dataset.rowIndex)];
-      const option = row?.binding_options?.[Number(button.dataset.optionIndex)];
-      if (!option) return;
-      await bindUnassignedCandidate(option);
-    });
-  });
-}
-
-async function fetchEmployees(force = false) {
-  if (!force && state.employees.length) return state.employees;
-  const response = await fetch("/api/employees");
-  const payload = await response.json();
-  state.employees = payload.items || [];
-  if (state.selectedEmployeeId && !state.employees.some((item) => Number(item.id) === Number(state.selectedEmployeeId))) {
-    state.selectedEmployeeId = null;
-  }
-  if (!state.selectedEmployeeId && state.employees.length) {
-    state.selectedEmployeeId = Number(state.employees[0].id);
-  }
-  return state.employees;
-}
-
-async function fetchEmployeeKeywords(employeeId, force = false) {
-  if (!employeeId) return [];
-  if (!force && state.employeeKeywords[employeeId]) return state.employeeKeywords[employeeId];
-  const response = await fetch(`/api/employees/${employeeId}/keywords`);
-  const payload = await response.json();
-  state.employeeKeywords[employeeId] = payload.items || [];
-  renderKeywordTable();
-  renderEmployeeManagerTable();
-  return state.employeeKeywords[employeeId];
-}
-
-async function fetchEmployeeBindings(employeeId, force = false) {
-  if (!employeeId) return [];
-  if (!force && state.employeeBindings[employeeId]) return state.employeeBindings[employeeId];
-  const response = await fetch(`/api/employees/${employeeId}/bindings`);
-  const payload = await response.json();
-  state.employeeBindings[employeeId] = payload.items || [];
-  renderBindingTable();
-  return state.employeeBindings[employeeId];
-}
-
-async function selectEmployeeManager(employeeId) {
-  state.selectedEmployeeId = employeeId;
-  const employee = selectedEmployeeRecord();
-  fillEmployeeForm(employee);
-  renderEmployeeManagerTable();
-  await Promise.all([fetchEmployeeKeywords(employeeId, true), fetchEmployeeBindings(employeeId, true)]);
-  renderMatchPreview();
-}
-
-async function ensureOwnershipData(force = false) {
-  await fetchEmployees(force);
-  renderEmployeeManagerTable();
-  if (state.selectedEmployeeId) {
-    fillEmployeeForm(selectedEmployeeRecord());
-    await Promise.all([
-      fetchEmployeeKeywords(state.selectedEmployeeId, force),
-      fetchEmployeeBindings(state.selectedEmployeeId, force),
-    ]);
-  } else {
-    resetEmployeeFormState();
-  }
-  await fetchUnassignedPool(force);
-  renderUnassignedTable();
-  renderMatchPreview();
-}
 
 function resetUserFormState() {
   state.selectedUserId = null;
@@ -3684,108 +3231,6 @@ function bindInputs() {
   bindRangeFilterControls("breakdown");
   bindRangeFilterControls("material");
 
-  employeeForm?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = new FormData(employeeForm);
-    const payload = {
-      display_name: String(form.get("display_name") || "").trim(),
-      note: String(form.get("note") || "").trim(),
-      enabled: form.get("enabled") === "on",
-    };
-    const url = state.selectedEmployeeId ? `/api/employees/${state.selectedEmployeeId}` : "/api/employees";
-    const method = state.selectedEmployeeId ? "PUT" : "POST";
-    const response = await fetch(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "保存归属主体失败");
-      return;
-    }
-    const item = await response.json();
-    await fetchEmployees(true);
-    if (item?.id) {
-      await selectEmployeeManager(Number(item.id));
-      setInlineFeedback(employeeEditorStatus, `已保存归属主体：${item.display_name || payload.display_name}。`, "success");
-      setInlineFeedback(keywordStatus, "可以继续加关键词，或先预览命中。", "success");
-      focusFirstInput(keywordForm, 'input[name="keyword"]');
-    } else {
-      await ensureOwnershipData(true);
-    }
-    await fetchDashboard();
-  });
-
-  employeeFormReset?.addEventListener("click", () => {
-    resetEmployeeFormState();
-    renderEmployeeManagerTable();
-    renderMatchPreview();
-  });
-
-  keywordForm?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (!state.selectedEmployeeId) {
-      window.alert("请先选择归属主体");
-      return;
-    }
-    const form = new FormData(keywordForm);
-    const payload = {
-      keyword: String(form.get("keyword") || "").trim(),
-      scope: String(form.get("scope") || "all"),
-      priority: Number(form.get("priority") || 100),
-      enabled: form.get("enabled") === "on",
-    };
-    const response = await fetch(`/api/employees/${state.selectedEmployeeId}/keywords`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "新增关键词失败");
-      return;
-    }
-    keywordForm.reset();
-    keywordForm.querySelector('input[name="enabled"]').checked = true;
-    keywordForm.querySelector('input[name="priority"]').value = "100";
-    await fetchEmployeeKeywords(state.selectedEmployeeId, true);
-    await fetchEmployees(true);
-    fillEmployeeForm(selectedEmployeeRecord());
-    renderEmployeeManagerTable();
-    await fetchDashboard();
-    setInlineFeedback(keywordStatus, `已新增关键词“${payload.keyword}”。`, "success");
-    setInlineFeedback(matchPreviewMeta, "可继续预览命中，或等待榜单刷新。", "success");
-    focusFirstInput(keywordForm, 'input[name="keyword"]');
-  });
-
-  matchPreviewForm?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const keyword = String(matchKeywordInput?.value || "").trim();
-    const scope = String(matchScopeSelect?.value || "all");
-    if (!keyword) {
-      window.alert("请输入要预览的关键词");
-      return;
-    }
-    const response = await fetch(`/api/employee-match-preview?keyword=${encodeURIComponent(keyword)}&scope=${encodeURIComponent(scope)}`);
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "关键词预览失败");
-      return;
-    }
-    state.matchPreview = await response.json();
-    renderMatchPreview();
-  });
-
-  unassignedScopeSelect?.addEventListener("change", async () => {
-    state.unassignedScope = String(unassignedScopeSelect.value || "all");
-    try {
-      await fetchUnassignedPool(true);
-      renderUnassignedTable();
-    } catch (error) {
-      window.alert(error.message || "未归属池加载失败");
-    }
-  });
 
   ruleForm?.querySelector('select[name="entity_type"]')?.addEventListener("change", () => {
     if (ruleTargetInput) ruleTargetInput.value = "";
