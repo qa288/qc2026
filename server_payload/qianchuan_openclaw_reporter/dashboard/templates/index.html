@@ -112,7 +112,6 @@
                     <button type="button" class="range-button" data-range="month">近30天</button>
                   </div>
                   <div class="date-range-inline custom-date-inline">
-                    <button type="button" class="custom-date-toggle" data-role="custom-range-toggle">日期</button>
                     <div class="custom-date-fields">
                       <input id="accountDateStart" class="date-input" type="date" />
                       <span class="date-range-sep">至</span>
@@ -148,7 +147,6 @@
                     <button type="button" class="range-button" data-range="month">近30天</button>
                   </div>
                   <div class="date-range-inline custom-date-inline">
-                    <button type="button" class="custom-date-toggle" data-role="custom-range-toggle">日期</button>
                     <div class="custom-date-fields">
                       <input id="breakdownDateStart" class="date-input" type="date" />
                       <span class="date-range-sep">至</span>
@@ -184,7 +182,7 @@
               <h2>计划效果明细</h2>
             </div>
             <div class="head-control-stack">
-              <div class="toolbar toolbar-inline toolbar-inline-primary">
+              <div class="toolbar toolbar-inline toolbar-inline-primary toolbar-inline-plan">
                 <div class="range-filter-group">
                   <div class="range-switch" id="planRangeSwitch">
                     <button type="button" class="range-button" data-range="day">日</button>
@@ -193,7 +191,6 @@
                     <button type="button" class="range-button" data-range="month">近30天</button>
                   </div>
                   <div class="date-range-inline custom-date-inline">
-                    <button type="button" class="custom-date-toggle" data-role="custom-range-toggle">日期</button>
                     <div class="custom-date-fields">
                       <input id="planDateStart" class="date-input" type="date" />
                       <span class="date-range-sep">至</span>
@@ -202,10 +199,12 @@
                     </div>
                   </div>
                 </div>
-                <input id="planSearch" class="search-input" type="search" placeholder="搜索计划" />
-                <select id="planAccountFilter" class="select-input">
-                  <option value="">全部账户</option>
-                </select>
+                <div class="toolbar-search-actions">
+                  <input id="planSearch" class="search-input" type="search" placeholder="搜索计划" />
+                  <select id="planAccountFilter" class="select-input">
+                    <option value="">全部账户</option>
+                  </select>
+                </div>
               </div>
             </div>
           </div>
@@ -232,7 +231,6 @@
                     <button type="button" class="range-button" data-range="month">近30天</button>
                   </div>
                   <div class="date-range-inline custom-date-inline">
-                    <button type="button" class="custom-date-toggle" data-role="custom-range-toggle">日期</button>
                     <div class="custom-date-fields">
                       <input id="materialDateStart" class="date-input" type="date" />
                       <span class="date-range-sep">至</span>

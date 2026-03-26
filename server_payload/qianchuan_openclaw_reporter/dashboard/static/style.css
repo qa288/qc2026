@@ -936,6 +936,10 @@ body {
   grid-template-columns: minmax(0, 1fr) minmax(336px, 430px);
 }
 
+.toolbar-inline-plan {
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 520px);
+}
+
 .toolbar-secondary {
   width: auto;
   justify-content: flex-end;
@@ -1106,6 +1110,12 @@ body {
   min-width: 248px;
 }
 
+.toolbar-search-actions > .select-input {
+  flex: 0 0 156px;
+  min-width: 156px;
+  width: auto;
+}
+
 .toolbar-search-actions > .button {
   flex: 0 0 auto;
 }
@@ -1116,6 +1126,15 @@ body {
 }
 
 .toolbar-inline-material .toolbar-search-actions > .search-input {
+  min-width: 0;
+}
+
+.toolbar-inline-plan .toolbar-search-actions {
+  justify-self: stretch;
+  max-width: 520px;
+}
+
+.toolbar-inline-plan .toolbar-search-actions > .search-input {
   min-width: 0;
 }
 
@@ -1147,7 +1166,7 @@ body {
   gap: 0;
   max-width: 100%;
   padding: 3px;
-  border-radius: 999px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.76);
   border: 1px solid rgba(77, 57, 36, 0.1);
 }
@@ -1176,12 +1195,11 @@ body {
   align-items: center;
   gap: 5px;
   min-width: 0;
-  max-width: 0;
+  max-width: none;
   margin-left: 0;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transition: max-width 180ms ease, opacity 140ms ease, margin-left 180ms ease;
+  overflow: visible;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .custom-date-inline.active {
@@ -2974,6 +2992,7 @@ body {
   .toolbar-inline-primary > .search-input,
   .toolbar-search-actions,
   .toolbar-search-actions > .search-input,
+  .toolbar-search-actions > .select-input,
   .toolbar > .select-input,
   .toolbar.wide > .select-input {
     width: 100%;
