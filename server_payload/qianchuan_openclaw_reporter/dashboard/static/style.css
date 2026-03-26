@@ -3454,11 +3454,16 @@ body {
 
 .preview-media-shell {
   display: grid;
-  place-items: center;
   min-height: 320px;
   border-radius: 16px;
   background: #0d1520;
   overflow: hidden;
+}
+
+.preview-media-stage {
+  display: grid;
+  place-items: center;
+  min-height: 320px;
 }
 
 .preview-video,
@@ -3474,6 +3479,165 @@ body {
   color: rgba(255, 255, 255, 0.88);
   font-size: 14px;
   padding: 32px;
+}
+
+.preview-curve-panel {
+  display: grid;
+  gap: 10px;
+  padding: 14px 18px 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(9, 18, 28, 0.92), rgba(13, 21, 32, 0.98));
+  color: rgba(233, 242, 255, 0.92);
+}
+
+.preview-curve-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.preview-curve-title {
+  display: grid;
+  gap: 4px;
+}
+
+.preview-curve-title strong {
+  font-size: 14px;
+  color: #fff;
+}
+
+.preview-curve-title span,
+.preview-curve-note,
+.preview-curve-empty span,
+.preview-curve-loading-copy span {
+  font-size: 12px;
+  color: rgba(233, 242, 255, 0.72);
+}
+
+.preview-curve-badge,
+.preview-curve-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.preview-curve-badge {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.preview-curve-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preview-curve-chip.lose {
+  background: rgba(255, 133, 92, 0.16);
+  color: #ffb29a;
+}
+
+.preview-curve-chip.click {
+  background: rgba(88, 214, 184, 0.16);
+  color: #9cead5;
+}
+
+.preview-curve-chip.peak {
+  background: rgba(142, 195, 255, 0.14);
+  color: #b6d7ff;
+}
+
+.preview-curve-stage {
+  display: grid;
+  gap: 6px;
+}
+
+.preview-curve-svg {
+  display: block;
+  width: 100%;
+  height: 148px;
+}
+
+.preview-curve-grid {
+  stroke: rgba(255, 255, 255, 0.16);
+  stroke-width: 1;
+}
+
+.preview-curve-grid.faint {
+  stroke-opacity: 0.56;
+}
+
+.preview-curve-line {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.preview-curve-line.lose {
+  stroke: #ff855c;
+}
+
+.preview-curve-line.click {
+  stroke: #58d6b8;
+}
+
+.preview-curve-area {
+  opacity: 1;
+}
+
+.preview-curve-peak {
+  fill: #ff855c;
+  stroke: rgba(255, 255, 255, 0.92);
+  stroke-width: 1.5;
+}
+
+.preview-curve-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: rgba(233, 242, 255, 0.58);
+}
+
+.preview-curve-empty {
+  display: grid;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.preview-curve-empty strong,
+.preview-curve-loading-copy strong {
+  font-size: 13px;
+  color: #fff;
+}
+
+.preview-curve-loading {
+  display: grid;
+  gap: 10px;
+}
+
+.preview-curve-loading-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(88, 214, 184, 0.18), rgba(255, 133, 92, 0.48), rgba(88, 214, 184, 0.18));
+  background-size: 200% 100%;
+  animation: previewCurvePulse 1.6s linear infinite;
+}
+
+@keyframes previewCurvePulse {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
 }
 
 .preview-detail-grid {

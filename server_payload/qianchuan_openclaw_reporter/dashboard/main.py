@@ -3992,6 +3992,286 @@ class DashboardService:
                         ),
                     )
 
+    @staticmethod
+    def _material_curve_metric_value(row: dict[str, Any], field: str) -> float:
+        candidates: list[dict[str, Any]] = [row]
+        for key in ("fields", "metrics", "stats", "values", "data"):
+            nested = row.get(key)
+            if isinstance(nested, dict):
+                candidates.append(nested)
+        for candidate in candidates:
+            if field not in candidate:
+                continue
+            value = candidate.get(field)
+            if isinstance(value, dict):
+                value = (
+                    value.get("Value")
+                    or value.get("value")
+                    or value.get("ValueStr")
+                    or value.get("value_str")
+                    or value.get("val")
+                )
+            try:
+                return float(value or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    @staticmethod
+    def _material_curve_second_value(row: dict[str, Any]) -> int:
+        candidates: list[Any] = [
+            row.get("h_sec"),
+            row.get("second"),
+            row.get("sec"),
+            row.get("progress_second"),
+            row.get("play_second"),
+        ]
+        dimensions = row.get("dimensions")
+        if isinstance(dimensions, dict):
+            candidates.extend(
+                [
+                    dimensions.get("h_sec"),
+                    dimensions.get("second"),
+                    dimensions.get("sec"),
+                ]
+            )
+        for value in candidates:
+            try:
+                second = int(float(value or 0))
+            except (TypeError, ValueError):
+                continue
+            if second >= 0:
+                return second
+        return -1
+
+    def _normalize_video_user_lose_rows(self, response: dict[str, Any]) -> list[dict[str, float]]:
+        data = response.get("data") or {}
+        raw_rows: list[Any] = []
+        if isinstance(data, list):
+            raw_rows = data
+        elif isinstance(data, dict):
+            for key in ("list", "rows", "items", "stats_list", "series", "result"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    raw_rows = value
+                    break
+        grouped: dict[int, dict[str, float]] = {}
+        for raw_row in raw_rows:
+            if not isinstance(raw_row, dict):
+                continue
+            second = self._material_curve_second_value(raw_row)
+            if second < 0:
+                continue
+            point = grouped.setdefault(
+                second,
+                {
+                    "second": float(second),
+                    "click_cnt": 0.0,
+                    "user_lose_cnt": 0.0,
+                },
+            )
+            point["click_cnt"] += self._material_curve_metric_value(raw_row, "click_cnt")
+            point["user_lose_cnt"] += self._material_curve_metric_value(raw_row, "user_lose_cnt")
+        return [grouped[key] for key in sorted(grouped)]
+
+    def _material_preview_requested_window(
+        self,
+        range_key: str,
+        start_date: str,
+        end_date: str,
+        snapshot_time: str,
+    ) -> tuple[datetime, datetime, str]:
+        config = self.read_config()
+        tz_name = str(config.get("timezone") or TIMEZONE)
+        target_snapshot = str(snapshot_time or "").strip()
+        if target_snapshot:
+            snapshot_day = _parse_date_input(target_snapshot[:10], "snapshot_time")
+            tz = ZoneInfo(tz_name)
+            start_dt = datetime(snapshot_day.year, snapshot_day.month, snapshot_day.day, 0, 0, 0, tzinfo=tz)
+            end_dt = datetime(snapshot_day.year, snapshot_day.month, snapshot_day.day, 23, 59, 59, tzinfo=tz)
+            return start_dt, end_dt, "指定快照"
+        normalized = str(range_key or "day").strip().lower()
+        if normalized not in PERFORMANCE_RANGES:
+            raise ValueError("range must be one of day/yesterday/week/month/custom")
+        if normalized == "custom":
+            return build_custom_performance_window(start_date, end_date, tz_name)
+        return build_performance_window(normalized, tz_name)
+
+    def material_preview_curve(
+        self,
+        material_key: str,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+        user: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        material_key_text = str(material_key or "").strip()
+        if not material_key_text:
+            raise ValueError("material_key is required")
+
+        rankings_payload = self.material_rankings(range_key, start_date, end_date, snapshot_time, allowed_advertiser_ids)
+        if user is not None:
+            rankings_payload = self._apply_material_scope(rankings_payload, user)
+
+        row = next(
+            (
+                dict(item)
+                for item in rankings_payload.get("items", [])
+                if str(item.get("material_key") or "").strip() == material_key_text
+            ),
+            None,
+        )
+        if row is None:
+            raise ValueError("material not found in current material rankings")
+
+        material_type = str(row.get("material_type") or "").strip().upper()
+        advertiser_ids = [int(item) for item in row.get("advertiser_ids", []) if int(item or 0)]
+        advertiser_id = advertiser_ids[0] if advertiser_ids else 0
+
+        requested_start_dt, requested_end_dt, requested_range_label = self._material_preview_requested_window(
+            range_key,
+            start_date,
+            end_date,
+            snapshot_time,
+        )
+        config = self.read_config()
+        tz = ZoneInfo(str(config.get("timezone") or TIMEZONE))
+        latest_available_day = (datetime.now(tz) - timedelta(days=1)).date()
+        latest_available_start = datetime(
+            latest_available_day.year,
+            latest_available_day.month,
+            latest_available_day.day,
+            0,
+            0,
+            0,
+            tzinfo=tz,
+        )
+        latest_available_end = datetime(
+            latest_available_day.year,
+            latest_available_day.month,
+            latest_available_day.day,
+            23,
+            59,
+            59,
+            tzinfo=tz,
+        )
+
+        response_payload: dict[str, Any] = {
+            "material_key": material_key_text,
+            "material_id": str(row.get("material_id") or ""),
+            "material_name": str(row.get("material_name") or ""),
+            "material_type": material_type,
+            "advertiser_id": advertiser_id,
+            "advertiser_count": len(advertiser_ids),
+            "top_account_name": str(row.get("top_account_name") or ""),
+            "supported": material_type == "VIDEO",
+            "t_plus_one_only": True,
+            "range_key": str(rankings_payload.get("range_key") or range_key or "day"),
+            "range_label": str(rankings_payload.get("range_label") or requested_range_label or ""),
+            "requested_start_date": requested_start_dt.strftime("%Y-%m-%d"),
+            "requested_end_date": requested_end_dt.strftime("%Y-%m-%d"),
+            "query_start_date": "",
+            "query_end_date": "",
+            "is_clamped_to_yesterday": False,
+            "notice": "",
+            "message": "",
+            "series": [],
+            "totals": {
+                "click_cnt": 0,
+                "user_lose_cnt": 0,
+            },
+            "peak": {
+                "second": 0,
+                "click_cnt": 0,
+                "user_lose_cnt": 0,
+            },
+            "duration_seconds": 0,
+            "point_count": 0,
+        }
+
+        if material_type != "VIDEO":
+            response_payload["message"] = "仅视频素材支持互动峰形图。"
+            return response_payload
+        if not response_payload["material_id"]:
+            response_payload["message"] = "当前素材缺少 material_id，无法查询峰形图。"
+            return response_payload
+        if not advertiser_id:
+            response_payload["message"] = "当前素材缺少 advertiser_id，无法查询峰形图。"
+            return response_payload
+
+        query_start_dt = requested_start_dt
+        query_end_dt = min(requested_end_dt, latest_available_end)
+        clamped = query_end_dt < requested_end_dt
+        target_snapshot = str(snapshot_time or "").strip()
+        normalized_range = str(range_key or "day").strip().lower()
+        if query_start_dt > query_end_dt:
+            if not target_snapshot and normalized_range == "day":
+                query_start_dt = latest_available_start
+                query_end_dt = latest_available_end
+                clamped = True
+            else:
+                response_payload["query_start_date"] = requested_start_dt.strftime("%Y-%m-%d")
+                response_payload["query_end_date"] = requested_end_dt.strftime("%Y-%m-%d")
+                response_payload["is_clamped_to_yesterday"] = clamped
+                response_payload["message"] = "当前筛选范围内没有可查询的 T+1 数据。"
+                if clamped:
+                    response_payload["notice"] = f"该接口仅支持 T+1 数据，最近可查询日期为 {latest_available_day.isoformat()}。"
+                return response_payload
+
+        response_payload["query_start_date"] = query_start_dt.strftime("%Y-%m-%d")
+        response_payload["query_end_date"] = query_end_dt.strftime("%Y-%m-%d")
+        response_payload["is_clamped_to_yesterday"] = clamped
+
+        notices: list[str] = []
+        if clamped:
+            notices.append(f"该接口仅支持 T+1 数据，当前展示截至 {latest_available_day.isoformat()} 的数据。")
+        if len(advertiser_ids) > 1:
+            account_name = str(row.get("top_account_name") or "").strip()
+            if account_name:
+                notices.append(f"该素材被多个账户复用，当前仅展示账户 {account_name} 的曲线。")
+            else:
+                notices.append("该素材被多个账户复用，当前仅展示其中一个账户的曲线。")
+
+        client = self.build_client(config)
+        response = client.get_video_user_lose(
+            advertiser_id=advertiser_id,
+            material_id=response_payload["material_id"],
+            start_date=response_payload["query_start_date"],
+            end_date=response_payload["query_end_date"],
+        )
+        points = self._normalize_video_user_lose_rows(response)
+        response_payload["series"] = [
+            {
+                "second": int(point["second"]),
+                "click_cnt": int(round(point["click_cnt"])),
+                "user_lose_cnt": int(round(point["user_lose_cnt"])),
+            }
+            for point in points
+        ]
+        response_payload["duration_seconds"] = int(max((point["second"] for point in points), default=0))
+        response_payload["point_count"] = len(points)
+        response_payload["totals"] = {
+            "click_cnt": int(round(sum(point["click_cnt"] for point in points))),
+            "user_lose_cnt": int(round(sum(point["user_lose_cnt"] for point in points))),
+        }
+        peak_point = max(
+            response_payload["series"],
+            key=lambda item: (int(item["user_lose_cnt"]), int(item["click_cnt"]), -int(item["second"])),
+            default={"second": 0, "click_cnt": 0, "user_lose_cnt": 0},
+        )
+        response_payload["peak"] = {
+            "second": int(peak_point["second"]),
+            "click_cnt": int(peak_point["click_cnt"]),
+            "user_lose_cnt": int(peak_point["user_lose_cnt"]),
+        }
+        if not response_payload["series"]:
+            response_payload["message"] = "接口未返回该素材的秒级互动分布数据。"
+        if notices:
+            response_payload["notice"] = " ".join(notices)
+        return response_payload
+
     def material_rankings(
         self,
         range_key: str = "day",

@@ -67,6 +67,7 @@ const state = {
   planAssetCache: {},
   materialPayloads: {},
   materialPayloadFetchedAt: {},
+  materialPreviewCurveCache: {},
   users: [],
   catalogAccounts: [],
   userScopes: {},
@@ -94,6 +95,7 @@ const state = {
   materialPage: 1,
   selectedPlanId: null,
   selectedMaterialKey: null,
+  materialPreviewRequestToken: 0,
   selectedUserId: null,
   selectedUserScopeIds: [],
   editingRuleId: null,
@@ -740,20 +742,20 @@ function renderMarketingGoalBadge(row) {
   return `<span class="pill marketing-goal-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
 }
 
-function planSourceTone(sourceText) {
+function deprecatedPlanSourceTone(sourceText) {
   if (sourceText === "鍩虹鎶曟斁") return "standard";
   if (sourceText === "鍏ㄥ煙鎶曟斁") return "uni";
   return "neutral";
 }
 
-function renderPlanSourceBadge(row) {
+function deprecatedRenderPlanSourceBadge(row) {
   const text = row.plan_source_text || (String(row.plan_source || "").trim().toUpperCase() === "STANDARD" ? "鍩虹鎶曟斁" : "鍏ㄥ煙鎶曟斁");
   const tone = planSourceTone(text);
   const title = row.plan_source || text;
   return `<span class="pill plan-source-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
 }
 
-function enrichPlanRow(row) {
+function deprecatedEnrichPlanRow(row) {
   const statCost = Number(row?.stat_cost || 0);
   const totalPayAmount = Number(row?.total_pay_amount || 0);
   const settledPayAmount = Number(row?.settled_pay_amount || 0);
@@ -2576,7 +2578,7 @@ function syncSelectedPlan(plans) {
   renderPlanDetail(state.selectedPlanId);
 }
 
-function renderPlanTable(plans) {
+function deprecatedRenderPlanTable(plans) {
   if (state.planSort.key === "status") {
     state.planSort = { ...state.planSort, key: "status_text" };
     saveSort("plan-sort", state.planSort);
@@ -2983,11 +2985,215 @@ function materialAwemeLink(row) {
   return awemeId ? `https://www.douyin.com/video/${encodeURIComponent(awemeId)}` : "";
 }
 
+function materialPreviewCurveCacheKey(row, filter) {
+  const normalized = normalizeRangeFilter(filter);
+  return [
+    String(row?.material_key || "").trim(),
+    normalized.mode,
+    normalized.start || "",
+    normalized.end || "",
+  ].join(":");
+}
+
+function materialPreviewCurveRequest(row) {
+  const filter = sectionFilter("material");
+  const params = new URLSearchParams();
+  params.set("material_key", String(row?.material_key || "").trim());
+  params.set("range", filter.mode);
+  if (filter.mode === "custom") {
+    params.set("start_date", filter.start);
+    params.set("end_date", filter.end);
+  }
+  return {
+    cacheKey: materialPreviewCurveCacheKey(row, filter),
+    url: `/api/material-preview-curve?${params.toString()}`,
+  };
+}
+
+function materialPreviewCurveLoadingMarkup() {
+  return `
+    <div class="preview-curve-loading">
+      <div class="preview-curve-loading-copy">
+        <strong>互动峰形加载中</strong>
+        <span>正在拉取视频按秒点击/流失分布</span>
+      </div>
+      <div class="preview-curve-loading-bar"></div>
+    </div>
+  `;
+}
+
+function materialPreviewCurveEmptyMarkup(title, detail = "") {
+  return `
+    <div class="preview-curve-empty">
+      <strong>${escapeHtml(title || "暂无峰形数据")}</strong>
+      ${detail ? `<span>${escapeHtml(detail)}</span>` : ""}
+    </div>
+  `;
+}
+
+function previewCurvePoints(series, width, height, maxSecond, maxValue) {
+  const innerWidth = width - 16;
+  const innerHeight = height - 24;
+  return series.map((item) => {
+    const second = Number(item.second || 0);
+    const value = Number(item.value || 0);
+    const x = 8 + (maxSecond > 0 ? second / maxSecond : 0) * innerWidth;
+    const y = 8 + innerHeight - (maxValue > 0 ? value / maxValue : 0) * innerHeight;
+    return { x, y, second, value };
+  });
+}
+
+function previewCurveLinePath(points) {
+  if (!points.length) return "";
+  if (points.length === 1) {
+    const point = points[0];
+    return `M ${point.x} ${point.y} L ${point.x + 0.01} ${point.y}`;
+  }
+  return points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+    .join(" ");
+}
+
+function previewCurveAreaPath(points, baseline) {
+  if (!points.length) return "";
+  const linePath = previewCurveLinePath(points);
+  const first = points[0];
+  const last = points[points.length - 1];
+  return `${linePath} L ${last.x.toFixed(2)} ${baseline.toFixed(2)} L ${first.x.toFixed(2)} ${baseline.toFixed(2)} Z`;
+}
+
+function previewCurveAxisMarks(maxSecond) {
+  const marks = [0, 0.33, 0.66, 1];
+  return marks.map((ratio) => `${Math.round(maxSecond * ratio)}s`);
+}
+
+function renderMaterialPreviewCurvePanel(payload) {
+  if (!payload?.supported) {
+    return materialPreviewCurveEmptyMarkup("仅视频素材支持峰形图", payload?.message || "当前素材没有可查询的按秒互动分布。");
+  }
+  const series = Array.isArray(payload?.series) ? payload.series : [];
+  if (!series.length) {
+    return materialPreviewCurveEmptyMarkup("暂无峰形数据", payload?.message || payload?.notice || "接口暂未返回可用的秒级分布。");
+  }
+
+  const chartWidth = 640;
+  const chartHeight = 156;
+  const loseSeries = series.map((item) => ({ second: Number(item.second || 0), value: Number(item.user_lose_cnt || 0) }));
+  const clickSeries = series.map((item) => ({ second: Number(item.second || 0), value: Number(item.click_cnt || 0) }));
+  const maxSecond = Math.max(...series.map((item) => Number(item.second || 0)), 1);
+  const maxValue = Math.max(
+    ...series.map((item) => Math.max(Number(item.user_lose_cnt || 0), Number(item.click_cnt || 0))),
+    1,
+  );
+  const baseline = chartHeight - 16;
+  const losePoints = previewCurvePoints(loseSeries, chartWidth, chartHeight, maxSecond, maxValue);
+  const clickPoints = previewCurvePoints(clickSeries, chartWidth, chartHeight, maxSecond, maxValue);
+  const loseLine = previewCurveLinePath(losePoints);
+  const clickLine = previewCurveLinePath(clickPoints);
+  const loseArea = previewCurveAreaPath(losePoints, baseline);
+  const clickArea = previewCurveAreaPath(clickPoints, baseline);
+  const peak = payload?.peak || {};
+  const peakSecond = Number(peak.second || 0);
+  const peakX = 8 + (maxSecond > 0 ? peakSecond / maxSecond : 0) * (chartWidth - 16);
+  const peakY = 8 + (chartHeight - 24) - (maxValue > 0 ? Number(peak.user_lose_cnt || 0) / maxValue : 0) * (chartHeight - 24);
+  const gradientId = `preview-curve-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const rangeText = payload?.query_start_date && payload?.query_end_date
+    ? (payload.query_start_date === payload.query_end_date
+      ? payload.query_end_date
+      : `${payload.query_start_date} 至 ${payload.query_end_date}`)
+    : "最近可查询范围";
+  const note = [payload?.notice, payload?.message].filter(Boolean).join(" ");
+
+  return `
+    <div class="preview-curve-head">
+      <div class="preview-curve-title">
+        <strong>视频互动峰形</strong>
+        <span>按秒分布 · ${escapeHtml(rangeText)}</span>
+      </div>
+      <span class="preview-curve-badge">T+1</span>
+    </div>
+    <div class="preview-curve-summary">
+      <span class="preview-curve-chip lose">流失 ${formatNumber(payload?.totals?.user_lose_cnt || 0)}</span>
+      <span class="preview-curve-chip click">点击 ${formatNumber(payload?.totals?.click_cnt || 0)}</span>
+      <span class="preview-curve-chip peak">峰值 ${formatNumber(peakSecond)}s</span>
+    </div>
+    <div class="preview-curve-stage">
+      <svg class="preview-curve-svg" viewBox="0 0 ${chartWidth} ${chartHeight}" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+          <linearGradient id="${gradientId}-lose" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="rgba(255, 133, 92, 0.88)"></stop>
+            <stop offset="100%" stop-color="rgba(255, 133, 92, 0.08)"></stop>
+          </linearGradient>
+          <linearGradient id="${gradientId}-click" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="rgba(88, 214, 184, 0.82)"></stop>
+            <stop offset="100%" stop-color="rgba(88, 214, 184, 0.08)"></stop>
+          </linearGradient>
+        </defs>
+        <path d="M 8 24 H ${chartWidth - 8}" class="preview-curve-grid"></path>
+        <path d="M 8 ${(chartHeight - 24) / 2} H ${chartWidth - 8}" class="preview-curve-grid faint"></path>
+        <path d="M 8 ${baseline} H ${chartWidth - 8}" class="preview-curve-grid"></path>
+        <path d="${loseArea}" fill="url(#${gradientId}-lose)" class="preview-curve-area lose"></path>
+        <path d="${clickArea}" fill="url(#${gradientId}-click)" class="preview-curve-area click"></path>
+        <path d="${loseLine}" class="preview-curve-line lose"></path>
+        <path d="${clickLine}" class="preview-curve-line click"></path>
+        <circle cx="${peakX.toFixed(2)}" cy="${peakY.toFixed(2)}" r="4" class="preview-curve-peak"></circle>
+      </svg>
+      <div class="preview-curve-axis">
+        ${previewCurveAxisMarks(maxSecond).map((label) => `<span>${escapeHtml(label)}</span>`).join("")}
+      </div>
+    </div>
+    ${note ? `<div class="preview-curve-note">${escapeHtml(note)}</div>` : ""}
+  `;
+}
+
+async function fetchMaterialPreviewCurve(row, force = false) {
+  const request = materialPreviewCurveRequest(row);
+  if (!force && state.materialPreviewCurveCache[request.cacheKey]) {
+    return state.materialPreviewCurveCache[request.cacheKey];
+  }
+  const response = await fetch(request.url).catch(() => null);
+  if (!response || !response.ok) {
+    const errorPayload = response ? await response.json().catch(() => ({})) : {};
+    throw new Error(errorPayload.detail || "峰形数据请求失败");
+  }
+  const payload = await response.json();
+  state.materialPreviewCurveCache[request.cacheKey] = payload;
+  return payload;
+}
+
+async function loadMaterialPreviewCurve(row) {
+  if (!materialPreviewBody) return;
+  const materialKey = String(row?.material_key || "").trim();
+  const panel = materialPreviewBody.querySelector('[data-role="preview-curve-panel"]');
+  if (!panel || !materialKey) return;
+  if (materialTypeKey(row) !== "VIDEO") {
+    panel.innerHTML = materialPreviewCurveEmptyMarkup("仅视频素材支持峰形图", "该接口只提供视频素材的按秒点击和流失分布。");
+    return;
+  }
+  const requestToken = ++state.materialPreviewRequestToken;
+  materialPreviewBody.dataset.materialKey = materialKey;
+  panel.innerHTML = materialPreviewCurveLoadingMarkup();
+  try {
+    const payload = await fetchMaterialPreviewCurve(row);
+    if (!materialPreviewBody || materialPreviewBody.dataset.materialKey !== materialKey) return;
+    if (state.materialPreviewRequestToken !== requestToken) return;
+    panel.innerHTML = renderMaterialPreviewCurvePanel(payload);
+  } catch (error) {
+    if (!materialPreviewBody || materialPreviewBody.dataset.materialKey !== materialKey) return;
+    if (state.materialPreviewRequestToken !== requestToken) return;
+    panel.innerHTML = materialPreviewCurveEmptyMarkup("峰形图加载失败", error?.message || "未能获取预览曲线。");
+  }
+}
+
 function closeMaterialPreview() {
   if (!materialPreviewModal) return;
+  state.materialPreviewRequestToken += 1;
   materialPreviewModal.classList.add("hidden");
   materialPreviewModal.setAttribute("aria-hidden", "true");
-  if (materialPreviewBody) materialPreviewBody.innerHTML = "";
+  if (materialPreviewBody) {
+    delete materialPreviewBody.dataset.materialKey;
+    materialPreviewBody.innerHTML = "";
+  }
 }
 
 function openMaterialPreviewFromRow(row) {
@@ -3012,7 +3218,10 @@ function openMaterialPreviewFromRow(row) {
     directVideoUrl ? `<a class="button ghost compact" href="${escapeHtml(directVideoUrl)}" target="_blank" rel="noreferrer">打开原始视频</a>` : "",
   ].filter(Boolean).join("");
   materialPreviewBody.innerHTML = `
-    <div class="preview-media-shell">${previewBlock}</div>
+    <div class="preview-media-shell">
+      <div class="preview-media-stage">${previewBlock}</div>
+      <div class="preview-curve-panel" data-role="preview-curve-panel">${materialPreviewCurveLoadingMarkup()}</div>
+    </div>
     <div class="preview-detail-grid">
       <div class="preview-stat"><span>归属账户</span><strong>${escapeHtml(row.top_account_name || "--")}</strong></div>
       <div class="preview-stat"><span>归属计划</span><strong>${escapeHtml(row.top_plan_name || "--")}</strong></div>
@@ -3029,27 +3238,40 @@ function openMaterialPreviewFromRow(row) {
     ${extraActions ? `<div class="preview-actions">${extraActions}</div>` : ""}
   `;
   const previewMediaShell = materialPreviewBody.querySelector(".preview-media-shell");
+  const previewCurvePanel = materialPreviewBody.querySelector('[data-role="preview-curve-panel"]');
   const previewVideo = materialPreviewBody.querySelector(".preview-video");
   const previewCover = materialPreviewBody.querySelector(".preview-cover");
   previewVideo?.addEventListener("error", () => {
     if (!previewMediaShell) return;
     previewMediaShell.innerHTML = coverUrl
       ? `
-        <img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row.material_name || "素材封面")}" />
-        <div class="preview-empty">当前视频地址无法直接播放，已降级为封面预览。</div>
+        <div class="preview-media-stage">
+          <img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row.material_name || "素材封面")}" />
+          <div class="preview-empty">当前视频地址无法直接播放，已降级为封面预览。</div>
+        </div>
       `
-      : '<div class="preview-empty">当前视频地址无法直接播放，请尝试下方入口。</div>';
+      : '<div class="preview-media-stage"><div class="preview-empty">当前视频地址无法直接播放，请尝试下方入口。</div></div>';
+    if (previewCurvePanel) {
+      previewMediaShell.appendChild(previewCurvePanel);
+    }
     const fallbackCover = previewMediaShell.querySelector(".preview-cover");
     fallbackCover?.addEventListener("error", () => {
-      previewMediaShell.innerHTML = '<div class="preview-empty">当前素材没有可站外访问的预览地址，请尝试打开抖音作品。</div>';
+      previewMediaShell.innerHTML = '<div class="preview-media-stage"><div class="preview-empty">当前素材没有可站外访问的预览地址，请尝试打开抖音作品。</div></div>';
+      if (previewCurvePanel) {
+        previewMediaShell.appendChild(previewCurvePanel);
+      }
     }, { once: true });
   }, { once: true });
   previewCover?.addEventListener("error", () => {
     if (!previewMediaShell) return;
-    previewMediaShell.innerHTML = '<div class="preview-empty">当前素材没有可站外访问的预览地址，请尝试打开抖音作品。</div>';
+    previewMediaShell.innerHTML = '<div class="preview-media-stage"><div class="preview-empty">当前素材没有可站外访问的预览地址，请尝试打开抖音作品。</div></div>';
+    if (previewCurvePanel) {
+      previewMediaShell.appendChild(previewCurvePanel);
+    }
   }, { once: true });
   materialPreviewModal.classList.remove("hidden");
   materialPreviewModal.setAttribute("aria-hidden", "false");
+  void loadMaterialPreviewCurve(row);
 }
 
 function openMaterialPreview(materialKey) {

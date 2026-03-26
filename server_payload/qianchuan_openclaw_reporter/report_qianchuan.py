@@ -42,6 +42,7 @@ PLAN_DETAIL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promo
 PLAN_PRODUCT_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/product/get/"
 PLAN_MATERIAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/material/get/"
 PLAN_MATERIAL_ADD_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/material/add/"
+VIDEO_USER_LOSE_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/video_user_lose/get/"
 VIDEO_ORIGINAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/file/video/original/get/"
 LOCAL_VIDEO_UPLOAD_URL = "https://api.oceanengine.com/open_api/v3.0/local/file/video/upload/"
 
@@ -115,6 +116,11 @@ PLAN_MATERIAL_FIELDS = [
     "total_pay_order_count_for_roi2",
     "total_pay_order_gmv_for_roi2",
     "total_prepay_and_pay_order_roi2",
+]
+
+VIDEO_USER_LOSE_FIELDS = [
+    "click_cnt",
+    "user_lose_cnt",
 ]
 
 PLAN_MATERIAL_FIELDS_BY_TYPE = {
@@ -959,6 +965,33 @@ class OceanEngineClient:
                 break
             page += 1
         return rows
+
+    def get_video_user_lose(
+        self,
+        advertiser_id: int,
+        material_id: int | str,
+        start_date: str,
+        end_date: str,
+        fields: list[str] | None = None,
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        material_text = str(material_id or "").strip()
+        if not material_text:
+            raise ValueError("material_id is required")
+        material_value: int | str = int(material_text) if material_text.isdigit() else material_text
+        params: dict[str, Any] = {
+            "advertiser_id": int(advertiser_id),
+            "start_date": str(start_date).strip(),
+            "end_date": str(end_date).strip(),
+            "fields": list(fields or VIDEO_USER_LOSE_FIELDS),
+            "filtering": {
+                "material_id": material_value,
+            },
+        }
+        response = get_json_with_retries(VIDEO_USER_LOSE_URL, access_token, params)
+        if response.get("code") != 0:
+            raise ApiError(f"get video user lose failed: {response}")
+        return response
 
     def upload_local_video(
         self,
