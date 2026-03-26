@@ -1555,6 +1555,14 @@ function breakdownDetailEmptyCopy(payload) {
   return `点击${breakdownEntityLabel(payload)}行，查看该${breakdownEntityLabel(payload)}当前负责的计划规模和核心表现。`;
 }
 
+function breakdownSearchPlaceholder(payload) {
+  return "搜索运营 / 素材";
+}
+
+function breakdownDetailEmptyCopy(payload) {
+  return `点击${breakdownEntityLabel(payload)}行，查看该${breakdownEntityLabel(payload)}当前命中素材的汇总和核心表现。`;
+}
+
 function renderSystemCards(latest, extendedSync, tokenInfo) {
   const summary = latest?.summary || {};
   const hardAccountFailures = Number(summary.account_failures || 0);
@@ -1744,6 +1752,25 @@ function renderEmployeeDetail(employeeName) {
   const entityLabel = breakdownEntityLabel(payload);
   employeeDetail.className = "detail-panel";
   if (operatorMode) {
+    const materialCount = Number(row.material_count ?? row.plan_count ?? 0);
+    employeeDetail.innerHTML = `
+      <div class="detail-stats">
+        <div class="detail-stat detail-stat-wide"><span class="label">${escapeHtml(entityLabel)}</span><span class="value compact">${escapeHtml(row.operator_name || "-")}</span></div>
+        <div class="detail-stat"><span class="label">登录账号</span><span class="value compact mono">${escapeHtml(row.operator_username || "-")}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+        <div class="detail-stat"><span class="label">覆盖账户</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
+        <div class="detail-stat"><span class="label">关键词数</span><span class="value mono">${formatNumber(row.keyword_count)}</span></div>
+        <div class="detail-stat"><span class="label">素材数</span><span class="value mono">${formatNumber(materialCount)}</span></div>
+        <div class="detail-stat"><span class="label">覆盖计划</span><span class="value mono">${formatNumber(row.plan_count || 0)}</span></div>
+        <div class="detail-stat detail-stat-wide"><span class="label">代表素材</span><span class="value compact">${escapeHtml(row.top_material_name || row.top_plan_name || "暂无代表素材")}</span></div>
+      </div>
+    `;
+    return;
+  }
+  if (operatorMode) {
     employeeDetail.innerHTML = `
       <div class="detail-stats">
         <div class="detail-stat detail-stat-wide"><span class="label">${escapeHtml(entityLabel)}</span><span class="value compact">${escapeHtml(row.operator_name || "-")}</span></div>
@@ -1873,6 +1900,80 @@ function renderEmployeeTable(rows) {
   const payload = rangePayload(sectionFilter("breakdown"));
   const operatorMode = breakdownUsesOperators(payload);
   const entityLabel = breakdownEntityLabel(payload);
+  if (operatorMode) {
+    const query = employeeSearch.value.trim().toLowerCase();
+    const visibleRows = rows.filter((row) => {
+      const haystack = [
+        row.operator_name,
+        row.operator_username,
+        row.top_material_name,
+        row.top_account_name,
+      ].join(" ").toLowerCase();
+      return haystack.includes(query);
+    });
+    const columns = [
+      { key: "operator_name", label: entityLabel, sortable: true },
+      { key: "stat_cost", label: "消耗", sortable: true },
+      { key: "pay_amount", label: "支付", sortable: true },
+      { key: "order_count", label: "订单", sortable: true },
+      { key: "roi", label: "ROI", sortable: true },
+      { key: "advertiser_count", label: "账户数", sortable: true },
+      { key: "keyword_count", label: "关键词数", sortable: true },
+      { key: "material_count", label: "素材数", sortable: true },
+    ];
+    const activeSort = columns.some((column) => column.key === state.employeeSort.key)
+      ? state.employeeSort
+      : { key: "stat_cost", dir: "desc" };
+    if (activeSort.key !== state.employeeSort.key || activeSort.dir !== state.employeeSort.dir) {
+      state.employeeSort = activeSort;
+      saveSort("employee-sort", state.employeeSort);
+    }
+    const sorted = sortRows(visibleRows, activeSort);
+
+    employeeTable.innerHTML = `
+      ${makeHeader(columns, activeSort, "employee-sort")}
+      <tbody>
+        ${sorted.map((row) => {
+          const entityName = breakdownEntityName(row);
+          const materialCount = Number(row.material_count ?? row.plan_count ?? 0);
+          const subline = [
+            row.operator_username ? `账号 ${row.operator_username}` : "",
+            row.top_account_name ? `代表账户 ${row.top_account_name}` : "",
+            row.top_material_name ? `代表素材 ${row.top_material_name}` : "",
+          ].filter(Boolean);
+          return `
+            <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
+              <td>
+                <div class="cell-primary">${escapeHtml(entityName)}</div>
+                ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+              </td>
+              <td class="mono">${formatMoney(row.stat_cost)}</td>
+              <td class="mono">${formatMoney(row.pay_amount)}</td>
+              <td class="mono">${formatNumber(row.order_count)}</td>
+              <td class="mono">${formatRate(row.roi)}</td>
+              <td class="mono">${formatNumber(row.advertiser_count)}</td>
+              <td class="mono">${formatNumber(row.keyword_count)}</td>
+              <td class="mono">${formatNumber(materialCount)}</td>
+            </tr>
+          `;
+        }).join("")}
+      </tbody>
+    `;
+
+    employeeTable.querySelectorAll("th[data-key]").forEach((header) => {
+      header.addEventListener("click", () => {
+        const key = header.dataset.key;
+        const column = columns.find((item) => item.key === key);
+        if (!column || !column.sortable) return;
+        state.employeeSort = toggleSort(activeSort, key);
+        saveSort("employee-sort", state.employeeSort);
+        renderEmployeeTable(rows);
+      });
+    });
+
+    renderEmployeeInteractions(rows);
+    return;
+  }
   const query = employeeSearch.value.trim().toLowerCase();
   const visibleRows = rows.filter((row) => {
     const haystack = operatorMode

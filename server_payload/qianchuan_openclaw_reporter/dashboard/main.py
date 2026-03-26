@@ -906,7 +906,8 @@ class DashboardService:
     def _apply_account_scope(
         self, payload: dict[str, Any], allowed_advertiser_ids: set[int] | None
     ) -> dict[str, Any]:
-        return self.performance_access.apply_account_scope(payload, allowed_advertiser_ids)
+        scoped_payload = self.performance_access.apply_account_scope(payload, allowed_advertiser_ids)
+        return self._apply_material_operator_rankings(scoped_payload, allowed_advertiser_ids=allowed_advertiser_ids)
 
     def _missing_summary_days(self, conn: Any, start_dt: datetime, end_dt: datetime) -> list[datetime]:
         return self.performance_access.missing_summary_days(conn, start_dt, end_dt)
@@ -915,7 +916,10 @@ class DashboardService:
         return self.performance_access.performance_snapshot_from_db(start_dt, end_dt)
 
     def latest_snapshot(self, allowed_advertiser_ids: set[int] | None = None) -> dict[str, Any] | None:
-        return self.performance_access.latest_snapshot(allowed_advertiser_ids)
+        payload = self.performance_access.latest_snapshot(allowed_advertiser_ids)
+        if not payload:
+            return payload
+        return self._apply_material_operator_rankings(payload, allowed_advertiser_ids=allowed_advertiser_ids)
 
     def _latest_extended_sync_run(self, conn: Any) -> Any:
         return self.history_access.latest_extended_sync_run(conn)
@@ -2176,6 +2180,109 @@ class DashboardService:
         )
         return rows
 
+    def _build_operator_rankings_from_materials(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        operators, keywords = self._active_operator_config()
+        if not operators or not keywords:
+            return []
+        groups: dict[int, dict[str, Any]] = {}
+        for row in items:
+            matches = self._matched_operators_for_material(row, operators, keywords)
+            if not matches:
+                continue
+            stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+            total_pay_amount = round(float(row.get("total_pay_amount", 0.0) or 0.0), 2)
+            settled_pay_amount = round(float(row.get("settled_pay_amount", 0.0) or 0.0), 2)
+            order_count = int(float(row.get("order_count", 0.0) or 0.0))
+            settled_order_count = int(float(row.get("settled_order_count", 0.0) or 0.0))
+            material_key = str(row.get("material_key") or "").strip()
+            material_name = str(row.get("material_name") or "").strip()
+            advertiser_ids = {int(item) for item in row.get("advertiser_ids", []) if int(item or 0)}
+            plan_ids = {int(item) for item in row.get("plan_ids", []) if int(item or 0)}
+            top_account_name = str(row.get("top_account_name") or "").strip()
+            for match in matches:
+                operator_id = int(match["operator_id"])
+                group = groups.setdefault(
+                    operator_id,
+                    {
+                        "operator_id": operator_id,
+                        "operator_name": str(match["operator_name"]),
+                        "operator_username": str(match["operator_username"]),
+                        "stat_cost": 0.0,
+                        "pay_amount": 0.0,
+                        "total_pay_amount": 0.0,
+                        "settled_pay_amount": 0.0,
+                        "order_count": 0,
+                        "settled_order_count": 0,
+                        "material_keys": set(),
+                        "plan_ids": set(),
+                        "advertiser_ids": set(),
+                        "matched_keywords": set(),
+                        "top_material_name": "",
+                        "top_account_name": "",
+                        "top_material_orders": -1,
+                        "top_material_pay_amount": -1.0,
+                    },
+                )
+                group["stat_cost"] = round(group["stat_cost"] + stat_cost, 2)
+                group["pay_amount"] = round(group["pay_amount"] + pay_amount, 2)
+                group["total_pay_amount"] = round(group["total_pay_amount"] + total_pay_amount, 2)
+                group["settled_pay_amount"] = round(group["settled_pay_amount"] + settled_pay_amount, 2)
+                group["order_count"] += order_count
+                group["settled_order_count"] += settled_order_count
+                if material_key:
+                    group["material_keys"].add(material_key)
+                group["plan_ids"].update(plan_ids)
+                group["advertiser_ids"].update(advertiser_ids)
+                group["matched_keywords"].update(match["matched_keywords"])
+                if (
+                    order_count > group["top_material_orders"]
+                    or (order_count == group["top_material_orders"] and pay_amount > group["top_material_pay_amount"])
+                ):
+                    group["top_material_name"] = material_name
+                    group["top_account_name"] = top_account_name
+                    group["top_material_orders"] = order_count
+                    group["top_material_pay_amount"] = pay_amount
+
+        rows: list[dict[str, Any]] = []
+        for group in groups.values():
+            stat_cost = round(float(group["stat_cost"] or 0.0), 2)
+            pay_amount = round(float(group["pay_amount"] or 0.0), 2)
+            settled_pay_amount = round(float(group["settled_pay_amount"] or 0.0), 2)
+            order_count = int(group["order_count"] or 0)
+            settled_order_count = int(group["settled_order_count"] or 0)
+            rows.append(
+                {
+                    "operator_id": group["operator_id"],
+                    "operator_name": group["operator_name"],
+                    "operator_username": group["operator_username"],
+                    "stat_cost": stat_cost,
+                    "pay_amount": pay_amount,
+                    "total_pay_amount": round(float(group["total_pay_amount"] or 0.0), 2),
+                    "settled_pay_amount": settled_pay_amount,
+                    "order_count": order_count,
+                    "settled_order_count": settled_order_count,
+                    "material_count": len(group["material_keys"]),
+                    "plan_count": len(group["plan_ids"]),
+                    "advertiser_count": len(group["advertiser_ids"]),
+                    "keyword_count": len(group["matched_keywords"]),
+                    "top_material_name": group["top_material_name"],
+                    "top_account_name": group["top_account_name"],
+                    "roi": round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
+                    "settled_roi": round(settled_pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
+                }
+            )
+        rows.sort(
+            key=lambda item: (
+                -float(item["stat_cost"]),
+                -float(item["pay_amount"]),
+                -int(item["order_count"]),
+                -float(item["roi"]),
+                str(item["operator_name"]),
+            )
+        )
+        return rows
+
     def _group_material_rows(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -2656,7 +2763,11 @@ class DashboardService:
             operator_accounts,
             operator_plans,
         )
-        next_payload["operators"] = payload.get("operators", [])
+        next_payload["operators"] = [dict(item) for item in payload.get("operators", [])]
+        next_payload["summary"]["operator_count"] = len(next_payload["operators"])
+        next_payload["summary"]["active_operator_count"] = sum(
+            1 for item in next_payload["operators"] if float(item.get("stat_cost", 0.0) or 0.0) > 0
+        )
         return next_payload
 
     def _apply_material_scope(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
@@ -4444,6 +4555,51 @@ class DashboardService:
         self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
         return payload
 
+    def _apply_material_operator_rankings(
+        self,
+        payload: dict[str, Any],
+        *,
+        allowed_advertiser_ids: set[int] | None = None,
+        range_key: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+    ) -> dict[str, Any]:
+        if not payload:
+            return payload
+        normalized_range = str(range_key or payload.get("range_key") or "").strip().lower()
+        query_start_date = str(start_date or payload.get("query_start_date") or "").strip()
+        query_end_date = str(end_date or payload.get("query_end_date") or "").strip()
+        target_snapshot = str(snapshot_time or "").strip()
+        material_payload: dict[str, Any]
+        if normalized_range:
+            material_payload = self.material_rankings(
+                normalized_range,
+                query_start_date,
+                query_end_date,
+                "",
+                allowed_advertiser_ids,
+            )
+        else:
+            target_snapshot = target_snapshot or str(payload.get("snapshot_time") or "").strip()
+            if not target_snapshot:
+                return payload
+            material_payload = self.material_rankings(
+                "day",
+                "",
+                "",
+                target_snapshot,
+                allowed_advertiser_ids,
+            )
+        operators = self._build_operator_rankings_from_materials(material_payload.get("items", []))
+        next_payload = dict(payload)
+        next_payload["operators"] = operators
+        summary = dict(next_payload.get("summary") or {})
+        summary["operator_count"] = len(operators)
+        summary["active_operator_count"] = sum(1 for item in operators if float(item.get("stat_cost", 0.0) or 0.0) > 0)
+        next_payload["summary"] = summary
+        return next_payload
+
     def get_performance_snapshot(
         self,
         range_key: str,
@@ -4491,6 +4647,12 @@ class DashboardService:
             payload["summary"],
             payload["accounts"],
             payload["plans"],
+        )
+        payload = self._apply_material_operator_rankings(
+            payload,
+            range_key=normalized,
+            start_date=start_dt.strftime("%Y-%m-%d"),
+            end_date=end_dt.strftime("%Y-%m-%d"),
         )
         self._performance_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
         return self._apply_account_scope(payload, allowed_advertiser_ids)
