@@ -1203,25 +1203,35 @@ function uploadRetryButtonLabel(item) {
   return Number(state.uploadRetryingJobId || 0) === Number(item?.id || 0) ? "重试中..." : "重试失败项";
 }
 
+function uploadFailureStageLabel(stage) {
+  return String(stage || "").trim().toLowerCase() === "bind" ? "????" : "????";
+}
+
+function formatUploadFailureItem(row) {
+  const stageLabel = uploadFailureStageLabel(row?.failure_stage);
+  const advertiserLabel = String(row?.advertiser_name || "").trim() || (Number(row?.advertiser_id || 0) ? `?? ${row.advertiser_id}` : "");
+  const planLabel = String(row?.ad_name || "").trim() || (Number(row?.ad_id || 0) ? `?? ${row.ad_id}` : "");
+  const materialLabel = String(row?.original_name || "").trim() || "--";
+  const parts = [stageLabel, advertiserLabel];
+  if (String(row?.failure_stage || "").trim().toLowerCase() === "bind" && planLabel) parts.push(planLabel);
+  parts.push(materialLabel);
+  const reason = normalizeUploadJobNote(row?.message);
+  return reason && reason !== "--" ? `${parts.filter(Boolean).join(" / ")}: ${reason}` : parts.filter(Boolean).join(" / ");
+}
+
 function renderUploadJobNote(item) {
   const base = normalizeUploadJobNote(item.note);
   const failedItems = Array.isArray(item.failed_items) ? item.failed_items : [];
   if (!failedItems.length) {
     return escapeHtml(base);
   }
-  const failedNames = failedItems
-    .map((row) => String(row.original_name || "").trim())
-    .filter(Boolean)
-    .slice(0, 5);
-  const extraCount = Math.max(0, failedItems.length - failedNames.length);
-  const summary = failedNames.length
-    ? `失败文件：${failedNames.join("、")}${extraCount ? ` 等 ${formatNumber(failedItems.length)} 个` : ""}`
-    : `失败文件：${formatNumber(failedItems.length)} 个`;
+  const previewItems = failedItems.slice(0, 5).map((row) => formatUploadFailureItem(row));
+  const extraCount = Math.max(0, failedItems.length - previewItems.length);
   return `
     <div class="cell-primary">${escapeHtml(base)}</div>
-    <div class="cell-subline">
-      <span class="cell-subitem">${escapeHtml(summary)}</span>
-    </div>
+    <div class="cell-subline"><span class="cell-subitem">???? ${formatNumber(failedItems.length)} ?</span></div>
+    ${previewItems.map((line) => `<div class="cell-subline"><span class="cell-subitem">${escapeHtml(line)}</span></div>`).join("")}
+    ${extraCount ? `<div class="cell-subline"><span class="cell-subitem">?? ${formatNumber(extraCount)} ????</span></div>` : ""}
   `;
 }
 

@@ -284,6 +284,44 @@ class UploadAccess:
             (job_id, file_id, advertiser_id, advertiser_name, status, material_id, video_id, video_url, message, now, now),
         )
 
+    def upsert_material_upload_target_asset_locked(
+        self,
+        conn: Any,
+        job_id: int,
+        target_id: int,
+        file_id: int,
+        status: str,
+        message: str = "",
+    ) -> None:
+        now = self._now_text()
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM material_upload_job_target_assets
+            WHERE job_id = ? AND target_id = ? AND file_id = ?
+            LIMIT 1
+            """,
+            (job_id, target_id, file_id),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE material_upload_job_target_assets
+                SET status = ?, message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, message, now, existing["id"]),
+            )
+            return
+        conn.execute(
+            """
+            INSERT INTO material_upload_job_target_assets (
+                job_id, target_id, file_id, status, message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (job_id, target_id, file_id, status, message, now, now),
+        )
+
     def attach_material_upload_task(self, job_id: int, task_id: str) -> None:
         with self._db() as conn:
             self.update_material_upload_job(
@@ -333,25 +371,100 @@ class UploadAccess:
                 ).fetchall()
             items = []
             for row in rows:
-                failed_rows = conn.execute(
+                job_id = int(row["id"])
+                upload_failures = conn.execute(
                     """
-                    SELECT original_name, message, status
-                    FROM material_upload_job_files
-                    WHERE job_id = ? AND status IN ('failed', 'partial')
-                    ORDER BY id ASC
+                    SELECT
+                        fa.status,
+                        fa.message,
+                        f.original_name,
+                        fa.advertiser_id,
+                        fa.advertiser_name
+                    FROM material_upload_job_file_assets fa
+                    JOIN material_upload_job_files f ON f.id = fa.file_id
+                    WHERE fa.job_id = ? AND fa.status = 'failed'
+                    ORDER BY fa.id ASC
                     LIMIT 5
                     """,
-                    (int(row["id"]),),
+                    (job_id,),
+                ).fetchall()
+                bind_failures = conn.execute(
+                    """
+                    SELECT
+                        ta.status,
+                        ta.message,
+                        f.original_name,
+                        t.advertiser_id,
+                        t.advertiser_name,
+                        t.ad_id,
+                        t.ad_name
+                    FROM material_upload_job_target_assets ta
+                    JOIN material_upload_job_targets t ON t.id = ta.target_id
+                    JOIN material_upload_job_files f ON f.id = ta.file_id
+                    LEFT JOIN material_upload_job_file_assets fa
+                        ON fa.job_id = ta.job_id
+                       AND fa.file_id = ta.file_id
+                       AND fa.advertiser_id = t.advertiser_id
+                    WHERE ta.job_id = ?
+                      AND ta.status = 'failed'
+                      AND COALESCE(fa.status, '') != 'failed'
+                    ORDER BY ta.id ASC
+                    LIMIT 5
+                    """,
+                    (job_id,),
                 ).fetchall()
                 item = dict(row)
                 item["created_by_label"] = str(item.get("display_name") or item.get("username") or "")
-                item["failed_items"] = [
+                failed_items = [
                     {
+                        "failure_stage": "upload",
                         "original_name": str(failed_row["original_name"] or ""),
                         "message": str(failed_row["message"] or ""),
                         "status": str(failed_row["status"] or ""),
+                        "advertiser_id": int(failed_row["advertiser_id"] or 0),
+                        "advertiser_name": str(failed_row["advertiser_name"] or ""),
+                        "ad_id": 0,
+                        "ad_name": "",
                     }
-                    for failed_row in failed_rows
+                    for failed_row in upload_failures
                 ]
+                failed_items.extend(
+                    {
+                        "failure_stage": "bind",
+                        "original_name": str(failed_row["original_name"] or ""),
+                        "message": str(failed_row["message"] or ""),
+                        "status": str(failed_row["status"] or ""),
+                        "advertiser_id": int(failed_row["advertiser_id"] or 0),
+                        "advertiser_name": str(failed_row["advertiser_name"] or ""),
+                        "ad_id": int(failed_row["ad_id"] or 0),
+                        "ad_name": str(failed_row["ad_name"] or ""),
+                    }
+                    for failed_row in bind_failures
+                )
+                if not failed_items:
+                    legacy_failures = conn.execute(
+                        """
+                        SELECT original_name, message, status
+                        FROM material_upload_job_files
+                        WHERE job_id = ? AND status IN ('failed', 'partial')
+                        ORDER BY id ASC
+                        LIMIT 5
+                        """,
+                        (job_id,),
+                    ).fetchall()
+                    failed_items = [
+                        {
+                            "failure_stage": "upload",
+                            "original_name": str(failed_row["original_name"] or ""),
+                            "message": str(failed_row["message"] or ""),
+                            "status": str(failed_row["status"] or ""),
+                            "advertiser_id": 0,
+                            "advertiser_name": "",
+                            "ad_id": 0,
+                            "ad_name": "",
+                        }
+                        for failed_row in legacy_failures
+                    ]
+                item["failed_items"] = failed_items
                 items.append(item)
         return items

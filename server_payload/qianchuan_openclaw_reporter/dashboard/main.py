@@ -380,6 +380,35 @@ class DashboardService:
         self._ensure_column_locked(conn, "material_upload_job_files", "video_url", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column_locked(conn, "material_upload_job_files", "message", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column_locked(conn, "material_upload_job_files", "updated_at", "TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS material_upload_job_target_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(job_id) REFERENCES material_upload_jobs(id),
+                FOREIGN KEY(target_id) REFERENCES material_upload_job_targets(id),
+                FOREIGN KEY(file_id) REFERENCES material_upload_job_files(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_material_upload_job_target_assets_unique
+            ON material_upload_job_target_assets (job_id, target_id, file_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_upload_job_target_assets_job
+            ON material_upload_job_target_assets (job_id, target_id, file_id, status)
+            """
+        )
 
     def _ensure_material_preview_schema_locked(self, conn: Any) -> None:
         for table_name in ("material_snapshots", "material_rollups"):
@@ -640,6 +669,24 @@ class DashboardService:
             message,
         )
 
+    def _upsert_material_upload_target_asset_locked(
+        self,
+        conn: Any,
+        job_id: int,
+        target_id: int,
+        file_id: int,
+        status: str,
+        message: str = "",
+    ) -> None:
+        self.upload_access.upsert_material_upload_target_asset_locked(
+            conn,
+            job_id,
+            target_id,
+            file_id,
+            status,
+            message,
+        )
+
     def attach_material_upload_task(self, job_id: int, task_id: str) -> None:
         self.upload_access.attach_material_upload_task(job_id, task_id)
 
@@ -726,6 +773,7 @@ class DashboardService:
         target_plans: list[dict[str, Any]],
         file_sources: list[dict[str, Any]],
         note: str,
+        target_file_pairs: list[dict[str, int]] | None = None,
     ) -> dict[str, Any]:
         now = now_text()
         job_row = conn.execute(
@@ -782,6 +830,72 @@ class DashboardService:
                 for item in target_plans
             ],
         )
+        inserted_file_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id
+                FROM material_upload_job_files
+                WHERE job_id = ?
+                ORDER BY id ASC
+                """,
+                (job_id,),
+            ).fetchall()
+        ]
+        inserted_target_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id
+                FROM material_upload_job_targets
+                WHERE job_id = ?
+                ORDER BY id ASC
+                """,
+                (job_id,),
+            ).fetchall()
+        ]
+        source_file_id_map: dict[int, int] = {}
+        for index, row in enumerate(inserted_file_rows):
+            source_id = int(file_sources[index].get("_source_file_id", 0) or 0)
+            if source_id > 0:
+                source_file_id_map[source_id] = int(row["id"])
+        source_target_id_map: dict[int, int] = {}
+        for index, row in enumerate(inserted_target_rows):
+            source_id = int(target_plans[index].get("_source_target_id", 0) or 0)
+            if source_id > 0:
+                source_target_id_map[source_id] = int(row["id"])
+
+        pair_rows: list[tuple[Any, ...]] = []
+        if target_file_pairs:
+            seen_pairs: set[tuple[int, int]] = set()
+            for pair in target_file_pairs:
+                source_target_id = int(pair.get("source_target_id", 0) or 0)
+                source_file_id = int(pair.get("source_file_id", 0) or 0)
+                target_id = int(source_target_id_map.get(source_target_id, 0) or 0)
+                file_id = int(source_file_id_map.get(source_file_id, 0) or 0)
+                if not target_id or not file_id:
+                    continue
+                pair_key = (target_id, file_id)
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+                pair_rows.append((job_id, target_id, file_id, "queued", "", now, now))
+            if not pair_rows:
+                raise RuntimeError("material upload retry mapping is empty")
+        else:
+            pair_rows = [
+                (job_id, int(target_row["id"]), int(file_row["id"]), "queued", "", now, now)
+                for target_row in inserted_target_rows
+                for file_row in inserted_file_rows
+            ]
+        conn.executemany(
+            """
+            INSERT INTO material_upload_job_target_assets (
+                job_id, target_id, file_id, status, message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            pair_rows,
+        )
         return {
             "id": job_id,
             "status": "queued",
@@ -829,29 +943,67 @@ class DashboardService:
                     (int(job_id),),
                 ).fetchall()
             ]
-            retry_file_rows = [
-                row for row in file_rows if str(row.get("status") or "").strip().lower() in {"failed", "partial"}
+            retry_pair_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT target_id, file_id
+                    FROM material_upload_job_target_assets
+                    WHERE job_id = ? AND status = 'failed'
+                    ORDER BY target_id ASC, file_id ASC
+                    """,
+                    (int(job_id),),
+                ).fetchall()
             ]
-            retry_target_rows = [
-                row for row in target_rows if str(row.get("status") or "").strip().lower() in {"failed", "partial"}
-            ]
-            if not retry_file_rows and int(job.get("failed_targets", 0) or 0) > 0:
-                retry_file_rows = list(file_rows)
-            if not retry_target_rows and (
-                int(job.get("failed_files", 0) or 0) > 0
-                or int(job.get("failed_targets", 0) or 0) > 0
-                or status_text in {"failed", "partial"}
-            ):
-                retry_target_rows = list(target_rows)
+            file_map = {int(row["id"]): row for row in file_rows}
+            target_map = {int(row["id"]): row for row in target_rows}
+            target_file_pairs: list[dict[str, int]] | None = None
+            if retry_pair_rows:
+                target_file_pairs = [
+                    {
+                        "source_target_id": int(row["target_id"]),
+                        "source_file_id": int(row["file_id"]),
+                    }
+                    for row in retry_pair_rows
+                ]
+                retry_target_rows = [
+                    target_map[target_id]
+                    for target_id in dict.fromkeys(int(row["target_id"]) for row in retry_pair_rows)
+                    if target_id in target_map
+                ]
+                retry_file_rows = [
+                    file_map[file_id]
+                    for file_id in dict.fromkeys(int(row["file_id"]) for row in retry_pair_rows)
+                    if file_id in file_map
+                ]
+            else:
+                retry_file_rows = [
+                    row for row in file_rows if str(row.get("status") or "").strip().lower() in {"failed", "partial"}
+                ]
+                retry_target_rows = [
+                    row for row in target_rows if str(row.get("status") or "").strip().lower() in {"failed", "partial"}
+                ]
+                if not retry_file_rows and int(job.get("failed_targets", 0) or 0) > 0:
+                    retry_file_rows = list(file_rows)
+                if not retry_target_rows and (
+                    int(job.get("failed_files", 0) or 0) > 0
+                    or int(job.get("failed_targets", 0) or 0) > 0
+                    or status_text in {"failed", "partial"}
+                ):
+                    retry_target_rows = list(target_rows)
             if not retry_file_rows or not retry_target_rows:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
             file_sources: list[dict[str, Any]] = []
             missing_files = 0
+            available_file_ids: set[int] = set()
             for row in retry_file_rows:
                 source_path = UPLOAD_DIR / str(row.get("relative_path") or "")
                 if not source_path.exists():
                     missing_files += 1
                     continue
+                source_file_id = int(row.get("id", 0) or 0)
+                if source_file_id > 0:
+                    available_file_ids.add(source_file_id)
                 file_sources.append(
                     {
                         "original_name": str(row.get("original_name") or ""),
@@ -860,10 +1012,21 @@ class DashboardService:
                         "file_size": int(row.get("file_size", 0) or 0),
                         "file_sha256": str(row.get("file_sha256") or ""),
                         "file_md5": str(row.get("file_md5") or ""),
+                        "_source_file_id": source_file_id,
                     }
                 )
             if not file_sources:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="失败文件已丢失，无法重试")
+            if target_file_pairs is not None:
+                target_file_pairs = [
+                    pair for pair in target_file_pairs if int(pair["source_file_id"]) in available_file_ids
+                ]
+                if not target_file_pairs:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="失败文件已丢失，无法重试")
+                allowed_target_ids = {int(pair["source_target_id"]) for pair in target_file_pairs}
+                retry_target_rows = [
+                    row for row in retry_target_rows if int(row.get("id", 0) or 0) in allowed_target_ids
+                ]
             retry_note = f"重试任务来自 #{int(job_id)}，等待后台执行。"
             if missing_files > 0:
                 retry_note = f"{retry_note} 已跳过 {missing_files} 个缺失文件。"
@@ -878,11 +1041,13 @@ class DashboardService:
                         "advertiser_name": str(item.get("advertiser_name") or ""),
                         "ad_id": int(item.get("ad_id", 0) or 0),
                         "ad_name": str(item.get("ad_name") or ""),
+                        "_source_target_id": int(item.get("id", 0) or 0),
                     }
                     for item in retry_target_rows
                 ],
                 file_sources,
                 retry_note,
+                target_file_pairs=target_file_pairs,
             )
         payload["source_job_id"] = int(job_id)
         payload["retry_file_count"] = len(file_sources)
@@ -2837,6 +3002,17 @@ class DashboardService:
         }
 
     def process_material_upload_job(self, job_id: int) -> dict[str, Any]:
+        running_note = "\u6b63\u5728\u4e0a\u4f20\u7d20\u6750\u5e76\u7ed1\u5b9a\u8ba1\u5212\u3002"
+        missing_file_message = "\u6587\u4ef6\u4e0d\u5b58\u5728\uff0c\u65e0\u6cd5\u6267\u884c\u4e0a\u4f20\u3002"
+        reuse_message = "\u590d\u7528\u8d26\u6237\u5df2\u6709\u7d20\u6750\u3002"
+        upload_success_message = "\u4e0a\u4f20\u6210\u529f\u3002"
+        no_target_material_message = "\u8ba1\u5212\u6ca1\u6709\u5339\u914d\u5230\u5f85\u5904\u7406\u7d20\u6750\u3002"
+        missing_context_message = "\u8ba1\u5212\u4e0a\u4e0b\u6587\u4e0d\u5b58\u5728\uff0c\u65e0\u6cd5\u7ed1\u5b9a\u7d20\u6750\u3002"
+        missing_asset_message = "\u672a\u4e0a\u4f20\u5230\u8d26\u6237\u7d20\u6750\u5e93\u3002"
+        bind_success_message = "\u7ed1\u5b9a\u6210\u529f\u3002"
+        final_success_note = "\u7d20\u6750\u4e0a\u4f20\u5b8c\u6210\u3002"
+        final_failure_note = "\u7d20\u6750\u4e0a\u4f20\u5df2\u7ed3\u675f\uff0c\u5b58\u5728\u5931\u8d25\u9879\u3002"
+
         config = self.read_config()
         client = self.build_client(config)
         with self.db() as conn:
@@ -2851,45 +3027,101 @@ class DashboardService:
                 int(job_id),
                 status="running",
                 started_at=str(job.get("started_at") or now),
-                note="正在上传素材并绑定计划。",
+                note=running_note,
                 updated_at=now,
             )
-            file_rows = [dict(row) for row in conn.execute(
-                """
-                SELECT *
-                FROM material_upload_job_files
-                WHERE job_id = ?
-                ORDER BY id ASC
-                """,
-                (int(job_id),),
-            ).fetchall()]
-            target_rows = [dict(row) for row in conn.execute(
-                """
-                SELECT *
-                FROM material_upload_job_targets
-                WHERE job_id = ?
-                ORDER BY advertiser_id ASC, ad_id ASC
-                """,
-                (int(job_id),),
-            ).fetchall()]
+            file_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM material_upload_job_files
+                    WHERE job_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (int(job_id),),
+                ).fetchall()
+            ]
+            target_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM material_upload_job_targets
+                    WHERE job_id = ?
+                    ORDER BY advertiser_id ASC, ad_id ASC
+                    """,
+                    (int(job_id),),
+                ).fetchall()
+            ]
+            target_asset_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT target_id, file_id
+                    FROM material_upload_job_target_assets
+                    WHERE job_id = ?
+                    ORDER BY target_id ASC, file_id ASC
+                    """,
+                    (int(job_id),),
+                ).fetchall()
+            ]
+
         plan_context_map = self._latest_plan_context_map([int(item["ad_id"]) for item in target_rows])
         advertiser_plan_map: dict[int, list[dict[str, Any]]] = {}
+        target_lookup = {int(item["id"]): item for item in target_rows}
         for target in target_rows:
             advertiser_plan_map.setdefault(int(target["advertiser_id"]), []).append(target)
+
+        target_file_id_map: dict[int, set[int]] = {}
+        file_advertiser_id_map: dict[int, set[int]] = {}
+        if target_asset_rows:
+            for row in target_asset_rows:
+                target_id = int(row.get("target_id", 0) or 0)
+                file_id = int(row.get("file_id", 0) or 0)
+                if not target_id or not file_id:
+                    continue
+                target_file_id_map.setdefault(target_id, set()).add(file_id)
+                target = target_lookup.get(target_id)
+                if target:
+                    file_advertiser_id_map.setdefault(file_id, set()).add(int(target["advertiser_id"]))
+        else:
+            all_advertiser_ids = {int(item["advertiser_id"]) for item in target_rows}
+            for file_row in file_rows:
+                file_advertiser_id_map[int(file_row["id"])] = set(all_advertiser_ids)
 
         file_assets: dict[tuple[int, int], dict[str, str]] = {}
         for file_row in file_rows:
             file_id = int(file_row["id"])
-            file_path = UPLOAD_DIR / str(file_row["relative_path"] or "")
+            file_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
+            retry_advertiser_ids = sorted(file_advertiser_id_map.get(file_id) or advertiser_plan_map.keys())
             if not file_path.exists():
                 with self.db() as conn:
+                    for advertiser_id in retry_advertiser_ids:
+                        targets = advertiser_plan_map.get(advertiser_id) or []
+                        advertiser_name = str(targets[0].get("advertiser_name") or "") if targets else ""
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "failed",
+                            message=missing_file_message,
+                        )
                     conn.execute(
                         """
                         UPDATE material_upload_job_files
-                        SET status = 'failed', message = ?, updated_at = ?
+                        SET status = 'failed', message = ?, processed_advertisers = ?, success_advertisers = 0, failed_advertisers = ?, updated_at = ?
                         WHERE id = ?
                         """,
-                        ("文件不存在，无法执行上传。", now_text(), file_id),
+                        (
+                            missing_file_message,
+                            len(retry_advertiser_ids),
+                            len(retry_advertiser_ids),
+                            now_text(),
+                            file_id,
+                        ),
                     )
                     self._recompute_material_upload_job_locked(conn, int(job_id))
                 continue
@@ -2898,7 +3130,10 @@ class DashboardService:
             failed_advertisers = 0
             first_asset: dict[str, str] | None = None
             file_errors: list[str] = []
-            for advertiser_id, targets in advertiser_plan_map.items():
+            for advertiser_id in retry_advertiser_ids:
+                targets = advertiser_plan_map.get(advertiser_id) or []
+                if not targets:
+                    continue
                 advertiser_name = str(targets[0].get("advertiser_name") or "")
                 with self.db() as conn:
                     cached = self._find_advertiser_material_asset_locked(
@@ -2926,7 +3161,7 @@ class DashboardService:
                             material_id=asset["material_id"],
                             video_id=asset["video_id"],
                             video_url=asset["video_url"],
-                            message="复用账户已有素材。",
+                            message=reuse_message,
                         )
                     continue
                 try:
@@ -2944,7 +3179,7 @@ class DashboardService:
                         "video_url": str(data.get("video_url") or ""),
                     }
                     if not asset["video_id"]:
-                        raise RuntimeError(f"上传响应缺少 video_id: {upload_response}")
+                        raise RuntimeError(f"upload response missing video_id: {upload_response}")
                     file_assets[(file_id, advertiser_id)] = asset
                     first_asset = first_asset or asset
                     success_advertisers += 1
@@ -2968,7 +3203,7 @@ class DashboardService:
                             material_id=asset["material_id"],
                             video_id=asset["video_id"],
                             video_url=asset["video_url"],
-                            message="上传成功。",
+                            message=upload_success_message,
                         )
                 except Exception as exc:
                     failed_advertisers += 1
@@ -2984,34 +3219,28 @@ class DashboardService:
                             "failed",
                             message=message,
                         )
-                with self.db() as conn:
-                    conn.execute(
-                        """
-                        UPDATE material_upload_job_files
-                        SET processed_advertisers = ?, success_advertisers = ?, failed_advertisers = ?, updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (success_advertisers + failed_advertisers, success_advertisers, failed_advertisers, now_text(), file_id),
-                    )
-                    self._recompute_material_upload_job_locked(conn, int(job_id))
 
             file_status = "success" if failed_advertisers == 0 and success_advertisers > 0 else "failed"
             if success_advertisers > 0 and failed_advertisers > 0:
                 file_status = "partial"
-            message = "上传成功。" if file_status == "success" else "；".join(file_errors[:3]) or "上传失败。"
+            file_message = upload_success_message if file_status == "success" else "?".join(file_errors[:3]) or "\u4e0a\u4f20\u5931\u8d25\u3002"
             with self.db() as conn:
                 conn.execute(
                     """
                     UPDATE material_upload_job_files
-                    SET status = ?, message = ?, material_id = ?, video_id = ?, video_url = ?, updated_at = ?
+                    SET status = ?, message = ?, material_id = ?, video_id = ?, video_url = ?,
+                        processed_advertisers = ?, success_advertisers = ?, failed_advertisers = ?, updated_at = ?
                     WHERE id = ?
                     """,
                     (
                         file_status,
-                        message,
+                        file_message,
                         str((first_asset or {}).get("material_id") or ""),
                         str((first_asset or {}).get("video_id") or ""),
                         str((first_asset or {}).get("video_url") or ""),
+                        success_advertisers + failed_advertisers,
+                        success_advertisers,
+                        failed_advertisers,
                         now_text(),
                         file_id,
                     ),
@@ -3022,8 +3251,12 @@ class DashboardService:
             target_id = int(target["id"])
             advertiser_id = int(target["advertiser_id"])
             ad_id = int(target["ad_id"])
-            context = plan_context_map.get(ad_id) or {}
-            if not context:
+            allowed_file_ids = target_file_id_map.get(target_id)
+            candidate_file_rows = [
+                row for row in file_rows
+                if not allowed_file_ids or int(row.get("id", 0) or 0) in allowed_file_ids
+            ]
+            if not candidate_file_rows:
                 with self.db() as conn:
                     conn.execute(
                         """
@@ -3031,18 +3264,52 @@ class DashboardService:
                         SET status = 'failed', message = ?, updated_at = ?
                         WHERE id = ?
                         """,
-                        ("计划上下文不存在，无法绑定素材。", now_text(), target_id),
+                        (no_target_material_message, now_text(), target_id),
                     )
                     self._recompute_material_upload_job_locked(conn, int(job_id))
                 continue
+
+            context = plan_context_map.get(ad_id) or {}
+            if not context:
+                with self.db() as conn:
+                    for file_row in candidate_file_rows:
+                        self._upsert_material_upload_target_asset_locked(
+                            conn,
+                            int(job_id),
+                            target_id,
+                            int(file_row["id"]),
+                            "failed",
+                            missing_context_message,
+                        )
+                    conn.execute(
+                        """
+                        UPDATE material_upload_job_targets
+                        SET status = 'failed', message = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (missing_context_message, now_text(), target_id),
+                    )
+                    self._recompute_material_upload_job_locked(conn, int(job_id))
+                continue
+
             success_count = 0
             failed_count = 0
             bind_errors: list[str] = []
-            for file_row in file_rows:
-                asset = file_assets.get((int(file_row["id"]), advertiser_id))
+            for file_row in candidate_file_rows:
+                file_id = int(file_row["id"])
+                asset = file_assets.get((file_id, advertiser_id))
                 if not asset or not str(asset.get("video_id") or ""):
                     failed_count += 1
-                    bind_errors.append(f"{file_row.get('original_name') or file_row.get('stored_name')}: 未上传到账户素材库")
+                    bind_errors.append(f"{file_row.get('original_name') or file_row.get('stored_name')}: {missing_asset_message}")
+                    with self.db() as conn:
+                        self._upsert_material_upload_target_asset_locked(
+                            conn,
+                            int(job_id),
+                            target_id,
+                            file_id,
+                            "failed",
+                            missing_asset_message,
+                        )
                     continue
                 try:
                     client.add_plan_material(
@@ -3054,15 +3321,35 @@ class DashboardService:
                         product_id=str(context.get("product_id") or ""),
                     )
                     success_count += 1
+                    with self.db() as conn:
+                        self._upsert_material_upload_target_asset_locked(
+                            conn,
+                            int(job_id),
+                            target_id,
+                            file_id,
+                            "success",
+                            bind_success_message,
+                        )
                 except Exception as exc:
                     failed_count += 1
-                    bind_errors.append(f"{file_row.get('original_name') or file_row.get('stored_name')}: {exc}")
+                    message = str(exc)
+                    bind_errors.append(f"{file_row.get('original_name') or file_row.get('stored_name')}: {message}")
+                    with self.db() as conn:
+                        self._upsert_material_upload_target_asset_locked(
+                            conn,
+                            int(job_id),
+                            target_id,
+                            file_id,
+                            "failed",
+                            message,
+                        )
+
             target_status = "success" if failed_count == 0 and success_count > 0 else "failed"
             if success_count > 0 and failed_count > 0:
                 target_status = "partial"
-            summary = f"成功 {success_count} / 失败 {failed_count}"
+            summary = f"\u6210\u529f {success_count} / \u5931\u8d25 {failed_count}"
             if bind_errors:
-                summary = f"{summary}；{bind_errors[0]}"
+                summary = f"{summary}\uff1b{bind_errors[0]}"
             with self.db() as conn:
                 conn.execute(
                     """
@@ -3076,22 +3363,21 @@ class DashboardService:
 
         with self.db() as conn:
             counts = self._recompute_material_upload_job_locked(conn, int(job_id))
-            target_rows = conn.execute(
+            target_status_rows = conn.execute(
                 "SELECT status FROM material_upload_job_targets WHERE job_id = ?",
                 (int(job_id),),
             ).fetchall()
-            statuses = {str(row["status"] or "") for row in target_rows}
+            statuses = {str(row["status"] or "") for row in target_status_rows}
             final_status = "success" if statuses == {"success"} else "failed"
             if "partial" in statuses or ("success" in statuses and "failed" in statuses):
                 final_status = "partial"
             if not statuses:
                 final_status = "failed"
-            note = "素材上传完成。" if final_status == "success" else "素材上传已结束，存在失败项。"
             self._update_material_upload_job(
                 conn,
                 int(job_id),
                 status=final_status,
-                note=note,
+                note=final_success_note if final_status == "success" else final_failure_note,
                 completed_at=now_text(),
                 updated_at=now_text(),
             )

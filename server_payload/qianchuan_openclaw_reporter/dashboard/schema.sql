@@ -415,6 +415,20 @@ CREATE TABLE IF NOT EXISTS material_upload_job_file_assets (
     FOREIGN KEY(file_id) REFERENCES material_upload_job_files(id)
 );
 
+CREATE TABLE IF NOT EXISTS material_upload_job_target_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    target_id INTEGER NOT NULL,
+    file_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(job_id) REFERENCES material_upload_jobs(id),
+    FOREIGN KEY(target_id) REFERENCES material_upload_job_targets(id),
+    FOREIGN KEY(file_id) REFERENCES material_upload_job_files(id)
+);
+
 CREATE TABLE IF NOT EXISTS account_balances (
     snapshot_time TEXT NOT NULL,
     advertiser_id BIGINT NOT NULL,
@@ -513,6 +527,12 @@ ON advertiser_material_assets (advertiser_id, file_sha256);
 
 CREATE INDEX IF NOT EXISTS idx_material_upload_job_file_assets_job
 ON material_upload_job_file_assets (job_id, file_id, advertiser_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_material_upload_job_target_assets_unique
+ON material_upload_job_target_assets (job_id, target_id, file_id);
+
+CREATE INDEX IF NOT EXISTS idx_material_upload_job_target_assets_job
+ON material_upload_job_target_assets (job_id, target_id, file_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_account_balances_adv_time
 ON account_balances (advertiser_id, snapshot_time);
