@@ -33,6 +33,9 @@ CUSTOMER_CENTER_URL = "https://ad.oceanengine.com/open_api/2/customer_center/adv
 ACCOUNT_FUND_URL = "https://api.oceanengine.com/open_api/v3.0/account/fund/get/"
 ACCOUNT_REPORT_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/get/"
 PLAN_LIST_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/list/"
+STANDARD_ACCOUNT_REPORT_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/advertiser/get/"
+STANDARD_PLAN_LIST_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/ad/get/"
+STANDARD_PLAN_REPORT_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/ad/get/"
 UNI_PROMOTION_CONFIG_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/config/get/"
 UNI_PROMOTION_DATA_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/data/get/"
 PLAN_DETAIL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/detail/"
@@ -49,6 +52,13 @@ REPORT_FIELDS = [
     "total_pay_order_gmv_for_roi2",
 ]
 
+STANDARD_ACCOUNT_REPORT_FIELDS = [
+    "stat_cost",
+    "pay_order_amount",
+    "pay_order_count",
+    "prepay_and_pay_order_roi",
+]
+
 PLAN_REPORT_FIELDS = [
     "stat_cost",
     "total_prepay_and_pay_order_roi2",
@@ -63,6 +73,16 @@ PLAN_REPORT_FIELDS = [
     "total_refund_order_gmv_for_roi2_1h_rate",
     "total_refund_order_gmv_for_roi2_1h_all",
 ]
+
+STANDARD_PLAN_REPORT_FIELDS = [
+    "stat_cost",
+    "pay_order_amount",
+    "pay_order_count",
+    "prepay_and_pay_order_roi",
+    "pay_order_cost_per_order",
+    "pay_order_coupon_amount",
+]
+STANDARD_REPORT_TIME_GRANULARITY = "TIME_GRANULARITY_DAILY"
 
 UNI_PROMOTION_DATA_TOPICS = [
     "ROI2_IMAGE_AGG_MATERIAL_ANALYSIS",
@@ -108,6 +128,8 @@ PLAN_MATERIAL_FIELDS_BY_TYPE = {
 }
 
 PLAN_MATERIAL_TYPES = ["VIDEO", "IMAGE", "TITLE", "CAROUSEL", "LIVE_ROOM"]
+PLAN_SOURCE_UNI_PROMOTION = "UNI_PROMOTION"
+PLAN_SOURCE_STANDARD = "STANDARD"
 TOKEN_LOCK_KEY = os.environ.get("OCEANENGINE_TOKEN_LOCK_KEY", "qianchuan:oauth:refresh")
 TOKEN_LOCK_TIMEOUT_SECONDS = int(os.environ.get("OCEANENGINE_TOKEN_LOCK_TIMEOUT_SECONDS", "120") or 120)
 TOKEN_LOCK_BLOCKING_TIMEOUT_SECONDS = int(
@@ -184,6 +206,7 @@ class PlanSummary:
     settled_amount_rate: float
     refund_rate_1h: float
     refund_amount_1h: float
+    plan_source: str = PLAN_SOURCE_UNI_PROMOTION
 
 
 class ApiError(RuntimeError):
@@ -229,6 +252,13 @@ def plan_marketing_goal_label(marketing_goal: str) -> str:
     if not text:
         return "未设置"
     return MARKETING_GOAL_LABELS.get(text, text)
+
+
+def normalize_standard_marketing_goal(config: dict[str, Any]) -> str:
+    value = str(config.get("marketing_goal") or "ALL").strip()
+    if value in {"ALL", "VIDEO_PROM_GOODS", "LIVE_PROM_GOODS"}:
+        return value
+    return "ALL"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -1018,51 +1048,134 @@ class OceanEngineClient:
             raise ApiError(f"get original videos failed: {response}")
         return response
 
+    @staticmethod
+    def _empty_account_summary(
+        advertiser_id: int,
+        advertiser_name: str,
+        *,
+        ok: bool,
+        error: str | None = None,
+    ) -> AccountSummary:
+        return AccountSummary(
+            advertiser_id=advertiser_id,
+            advertiser_name=advertiser_name,
+            stat_cost=0.0,
+            roi=0.0,
+            order_count=0,
+            pay_amount=0.0,
+            ok=ok,
+            error=error,
+        )
+
+    def _get_uni_account_summary(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> AccountSummary:
+        access_token = self.get_access_token()
+        params = {
+            "advertiser_id": advertiser_id,
+            "start_date": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_date": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "marketing_goal": self.config["marketing_goal"],
+            "order_platform": self.config["order_platform"],
+            "fields": REPORT_FIELDS,
+        }
+        response = get_json_with_retries(ACCOUNT_REPORT_URL, access_token, params)
+        if response.get("code") != 0:
+            return self._empty_account_summary(
+                advertiser_id,
+                advertiser_name,
+                ok=False,
+                error=response.get("message", "unknown error"),
+            )
+        data = response.get("data") or {}
+        return AccountSummary(
+            advertiser_id=advertiser_id,
+            advertiser_name=advertiser_name,
+            stat_cost=round(float(data.get("stat_cost", 0.0) or 0.0), 2),
+            roi=round(float(data.get("total_prepay_and_pay_order_roi2", 0.0) or 0.0), 2),
+            order_count=int(float(data.get("total_pay_order_count_for_roi2", 0.0) or 0.0)),
+            pay_amount=round(float(data.get("total_pay_order_gmv_for_roi2", 0.0) or 0.0), 2),
+        )
+
+    def _get_standard_account_summary(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> AccountSummary:
+        access_token = self.get_access_token()
+        filtering: dict[str, Any] = {
+            "marketing_goal": normalize_standard_marketing_goal(self.config),
+        }
+        order_platform = str(self.config.get("order_platform") or "").strip()
+        if order_platform:
+            filtering["order_platform"] = order_platform
+        params = {
+            "advertiser_id": advertiser_id,
+            "start_date": start_dt.strftime("%Y-%m-%d"),
+            "end_date": end_dt.strftime("%Y-%m-%d"),
+            "fields": STANDARD_ACCOUNT_REPORT_FIELDS,
+            "filtering": filtering,
+            "time_granularity": STANDARD_REPORT_TIME_GRANULARITY,
+            "page": 1,
+            "page_size": 10,
+        }
+        response = get_json_with_retries(STANDARD_ACCOUNT_REPORT_URL, access_token, params)
+        if response.get("code") != 0:
+            return self._empty_account_summary(
+                advertiser_id,
+                advertiser_name,
+                ok=False,
+                error=response.get("message", "unknown error"),
+            )
+        rows = (response.get("data") or {}).get("list") or []
+        stat_cost = round(sum(float(row.get("stat_cost", 0.0) or 0.0) for row in rows), 2)
+        pay_amount = round(sum(float(row.get("pay_order_amount", 0.0) or 0.0) for row in rows), 2)
+        order_count = int(sum(float(row.get("pay_order_count", 0.0) or 0.0) for row in rows))
+        return AccountSummary(
+            advertiser_id=advertiser_id,
+            advertiser_name=advertiser_name,
+            stat_cost=stat_cost,
+            roi=derive_ratio(pay_amount, stat_cost, 0.0),
+            order_count=order_count,
+            pay_amount=pay_amount,
+        )
+
     def get_account_summary(self, advertiser_id: int, advertiser_name: str, start_dt: datetime, end_dt: datetime) -> AccountSummary:
         try:
-            access_token = self.get_access_token()
-            params = {
-                "advertiser_id": advertiser_id,
-                "start_date": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "end_date": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "marketing_goal": self.config["marketing_goal"],
-                "order_platform": self.config["order_platform"],
-                "fields": REPORT_FIELDS,
-            }
-            response = get_json_with_retries(ACCOUNT_REPORT_URL, access_token, params)
-            if response.get("code") != 0:
+            source_summaries = [
+                self._get_uni_account_summary(advertiser_id, advertiser_name, start_dt, end_dt),
+                self._get_standard_account_summary(advertiser_id, advertiser_name, start_dt, end_dt),
+            ]
+            successful = [item for item in source_summaries if item.ok]
+            if successful:
+                stat_cost = round(sum(item.stat_cost for item in successful), 2)
+                pay_amount = round(sum(item.pay_amount for item in successful), 2)
+                order_count = sum(int(item.order_count or 0) for item in successful)
                 return AccountSummary(
                     advertiser_id=advertiser_id,
                     advertiser_name=advertiser_name,
-                    stat_cost=0.0,
-                    roi=0.0,
-                    order_count=0,
-                    pay_amount=0.0,
-                    ok=False,
-                    error=response.get("message", "unknown error"),
+                    stat_cost=stat_cost,
+                    roi=derive_ratio(pay_amount, stat_cost, 0.0),
+                    order_count=order_count,
+                    pay_amount=pay_amount,
                 )
-            data = response.get("data") or {}
-            return AccountSummary(
-                advertiser_id=advertiser_id,
-                advertiser_name=advertiser_name,
-                stat_cost=round(float(data.get("stat_cost", 0.0) or 0.0), 2),
-                roi=round(float(data.get("total_prepay_and_pay_order_roi2", 0.0) or 0.0), 2),
-                order_count=int(float(data.get("total_pay_order_count_for_roi2", 0.0) or 0.0)),
-                pay_amount=round(float(data.get("total_pay_order_gmv_for_roi2", 0.0) or 0.0), 2),
+            errors = [str(item.error or "").strip() for item in source_summaries if str(item.error or "").strip()]
+            return self._empty_account_summary(
+                advertiser_id,
+                advertiser_name,
+                ok=False,
+                error="; ".join(errors) or "unknown error",
             )
         except Exception as exc:  # noqa: BLE001
-            return AccountSummary(
-                advertiser_id=advertiser_id,
-                advertiser_name=advertiser_name,
-                stat_cost=0.0,
-                roi=0.0,
-                order_count=0,
-                pay_amount=0.0,
-                ok=False,
-                error=str(exc),
-            )
+            return self._empty_account_summary(advertiser_id, advertiser_name, ok=False, error=str(exc))
 
-    def list_plan_summaries(
+    def _list_uni_plan_summaries(
         self,
         advertiser_id: int,
         advertiser_name: str,
@@ -1086,7 +1199,7 @@ class OceanEngineClient:
                 }
                 response = get_json_with_retries(PLAN_LIST_URL, access_token, params)
                 if response.get("code") != 0:
-                    raise ApiError(f"list plans failed: {response}")
+                    raise ApiError(f"list uni promotion plans failed: {response}")
                 data = response.get("data") or {}
                 for item in data.get("ad_list", []):
                     ad_info = item.get("ad_info") or {}
@@ -1143,6 +1256,7 @@ class OceanEngineClient:
                                 stats_info.get("total_refund_order_gmv_for_roi2_1h_rate"),
                             ),
                             refund_amount_1h=refund_amount_1h,
+                            plan_source=PLAN_SOURCE_UNI_PROMOTION,
                         )
                     )
                 page_info = data.get("page_info") or {}
@@ -1150,6 +1264,160 @@ class OceanEngineClient:
                 if page >= total_page:
                     break
                 page += 1
+        return plans
+
+    def _list_standard_plan_metadata(self, advertiser_id: int) -> dict[int, dict[str, Any]]:
+        access_token = self.get_access_token()
+        page_size = normalize_plan_page_size(self.config)
+        plans: dict[int, dict[str, Any]] = {}
+        for marketing_goal in get_plan_marketing_goals(self.config):
+            page = 1
+            while True:
+                params = {
+                    "advertiser_id": advertiser_id,
+                    "filtering": {"marketing_goal": marketing_goal},
+                    "request_aweme_info": 1,
+                    "page": page,
+                    "page_size": page_size,
+                }
+                response = get_json_with_retries(STANDARD_PLAN_LIST_URL, access_token, params)
+                if response.get("code") != 0:
+                    raise ApiError(f"list standard plans failed: {response}")
+                data = response.get("data") or {}
+                rows = data.get("list") or []
+                for row in rows:
+                    ad_id = int(row.get("ad_id", 0) or 0)
+                    if ad_id:
+                        plans[ad_id] = dict(row)
+                page_info = data.get("page_info") or {}
+                total_page = int(page_info.get("total_page", 1) or 1)
+                if page >= total_page:
+                    break
+                page += 1
+        return plans
+
+    def _list_standard_plan_stats(
+        self,
+        advertiser_id: int,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> dict[int, dict[str, Any]]:
+        access_token = self.get_access_token()
+        page_size = normalize_plan_page_size(self.config)
+        filtering: dict[str, Any] = {
+            "marketing_goal": normalize_standard_marketing_goal(self.config),
+        }
+        order_platform = str(self.config.get("order_platform") or "").strip()
+        if order_platform:
+            filtering["order_platform"] = order_platform
+        rows_by_ad_id: dict[int, dict[str, Any]] = {}
+        page = 1
+        while True:
+            params = {
+                "advertiser_id": advertiser_id,
+                "start_date": start_dt.strftime("%Y-%m-%d"),
+                "end_date": end_dt.strftime("%Y-%m-%d"),
+                "fields": STANDARD_PLAN_REPORT_FIELDS,
+                "filtering": filtering,
+                "time_granularity": STANDARD_REPORT_TIME_GRANULARITY,
+                "page": page,
+                "page_size": page_size,
+            }
+            response = get_json_with_retries(STANDARD_PLAN_REPORT_URL, access_token, params)
+            if response.get("code") != 0:
+                raise ApiError(f"list standard plan reports failed: {response}")
+            data = response.get("data") or {}
+            rows = data.get("list") or []
+            for row in rows:
+                ad_id = int(row.get("ad_id", 0) or 0)
+                if ad_id:
+                    rows_by_ad_id[ad_id] = dict(row)
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page:
+                break
+            page += 1
+        return rows_by_ad_id
+
+    def _list_standard_plan_summaries(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[PlanSummary]:
+        metadata_rows = self._list_standard_plan_metadata(advertiser_id)
+        stats_rows = self._list_standard_plan_stats(advertiser_id, start_dt, end_dt)
+        plans: list[PlanSummary] = []
+        for ad_id in sorted(set(metadata_rows.keys()) | set(stats_rows.keys())):
+            metadata = metadata_rows.get(ad_id) or {}
+            stats = stats_rows.get(ad_id) or {}
+            product_items = metadata.get("product_info") or []
+            aweme_items = metadata.get("aweme_info") or []
+            first_product = product_items[0] if product_items else {}
+            first_aweme = aweme_items[0] if aweme_items else {}
+            delivery_setting = metadata.get("delivery_setting") or {}
+            pay_amount = normalize_metric(stats.get("pay_order_amount"))
+            coupon_amount = normalize_metric(stats.get("pay_order_coupon_amount"))
+            stat_cost = normalize_metric(stats.get("stat_cost"))
+            order_count = int(float(stats.get("pay_order_count", 0.0) or 0.0))
+            plans.append(
+                PlanSummary(
+                    advertiser_id=advertiser_id,
+                    advertiser_name=advertiser_name,
+                    ad_id=ad_id,
+                    ad_name=str(metadata.get("name") or f"ad_{ad_id}"),
+                    product_id=str(first_product.get("id") or first_product.get("product_id") or ""),
+                    product_name=str(first_product.get("name") or first_product.get("product_name") or ""),
+                    anchor_name=str(
+                        first_aweme.get("aweme_name")
+                        or first_aweme.get("aweme_show_id")
+                        or first_aweme.get("name")
+                        or ""
+                    ),
+                    marketing_goal=str(metadata.get("marketing_goal") or stats.get("marketing_goal") or ""),
+                    status=str(metadata.get("status") or ""),
+                    opt_status=str(metadata.get("opt_status") or ""),
+                    roi_goal=round(
+                        float(delivery_setting.get("roi_goal") or delivery_setting.get("target_roi") or 0.0),
+                        2,
+                    ),
+                    stat_cost=stat_cost,
+                    roi=derive_ratio(pay_amount, stat_cost, stats.get("prepay_and_pay_order_roi")),
+                    order_count=order_count,
+                    pay_amount=pay_amount,
+                    total_pay_amount=round(pay_amount + coupon_amount, 2),
+                    settled_pay_amount=0.0,
+                    settled_roi=0.0,
+                    settled_order_count=0,
+                    pay_order_cost=derive_ratio(stat_cost, order_count, stats.get("pay_order_cost_per_order")),
+                    settled_amount_rate=0.0,
+                    refund_rate_1h=0.0,
+                    refund_amount_1h=0.0,
+                    plan_source=PLAN_SOURCE_STANDARD,
+                )
+            )
+        return plans
+
+    def list_plan_summaries(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[PlanSummary]:
+        plans: list[PlanSummary] = []
+        errors: list[str] = []
+        try:
+            plans.extend(self._list_uni_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"uni_promotion: {exc}")
+        try:
+            plans.extend(self._list_standard_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"standard: {exc}")
+        if not plans and errors:
+            raise ApiError("; ".join(errors))
         return plans
 
 

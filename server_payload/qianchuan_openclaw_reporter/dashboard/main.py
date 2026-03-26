@@ -28,6 +28,8 @@ if str(ROOT_DIR) not in sys.path:
 from report_qianchuan import (  # noqa: E402
     PLAN_MATERIAL_TYPES,
     PLAN_PRODUCT_FIELDS,
+    PLAN_SOURCE_STANDARD,
+    PLAN_SOURCE_UNI_PROMOTION,
     AccountSummary,
     OceanEngineClient,
     PlanSummary,
@@ -389,6 +391,7 @@ class DashboardService:
             self._ensure_column_locked(conn, table_name, "settled_order_count", "INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_plan_snapshot_schema_locked(self, conn: Any) -> None:
+        self._ensure_column_locked(conn, "plan_snapshots", "plan_source", "TEXT NOT NULL DEFAULT 'UNI_PROMOTION'")
         self._ensure_column_locked(conn, "plan_snapshots", "total_pay_amount", "REAL NOT NULL DEFAULT 0")
         self._ensure_column_locked(conn, "plan_snapshots", "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
         self._ensure_column_locked(conn, "plan_snapshots", "settled_roi", "REAL NOT NULL DEFAULT 0")
@@ -1183,8 +1186,13 @@ class DashboardService:
     @staticmethod
     def _decorate_plan_item(row: Any) -> dict[str, Any]:
         item = dict(row)
+        item["plan_source"] = str(item.get("plan_source") or PLAN_SOURCE_UNI_PROMOTION).strip().upper()
+        item["plan_source_text"] = "基础投放" if item["plan_source"] == PLAN_SOURCE_STANDARD else "全域投放"
         item["marketing_goal_label"] = plan_marketing_goal_label(item["marketing_goal"])
-        item["marketing_goal_text"] = item["marketing_goal_label"]
+        if item["marketing_goal_label"]:
+            item["marketing_goal_text"] = f"{item['plan_source_text']} / {item['marketing_goal_label']}"
+        else:
+            item["marketing_goal_text"] = item["plan_source_text"]
         item["status_label"] = plan_delivery_status_label(item["status"])
         item["opt_status_label"] = plan_opt_status_label(item["opt_status"])
         item["status_text"] = format_plan_status_text(item["status"], item["opt_status"])
@@ -3292,11 +3300,11 @@ class DashboardService:
                 """
                 INSERT INTO plan_snapshots (
                     snapshot_time, advertiser_id, advertiser_name, ad_id, ad_name,
-                    product_id, product_name, anchor_name, marketing_goal, status,
+                    product_id, product_name, anchor_name, marketing_goal, plan_source, status,
                     opt_status, roi_goal, stat_cost, roi, order_count, pay_amount,
                     total_pay_amount, settled_pay_amount, settled_roi, settled_order_count,
                     pay_order_cost, settled_amount_rate, refund_rate_1h, refund_amount_1h
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -3309,6 +3317,7 @@ class DashboardService:
                         item["product_name"],
                         item["anchor_name"],
                         item["marketing_goal"],
+                        item.get("plan_source", PLAN_SOURCE_UNI_PROMOTION),
                         item["status"],
                         item["opt_status"],
                         item["roi_goal"],
@@ -3498,6 +3507,11 @@ class DashboardService:
         config = self.read_config()
         with self.db() as conn:
             plans = self._snapshot_plans(conn, str(meta["snapshot_time"]))
+        plans = [
+            row
+            for row in plans
+            if str(row.get("plan_source") or PLAN_SOURCE_UNI_PROMOTION).strip().upper() == PLAN_SOURCE_UNI_PROMOTION
+        ]
 
         plan_limit = self._detail_sync_plan_limit(config)
         if plan_limit > 0:

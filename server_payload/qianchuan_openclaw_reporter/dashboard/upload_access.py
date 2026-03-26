@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+PLAN_SOURCE_UNI_PROMOTION = "UNI_PROMOTION"
+
 
 class UploadAccess:
     def __init__(
@@ -29,7 +31,11 @@ class UploadAccess:
         if not payload:
             return {"scope": scope, "query": query, "accounts": [], "plans": [], "plan_count": 0, "account_count": 0}
         accounts = [dict(item) for item in payload.get("accounts", [])]
-        plans = [dict(item) for item in payload.get("plans", [])]
+        plans = [
+            dict(item)
+            for item in payload.get("plans", [])
+            if str(item.get("plan_source") or PLAN_SOURCE_UNI_PROMOTION).strip().upper() == PLAN_SOURCE_UNI_PROMOTION
+        ]
         query_text = str(query or "").strip().casefold()
         account_map = {int(item.get("advertiser_id", 0) or 0): dict(item) for item in accounts}
         if scope == "account":
@@ -181,16 +187,18 @@ class UploadAccess:
             rows = conn.execute(
                 f"""
                 SELECT p.ad_id, p.advertiser_id, p.advertiser_name, p.ad_name, p.product_id, p.product_name, p.anchor_name,
-                       p.marketing_goal, p.status, p.opt_status, p.snapshot_time
+                       p.marketing_goal, p.plan_source, p.status, p.opt_status, p.snapshot_time
                 FROM plan_snapshots p
                 JOIN (
                     SELECT ad_id, MAX(snapshot_time) AS latest_snapshot_time
                     FROM plan_snapshots
                     WHERE ad_id IN ({placeholders})
+                      AND COALESCE(plan_source, 'UNI_PROMOTION') = 'UNI_PROMOTION'
                     GROUP BY ad_id
                 ) latest
                   ON latest.ad_id = p.ad_id
                  AND latest.latest_snapshot_time = p.snapshot_time
+                WHERE COALESCE(p.plan_source, 'UNI_PROMOTION') = 'UNI_PROMOTION'
                 """,
                 normalized_ids,
             ).fetchall()
