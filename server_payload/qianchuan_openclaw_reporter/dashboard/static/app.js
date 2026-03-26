@@ -57,6 +57,8 @@ const RULE_ENTITY_CONFIG = {
 const MATERIAL_PAGE_SIZE = 100;
 const MATERIAL_CACHE_TTL_MS = 55 * 1000;
 const MATERIAL_SEARCH_DEBOUNCE_MS = 180;
+const MATERIAL_TOTAL_PAY_TYPES = new Set(["VIDEO", "IMAGE", "TITLE"]);
+const MATERIAL_SETTLED_TYPES = new Set(["VIDEO", "IMAGE"]);
 
 const state = {
   payload: null,
@@ -760,6 +762,55 @@ function enrichPlanRow(row) {
   };
 }
 
+function materialTypeKey(row) {
+  return String(row?.material_type || "").trim().toUpperCase();
+}
+
+function materialSupportsTotalPayMetrics(row) {
+  return MATERIAL_TOTAL_PAY_TYPES.has(materialTypeKey(row));
+}
+
+function materialSupportsSettledMetrics(row) {
+  return MATERIAL_SETTLED_TYPES.has(materialTypeKey(row));
+}
+
+function enrichMaterialRow(row) {
+  const statCost = Number(row?.stat_cost || 0);
+  const totalPayAmount = Number(row?.total_pay_amount || 0);
+  const settledPayAmount = Number(row?.settled_pay_amount || 0);
+  const orderCount = Number(row?.order_count || 0);
+  const settledOrderCount = Number(row?.settled_order_count || 0);
+  return {
+    ...row,
+    total_pay_amount: totalPayAmount,
+    settled_pay_amount: settledPayAmount,
+    settled_order_count: settledOrderCount,
+    settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
+    pay_order_cost: orderCount > 0 ? Number((statCost / orderCount).toFixed(2)) : Number(row?.pay_order_cost || 0),
+    settled_amount_rate: totalPayAmount > 0
+      ? Number((settledPayAmount / totalPayAmount * 100).toFixed(2))
+      : Number(row?.settled_amount_rate || 0),
+  };
+}
+
+function formatMaterialTotalPayAmount(row) {
+  return materialSupportsTotalPayMetrics(row) ? formatMoney(row.total_pay_amount) : "-";
+}
+
+function formatMaterialSettledPayAmount(row) {
+  return materialSupportsSettledMetrics(row) ? formatMoney(row.settled_pay_amount) : "-";
+}
+
+function formatMaterialSettledRoi(row) {
+  return materialSupportsSettledMetrics(row) ? formatRate(row.settled_roi) : "-";
+}
+
+function formatMaterialSettledAmountRate(row) {
+  return materialSupportsSettledMetrics(row) && Number(row.total_pay_amount || 0) > 0
+    ? formatPercent(row.settled_amount_rate)
+    : "-";
+}
+
 function notificationChannelOptions(current) {
   const options = ["feishu", "dingtalk", "wechat"];
   if (current && !options.includes(current)) {
@@ -959,7 +1010,7 @@ function latestMaterialSnapshotToken() {
 }
 
 function materialRowsForCurrentFilter() {
-  return materialRangePayload(sectionFilter("material"))?.items || [];
+  return (materialRangePayload(sectionFilter("material"))?.items || []).map((row) => enrichMaterialRow(row));
 }
 
 function rangeLabel(filter) {
@@ -1820,7 +1871,8 @@ function clearMaterialDetail() {
 function renderMaterialDetail(materialKey) {
   if (!materialDetail) return;
   const rows = materialRangePayload(sectionFilter("material"))?.items || [];
-  const row = rows.find((item) => item.material_key === materialKey);
+  const sourceRow = rows.find((item) => item.material_key === materialKey);
+  const row = sourceRow ? enrichMaterialRow(sourceRow) : null;
   if (!row) return;
   materialDetailStage?.classList.remove("hidden");
   materialDetail.className = "detail-panel";
@@ -1833,6 +1885,15 @@ function renderMaterialDetail(materialKey) {
       <button type="button" class="button ghost compact" data-action="open-material-preview" data-material-key="${escapeHtml(row.material_key)}">预览素材</button>
     </div>
     <div class="detail-stats">
+      <div class="detail-stat"><span class="label">消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
+      <div class="detail-stat"><span class="label">整体成交</span><span class="value mono">${formatMaterialTotalPayAmount(row)}</span></div>
+      <div class="detail-stat"><span class="label">净成交</span><span class="value mono">${formatMaterialSettledPayAmount(row)}</span></div>
+      <div class="detail-stat"><span class="label">支付 ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+      <div class="detail-stat"><span class="label">净成交 ROI</span><span class="value mono">${formatMaterialSettledRoi(row)}</span></div>
+      <div class="detail-stat"><span class="label">支付金额</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
+      <div class="detail-stat"><span class="label">成交订单数</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
+      <div class="detail-stat"><span class="label">净成交订单数</span><span class="value mono">${materialSupportsSettledMetrics(row) ? formatNumber(row.settled_order_count) : "-"}</span></div>
+      <div class="detail-stat"><span class="label">净成交结算率</span><span class="value mono">${formatMaterialSettledAmountRate(row)}</span></div>
       <div class="detail-stat"><span class="label">覆盖账户数</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
       <div class="detail-stat"><span class="label">覆盖计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
       <div class="detail-stat"><span class="label">首发视频</span><span class="value compact">${row.is_original ? "是" : "否"}</span></div>
@@ -1929,6 +1990,19 @@ function renderMaterialInteractions(rows) {
     });
   }
   materialTable.querySelectorAll('[data-action="open-material-preview"]').forEach((button) => {
+    const materialKey = String(button.dataset.materialKey || "");
+    const row = rows.find((item) => item.material_key === materialKey);
+    if (!row) return;
+    const replacement = materialPreviewTriggerMarkup(row);
+    if (replacement.startsWith("<span")) {
+      button.outerHTML = replacement;
+      return;
+    }
+    if (String(row.cover_url || "").trim()) {
+      button.outerHTML = replacement;
+    }
+  });
+  materialTable.querySelectorAll('[data-action="open-material-preview"]').forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       const materialKey = String(button.dataset.materialKey || "");
@@ -1940,6 +2014,7 @@ function renderMaterialInteractions(rows) {
 
 function renderMaterialTable(rows) {
   const operatorMode = isOperator();
+  const enrichedRows = rows.map((row) => enrichMaterialRow(row));
   if (
     operatorMode
     && !["material_name", "stat_cost", "top_account_name", "top_plan_name"].includes(String(state.materialSort.key || ""))
@@ -1948,7 +2023,7 @@ function renderMaterialTable(rows) {
     saveSort("material-sort", state.materialSort);
   }
   const query = materialSearch.value.trim().toLowerCase();
-  const visibleRows = rows.filter((row) => {
+  const visibleRows = enrichedRows.filter((row) => {
     const haystack = [row.material_name, row.material_id, row.video_id, row.top_plan_name, row.top_account_name].join(" ").toLowerCase();
     return haystack.includes(query);
   });
@@ -1964,8 +2039,10 @@ function renderMaterialTable(rows) {
         { key: "material_name", label: "素材", sortable: true },
         { key: "preview", label: "预览", sortable: false },
         { key: "stat_cost", label: "消耗", sortable: true },
-        { key: "roi", label: "ROI", sortable: true },
-        { key: "pay_amount", label: "支付", sortable: true },
+        { key: "total_pay_amount", label: "整体成交", sortable: true },
+        { key: "settled_pay_amount", label: "净成交", sortable: true },
+        { key: "roi", label: "支付ROI", sortable: true },
+        { key: "pay_amount", label: "支付金额", sortable: true },
         { key: "order_count", label: "订单", sortable: true },
         { key: "top_account_name", label: "归属账户", sortable: true },
         { key: "top_plan_name", label: "归属计划", sortable: true },
@@ -2008,6 +2085,8 @@ function renderMaterialTable(rows) {
           <td>${escapeHtml(row.top_plan_name || "--")}</td>
           `
             : `
+          <td class="mono">${formatMaterialTotalPayAmount(row)}</td>
+          <td class="mono">${formatMaterialSettledPayAmount(row)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
@@ -2027,7 +2106,7 @@ function renderMaterialTable(rows) {
       if (!column || !column.sortable) return;
       state.materialSort = toggleSort(state.materialSort, key);
       saveSort("material-sort", state.materialSort);
-      renderMaterialTable(rows);
+      renderMaterialTable(enrichedRows);
     });
   });
   renderMaterialPager(
@@ -2037,7 +2116,7 @@ function renderMaterialTable(rows) {
     totalRows ? pageStart + 1 : 0,
     pageStart + pageRows.length,
   );
-  renderMaterialInteractions(rows);
+  renderMaterialInteractions(enrichedRows);
 }
 
 async function fetchMaterialRankings(force = false) {
@@ -2536,7 +2615,7 @@ function selectedUserKeywords() {
 }
 
 function currentMaterialRows() {
-  return materialRangePayload(sectionFilter("material"))?.items || [];
+  return (materialRangePayload(sectionFilter("material"))?.items || []).map((row) => enrichMaterialRow(row));
 }
 
 function selectedMaterialRow(materialKey) {
@@ -2550,6 +2629,37 @@ function canPreviewMaterial(row) {
     || String(row.cover_url || "").trim()
     || materialAwemeLink(row)
   );
+}
+
+function materialPreviewTriggerMarkup(row) {
+  if (!canPreviewMaterial(row)) {
+    return '<span class="material-preview-placeholder">暂无</span>';
+  }
+  const materialKey = escapeHtml(row.material_key);
+  const materialName = escapeHtml(row.material_name || "素材预览");
+  const coverUrl = String(row.cover_url || "").trim();
+  if (coverUrl) {
+    return `
+      <button
+        type="button"
+        class="material-preview-trigger"
+        data-action="open-material-preview"
+        data-material-key="${materialKey}"
+        title="预览 ${materialName}"
+      >
+        <img class="material-preview-thumb" src="${escapeHtml(coverUrl)}" alt="${materialName}" loading="lazy" />
+        <span class="material-preview-badge">预览</span>
+      </button>
+    `;
+  }
+  return `
+    <button
+      type="button"
+      class="button ghost compact"
+      data-action="open-material-preview"
+      data-material-key="${materialKey}"
+    >打开预览</button>
+  `;
 }
 
 function materialAwemeLink(row) {
@@ -2566,6 +2676,7 @@ function closeMaterialPreview() {
 
 function openMaterialPreviewFromRow(row) {
   if (!row || !materialPreviewModal || !materialPreviewBody) return;
+  row = enrichMaterialRow(row);
   const directVideoUrl = String(row.video_url || "").trim();
   const coverUrl = String(row.cover_url || "").trim();
   const awemeLink = materialAwemeLink(row);
@@ -2590,9 +2701,11 @@ function openMaterialPreviewFromRow(row) {
       <div class="preview-stat"><span>归属账户</span><strong>${escapeHtml(row.top_account_name || "--")}</strong></div>
       <div class="preview-stat"><span>归属计划</span><strong>${escapeHtml(row.top_plan_name || "--")}</strong></div>
       <div class="preview-stat"><span>消耗</span><strong class="mono">${formatMoney(row.stat_cost)}</strong></div>
-      <div class="preview-stat"><span>支付</span><strong class="mono">${formatMoney(row.pay_amount)}</strong></div>
+      <div class="preview-stat"><span>整体成交</span><strong class="mono">${formatMaterialTotalPayAmount(row)}</strong></div>
+      <div class="preview-stat"><span>净成交</span><strong class="mono">${formatMaterialSettledPayAmount(row)}</strong></div>
+      <div class="preview-stat"><span>支付金额</span><strong class="mono">${formatMoney(row.pay_amount)}</strong></div>
       <div class="preview-stat"><span>订单</span><strong class="mono">${formatNumber(row.order_count)}</strong></div>
-      <div class="preview-stat"><span>ROI</span><strong class="mono">${formatRate(row.roi)}</strong></div>
+      <div class="preview-stat"><span>支付ROI</span><strong class="mono">${formatRate(row.roi)}</strong></div>
       <div class="preview-stat"><span>覆盖计划</span><strong class="mono">${formatNumber(row.plan_count)}</strong></div>
       <div class="preview-stat"><span>素材 ID</span><strong class="mono">${escapeHtml(row.material_id || "--")}</strong></div>
       <div class="preview-stat"><span>视频 ID</span><strong class="mono">${escapeHtml(row.video_id || "--")}</strong></div>

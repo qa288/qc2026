@@ -103,39 +103,42 @@ ROLE_OPERATOR = "operator"
 PUBLIC_SORT_FIELDS = {"stat_cost", "pay_amount", "order_count", "roi"}
 EMPLOYEE_KEYWORD_SCOPES = {"all", "account", "plan", "product", "material"}
 EMPLOYEE_BINDING_TYPES = {"account", "plan", "product", "material"}
+MATERIAL_REPORT_CORE_METRICS = [
+    "stat_cost_for_roi2",
+    "total_pay_order_gmv_for_roi2",
+    "total_pay_order_count_for_roi2",
+    "total_prepay_and_pay_order_roi2",
+]
+MATERIAL_REPORT_EXTENDED_METRICS = MATERIAL_REPORT_CORE_METRICS + [
+    "total_pay_order_gmv_include_coupon_for_roi2",
+    "total_order_settle_amount_for_roi2_1h",
+    "total_prepay_and_pay_settle_roi2_1h",
+    "total_order_settle_count_for_roi2_1h",
+    "total_cost_per_pay_order_for_roi2",
+    "total_order_settle_amount_rate_for_roi2_1h",
+]
+MATERIAL_REPORT_TITLE_METRICS = MATERIAL_REPORT_CORE_METRICS + [
+    "total_pay_order_gmv_include_coupon_for_roi2",
+    "total_cost_per_pay_order_for_roi2",
+]
 MATERIAL_REPORT_TOPIC_CONFIGS = {
     "VIDEO": {
         "data_topic": "SITE_PROMOTION_PRODUCT_POST_DATA_VIDEO",
         "dimensions": ["roi2_material_video_name", "material_id"],
         "name_fields": ["roi2_material_video_name"],
-        "metrics": [
-            "stat_cost_for_roi2",
-            "total_pay_order_gmv_for_roi2",
-            "total_pay_order_count_for_roi2",
-            "total_prepay_and_pay_order_roi2",
-        ],
+        "metrics": list(MATERIAL_REPORT_EXTENDED_METRICS),
     },
     "IMAGE": {
         "data_topic": "SITE_PROMOTION_PRODUCT_POST_DATA_IMAGE",
         "dimensions": ["material_id", "roi2_material_image_name"],
         "name_fields": ["roi2_material_image_name"],
-        "metrics": [
-            "stat_cost_for_roi2",
-            "total_pay_order_gmv_for_roi2",
-            "total_pay_order_count_for_roi2",
-            "total_prepay_and_pay_order_roi2",
-        ],
+        "metrics": list(MATERIAL_REPORT_EXTENDED_METRICS),
     },
     "TITLE": {
         "data_topic": "SITE_PROMOTION_PRODUCT_POST_DATA_TITLE",
         "dimensions": ["roi2_title_material_v3"],
         "name_fields": ["roi2_title_material_v3"],
-        "metrics": [
-            "stat_cost_for_roi2",
-            "total_pay_order_gmv_for_roi2",
-            "total_pay_order_count_for_roi2",
-            "total_prepay_and_pay_order_roi2",
-        ],
+        "metrics": list(MATERIAL_REPORT_TITLE_METRICS),
     },
 }
 
@@ -380,6 +383,9 @@ class DashboardService:
             self._ensure_column_locked(conn, table_name, "cover_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column_locked(conn, table_name, "aweme_item_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column_locked(conn, table_name, "video_url", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column_locked(conn, table_name, "total_pay_amount", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column_locked(conn, table_name, "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column_locked(conn, table_name, "settled_order_count", "INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_plan_snapshot_schema_locked(self, conn: Any) -> None:
         self._ensure_column_locked(conn, "plan_snapshots", "total_pay_amount", "REAL NOT NULL DEFAULT 0")
@@ -724,20 +730,70 @@ class DashboardService:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         rows: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
+        material_topics = [str(config["data_topic"]) for config in MATERIAL_REPORT_TOPIC_CONFIGS.values()]
         for advertiser_id in sorted(int(item) for item in advertiser_ids if int(item or 0)):
+            available_metrics_by_topic: dict[str, set[str]] = {}
+            config_loaded = False
+            try:
+                config_response = client.get_uni_promotion_config(advertiser_id, material_topics)
+                config_loaded = True
+                for item in (config_response.get("data") or {}).get("custom_config_datas") or []:
+                    data_topic = str(item.get("data_topic") or "").strip()
+                    if data_topic not in material_topics:
+                        continue
+                    available_metrics_by_topic[data_topic] = {
+                        str(metric.get("field") or "").strip()
+                        for metric in item.get("metrics") or []
+                        if str(metric.get("field") or "").strip()
+                    }
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    {
+                        "stage": "material_report_config",
+                        "advertiser_id": advertiser_id,
+                        "error": str(exc),
+                    }
+                )
             for material_type, config in MATERIAL_REPORT_TOPIC_CONFIGS.items():
+                data_topic = str(config["data_topic"])
+                requested_metrics = list(config["metrics"])
+                if config_loaded and data_topic not in available_metrics_by_topic:
+                    errors.append(
+                        {
+                            "stage": "material_report_topic_missing",
+                            "advertiser_id": advertiser_id,
+                            "material_type": material_type,
+                            "data_topic": data_topic,
+                            "error": "topic unavailable in config",
+                        }
+                    )
+                    continue
+                available_metrics = available_metrics_by_topic.get(data_topic)
+                if available_metrics is not None:
+                    requested_metrics = [metric for metric in requested_metrics if metric in available_metrics]
+                if not requested_metrics:
+                    errors.append(
+                        {
+                            "stage": "material_report_topic_metrics",
+                            "advertiser_id": advertiser_id,
+                            "material_type": material_type,
+                            "data_topic": data_topic,
+                            "error": "no supported metrics available",
+                        }
+                    )
+                    continue
                 page = 1
                 while True:
                     try:
                         response = client.get_uni_promotion_data(
                             advertiser_id=advertiser_id,
-                            data_topic=str(config["data_topic"]),
+                            data_topic=data_topic,
                             dimensions=list(config["dimensions"]),
-                            metrics=list(config["metrics"]),
+                            metrics=requested_metrics,
                             start_time=start_time,
                             end_time=end_time,
                             filters=[],
-                            order_by=[{"field": str(config["metrics"][0]), "type": 1}],
+                            order_by=[{"field": requested_metrics[0], "type": 1}],
                             page=page,
                             page_size=200,
                         )
@@ -747,7 +803,7 @@ class DashboardService:
                                 "stage": "material_report_topic",
                                 "advertiser_id": advertiser_id,
                                 "material_type": material_type,
-                                "data_topic": str(config["data_topic"]),
+                                "data_topic": data_topic,
                                 "error": str(exc),
                             }
                         )
@@ -765,7 +821,10 @@ class DashboardService:
                                 break
                         stat_cost = self._report_metric_value(metrics, "stat_cost_for_roi2")
                         pay_amount = self._report_metric_value(metrics, "total_pay_order_gmv_for_roi2")
+                        total_pay_amount = self._report_metric_value(metrics, "total_pay_order_gmv_include_coupon_for_roi2")
+                        settled_pay_amount = self._report_metric_value(metrics, "total_order_settle_amount_for_roi2_1h")
                         order_count = int(self._report_metric_value(metrics, "total_pay_order_count_for_roi2"))
+                        settled_order_count = int(self._report_metric_value(metrics, "total_order_settle_count_for_roi2_1h"))
                         roi = self._report_metric_value(metrics, "total_prepay_and_pay_order_roi2")
                         rows.append(
                             {
@@ -775,7 +834,10 @@ class DashboardService:
                                 "material_name": material_name,
                                 "stat_cost": stat_cost,
                                 "pay_amount": pay_amount,
+                                "total_pay_amount": total_pay_amount,
+                                "settled_pay_amount": settled_pay_amount,
                                 "order_count": order_count,
+                                "settled_order_count": settled_order_count,
                                 "roi": roi,
                             }
                         )
@@ -832,18 +894,34 @@ class DashboardService:
                 continue
             stat_cost = 0.0
             pay_amount = 0.0
+            total_pay_amount = 0.0
+            settled_pay_amount = 0.0
             order_count = 0
+            settled_order_count = 0
             for report_key in report_keys:
                 item = report_by_key.get(report_key)
                 if not item:
                     continue
                 stat_cost = round(stat_cost + float(item.get("stat_cost", 0.0) or 0.0), 2)
                 pay_amount = round(pay_amount + float(item.get("pay_amount", 0.0) or 0.0), 2)
+                total_pay_amount = round(total_pay_amount + float(item.get("total_pay_amount", 0.0) or 0.0), 2)
+                settled_pay_amount = round(settled_pay_amount + float(item.get("settled_pay_amount", 0.0) or 0.0), 2)
                 order_count += int(item.get("order_count", 0) or 0)
-            if stat_cost > 0 or pay_amount > 0 or order_count > 0:
+                settled_order_count += int(item.get("settled_order_count", 0) or 0)
+            if (
+                stat_cost > 0
+                or pay_amount > 0
+                or total_pay_amount > 0
+                or settled_pay_amount > 0
+                or order_count > 0
+                or settled_order_count > 0
+            ):
                 group["stat_cost"] = stat_cost
                 group["pay_amount"] = pay_amount
+                group["total_pay_amount"] = total_pay_amount
+                group["settled_pay_amount"] = settled_pay_amount
                 group["order_count"] = order_count
+                group["settled_order_count"] = settled_order_count
 
     def preview_keyword_matches(self, keyword: str, scope: str = "all", allowed_advertiser_ids: set[int] | None = None) -> dict[str, Any]:
         return self.catalog_access.preview_keyword_matches(keyword, scope, allowed_advertiser_ids)
@@ -1866,7 +1944,10 @@ class DashboardService:
                     "video_url": str(row.get("video_url") or "").strip(),
                     "stat_cost": 0.0,
                     "pay_amount": 0.0,
+                    "total_pay_amount": 0.0,
+                    "settled_pay_amount": 0.0,
                     "order_count": 0,
+                    "settled_order_count": 0,
                     "plan_ids": set(),
                     "advertiser_ids": set(),
                     "is_original": False,
@@ -1878,10 +1959,16 @@ class DashboardService:
             )
             stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
             pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+            total_pay_amount = round(float(row.get("total_pay_amount", 0.0) or 0.0), 2)
+            settled_pay_amount = round(float(row.get("settled_pay_amount", 0.0) or 0.0), 2)
             order_count = int(float(row.get("order_count", 0.0) or 0.0))
+            settled_order_count = int(float(row.get("settled_order_count", 0.0) or 0.0))
             group["stat_cost"] = round(group["stat_cost"] + stat_cost, 2)
             group["pay_amount"] = round(group["pay_amount"] + pay_amount, 2)
+            group["total_pay_amount"] = round(group["total_pay_amount"] + total_pay_amount, 2)
+            group["settled_pay_amount"] = round(group["settled_pay_amount"] + settled_pay_amount, 2)
             group["order_count"] += order_count
+            group["settled_order_count"] += settled_order_count
             group["plan_ids"].add(int(row.get("ad_id", 0) or 0))
             group["advertiser_ids"].add(int(row.get("advertiser_id", 0) or 0))
             group["is_original"] = bool(group["is_original"] or row.get("is_original"))
@@ -1907,7 +1994,16 @@ class DashboardService:
     def _material_rankings_from_groups(self, groups: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         material_rows: list[dict[str, Any]] = []
         for group in groups.values():
-            roi = round(group["pay_amount"] / group["stat_cost"], 2) if group["stat_cost"] > 0 else 0.0
+            stat_cost = round(float(group.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(group.get("pay_amount", 0.0) or 0.0), 2)
+            total_pay_amount = round(float(group.get("total_pay_amount", 0.0) or 0.0), 2)
+            settled_pay_amount = round(float(group.get("settled_pay_amount", 0.0) or 0.0), 2)
+            order_count = int(group.get("order_count", 0) or 0)
+            settled_order_count = int(group.get("settled_order_count", 0) or 0)
+            roi = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            settled_roi = round(settled_pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            pay_order_cost = round(stat_cost / order_count, 2) if order_count > 0 else 0.0
+            settled_amount_rate = round(settled_pay_amount / total_pay_amount * 100.0, 2) if total_pay_amount > 0 else 0.0
             material_rows.append(
                 {
                     "material_key": group["material_key"],
@@ -1918,9 +2014,12 @@ class DashboardService:
                     "cover_url": group.get("cover_url", ""),
                     "aweme_item_id": group.get("aweme_item_id", ""),
                     "video_url": group.get("video_url", ""),
-                    "stat_cost": group["stat_cost"],
-                    "pay_amount": group["pay_amount"],
-                    "order_count": group["order_count"],
+                    "stat_cost": stat_cost,
+                    "pay_amount": pay_amount,
+                    "total_pay_amount": total_pay_amount,
+                    "settled_pay_amount": settled_pay_amount,
+                    "order_count": order_count,
+                    "settled_order_count": settled_order_count,
                     "plan_count": len(group["plan_ids"]),
                     "advertiser_count": len(group["advertiser_ids"]),
                     "plan_ids": sorted(int(item) for item in group["plan_ids"] if int(item or 0)),
@@ -1929,6 +2028,9 @@ class DashboardService:
                     "top_plan_name": group["top_plan_name"],
                     "top_account_name": group["top_account_name"],
                     "roi": roi,
+                    "settled_roi": settled_roi,
+                    "pay_order_cost": pay_order_cost,
+                    "settled_amount_rate": settled_amount_rate,
                 }
             )
         material_rows.sort(
@@ -1958,7 +2060,10 @@ class DashboardService:
         for group in material_groups.values():
             stat_cost = round(float(group["stat_cost"] or 0.0), 2)
             pay_amount = round(float(group["pay_amount"] or 0.0), 2)
+            total_pay_amount = round(float(group.get("total_pay_amount", 0.0) or 0.0), 2)
+            settled_pay_amount = round(float(group.get("settled_pay_amount", 0.0) or 0.0), 2)
             order_count = int(group["order_count"] or 0)
+            settled_order_count = int(group.get("settled_order_count", 0) or 0)
             plan_ids = sorted(int(item) for item in group["plan_ids"] if int(item or 0))
             advertiser_ids = sorted(int(item) for item in group["advertiser_ids"] if int(item or 0))
             roi = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
@@ -1977,7 +2082,10 @@ class DashboardService:
                     str(group.get("video_url") or ""),
                     stat_cost,
                     pay_amount,
+                    total_pay_amount,
+                    settled_pay_amount,
                     order_count,
+                    settled_order_count,
                     len(plan_ids),
                     len(advertiser_ids),
                     json.dumps(plan_ids, ensure_ascii=False),
@@ -2003,7 +2111,10 @@ class DashboardService:
                 group = dict(row)
                 group["stat_cost"] = 0.0
                 group["pay_amount"] = 0.0
+                group["total_pay_amount"] = 0.0
+                group["settled_pay_amount"] = 0.0
                 group["order_count"] = 0
+                group["settled_order_count"] = 0
                 group["plan_ids"] = set()
                 group["advertiser_ids"] = set()
                 group["_top_plan_orders"] = -1
@@ -2011,10 +2122,16 @@ class DashboardService:
                 groups[material_key] = group
             stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
             pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+            total_pay_amount = round(float(row.get("total_pay_amount", 0.0) or 0.0), 2)
+            settled_pay_amount = round(float(row.get("settled_pay_amount", 0.0) or 0.0), 2)
             order_count = int(float(row.get("order_count", 0.0) or 0.0))
+            settled_order_count = int(float(row.get("settled_order_count", 0.0) or 0.0))
             group["stat_cost"] = round(float(group["stat_cost"] or 0.0) + stat_cost, 2)
             group["pay_amount"] = round(float(group["pay_amount"] or 0.0) + pay_amount, 2)
+            group["total_pay_amount"] = round(float(group["total_pay_amount"] or 0.0) + total_pay_amount, 2)
+            group["settled_pay_amount"] = round(float(group["settled_pay_amount"] or 0.0) + settled_pay_amount, 2)
             group["order_count"] = int(group["order_count"] or 0) + order_count
+            group["settled_order_count"] = int(group["settled_order_count"] or 0) + settled_order_count
             group["plan_ids"].update(plan_ids)
             group["advertiser_ids"].update(advertiser_ids)
             group["is_original"] = bool(group.get("is_original")) or bool(row.get("is_original"))
@@ -2034,7 +2151,10 @@ class DashboardService:
         for group in groups.values():
             stat_cost = round(float(group.get("stat_cost", 0.0) or 0.0), 2)
             pay_amount = round(float(group.get("pay_amount", 0.0) or 0.0), 2)
+            total_pay_amount = round(float(group.get("total_pay_amount", 0.0) or 0.0), 2)
+            settled_pay_amount = round(float(group.get("settled_pay_amount", 0.0) or 0.0), 2)
             order_count = int(group.get("order_count", 0) or 0)
+            settled_order_count = int(group.get("settled_order_count", 0) or 0)
             rankings.append(
                 {
                     "material_key": str(group.get("material_key") or ""),
@@ -2047,7 +2167,10 @@ class DashboardService:
                     "video_url": str(group.get("video_url") or ""),
                     "stat_cost": stat_cost,
                     "pay_amount": pay_amount,
+                    "total_pay_amount": total_pay_amount,
+                    "settled_pay_amount": settled_pay_amount,
                     "order_count": order_count,
+                    "settled_order_count": settled_order_count,
                     "plan_count": len(group["plan_ids"]),
                     "advertiser_count": len(group["advertiser_ids"]),
                     "plan_ids": sorted(int(item) for item in group["plan_ids"] if int(item or 0)),
@@ -2056,6 +2179,9 @@ class DashboardService:
                     "top_plan_name": str(group.get("top_plan_name") or ""),
                     "top_account_name": str(group.get("top_account_name") or ""),
                     "roi": round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
+                    "settled_roi": round(settled_pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
+                    "pay_order_cost": round(stat_cost / order_count, 2) if order_count > 0 else 0.0,
+                    "settled_amount_rate": round(settled_pay_amount / total_pay_amount * 100.0, 2) if total_pay_amount > 0 else 0.0,
                 }
             )
         rankings.sort(
@@ -3436,9 +3562,9 @@ class DashboardService:
                     INSERT INTO material_rollups (
                         snapshot_time, window_start, window_end, material_key, material_id,
                         material_name, material_type, video_id, cover_url, aweme_item_id, video_url, stat_cost, pay_amount,
-                        order_count, plan_count, advertiser_count, plan_ids_json,
-                        advertiser_ids_json, is_original, top_plan_name, top_account_name, roi
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        total_pay_amount, settled_pay_amount, order_count, settled_order_count, plan_count, advertiser_count,
+                        plan_ids_json, advertiser_ids_json, is_original, top_plan_name, top_account_name, roi
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     material_rollup_rows,
                 )
@@ -3722,7 +3848,10 @@ class DashboardService:
                         m.video_url,
                         m.stat_cost,
                         m.pay_amount,
+                        m.total_pay_amount,
+                        m.settled_pay_amount,
                         m.order_count,
+                        m.settled_order_count,
                         COALESCE(v.is_original, 0) AS is_original
                     FROM material_snapshots AS m
                     LEFT JOIN video_origin_flags AS v

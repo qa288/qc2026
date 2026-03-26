@@ -1504,6 +1504,66 @@ body {
   max-width: 100%;
 }
 
+.material-preview-trigger {
+  position: relative;
+  display: block;
+  width: 112px;
+  height: 64px;
+  padding: 0;
+  border: 1px solid rgba(77, 57, 36, 0.14);
+  border-radius: 14px;
+  background: #0d1520;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.material-preview-trigger:hover {
+  transform: translateY(-1px);
+  border-color: rgba(20, 59, 47, 0.26);
+  box-shadow: 0 12px 20px rgba(20, 59, 47, 0.16);
+}
+
+.material-preview-trigger:focus-visible {
+  outline: 2px solid rgba(20, 59, 47, 0.4);
+  outline-offset: 2px;
+}
+
+.material-preview-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #0d1520;
+}
+
+.material-preview-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(13, 21, 32, 0.78);
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.material-preview-placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: rgba(107, 100, 92, 0.08);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
 .asset-card-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
