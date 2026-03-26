@@ -34,7 +34,7 @@ body {
 .page-shell {
   max-width: 1580px;
   margin: 0 auto;
-  padding: 20px 28px 80px;
+  padding: 20px 28px 56px;
 }
 
 .hero {
@@ -1009,7 +1009,7 @@ body {
 }
 
 .rank-table-shell {
-  max-height: 460px;
+  max-height: clamp(460px, calc(100vh - 320px), 700px);
 }
 
 .inline-feedback[data-tone="success"] {
@@ -1277,11 +1277,13 @@ body {
 }
 
 .table-shell.tall {
-  max-height: 640px;
+  min-height: clamp(520px, calc(100vh - 360px), 700px);
+  max-height: clamp(640px, calc(100vh - 250px), 900px);
 }
 
 .account-table-shell {
-  max-height: 760px;
+  min-height: clamp(560px, calc(100vh - 320px), 760px);
+  max-height: clamp(760px, calc(100vh - 220px), 960px);
 }
 
 .data-table {
@@ -2282,7 +2284,7 @@ body {
 }
 
 .page-shell {
-  padding: 20px 24px 64px;
+  padding: 20px 24px 40px;
 }
 
 .view-section {
@@ -3049,7 +3051,7 @@ body {
 
 @media (max-width: 900px) {
   .page-shell {
-    padding: 16px 16px 50px;
+    padding: 16px 16px 32px;
   }
 
   .view-tabs {
