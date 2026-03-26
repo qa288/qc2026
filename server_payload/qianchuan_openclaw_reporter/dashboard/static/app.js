@@ -2126,6 +2126,13 @@ function renderMaterialInteractions(rows) {
       openMaterialPreview(materialKey);
     });
   });
+  materialTable.querySelectorAll(".material-preview-thumb").forEach((thumb) => {
+    thumb.addEventListener("error", () => {
+      const trigger = thumb.closest(".material-preview-trigger");
+      if (!trigger) return;
+      downgradeMaterialPreviewTrigger(trigger);
+    }, { once: true });
+  });
 }
 
 function renderMaterialTable(rows) {
@@ -2806,6 +2813,16 @@ function materialPreviewTriggerMarkup(row) {
       data-material-key="${materialKey}"
     >打开预览</button>
   `;
+}
+
+function downgradeMaterialPreviewTrigger(button) {
+  if (!button || button.classList.contains("is-fallback")) return;
+  button.classList.add("is-fallback");
+  button.querySelector(".material-preview-thumb")?.remove();
+  const badge = button.querySelector(".material-preview-badge");
+  if (badge) {
+    badge.textContent = "打开预览";
+  }
 }
 
 function materialAwemeLink(row) {

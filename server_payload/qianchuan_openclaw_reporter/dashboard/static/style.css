@@ -1768,6 +1768,18 @@ body {
   line-height: 1;
 }
 
+.material-preview-trigger.is-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(20, 59, 47, 0.12), rgba(13, 21, 32, 0.92));
+}
+
+.material-preview-trigger.is-fallback .material-preview-badge {
+  position: static;
+  background: rgba(255, 255, 255, 0.14);
+}
+
 .material-preview-placeholder {
   display: inline-flex;
   align-items: center;

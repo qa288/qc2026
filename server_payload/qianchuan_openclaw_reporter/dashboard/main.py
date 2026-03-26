@@ -2349,6 +2349,114 @@ class DashboardService:
             )
         return rollups
 
+    @staticmethod
+    def _chunked_material_keys(material_keys: list[str], size: int = 400) -> list[list[str]]:
+        items = [str(item or "").strip() for item in material_keys if str(item or "").strip()]
+        return [items[index : index + size] for index in range(0, len(items), size)]
+
+    @staticmethod
+    def _empty_material_preview_fields() -> dict[str, str]:
+        return {
+            "video_id": "",
+            "cover_url": "",
+            "aweme_item_id": "",
+            "video_url": "",
+        }
+
+    @classmethod
+    def _merge_material_preview_fields(cls, target: dict[str, str], row: dict[str, Any]) -> None:
+        for field in ("video_id", "cover_url", "aweme_item_id", "video_url"):
+            if target.get(field):
+                continue
+            text = str(row.get(field) or "").strip()
+            if text:
+                target[field] = text
+
+    @staticmethod
+    def _material_preview_available(preview: dict[str, str]) -> bool:
+        return any(
+            str(preview.get(field) or "").strip()
+            for field in ("cover_url", "aweme_item_id", "video_url")
+        )
+
+    def _latest_material_preview_map(self, conn: Any, material_keys: list[str]) -> dict[str, dict[str, str]]:
+        normalized_keys = sorted({str(item or "").strip() for item in material_keys if str(item or "").strip()})
+        if not normalized_keys:
+            return {}
+        preview_map = {key: self._empty_material_preview_fields() for key in normalized_keys}
+        pending = set(normalized_keys)
+        for batch in self._chunked_material_keys(normalized_keys):
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"""
+                SELECT source.material_key, source.video_id, source.cover_url, source.aweme_item_id, source.video_url
+                FROM material_rollups AS source
+                JOIN (
+                    SELECT material_key, MAX(snapshot_time) AS latest_snapshot_time
+                    FROM material_rollups
+                    WHERE material_key IN ({placeholders})
+                    GROUP BY material_key
+                ) latest
+                  ON latest.material_key = source.material_key
+                 AND latest.latest_snapshot_time = source.snapshot_time
+                WHERE source.material_key IN ({placeholders})
+                ORDER BY source.material_key ASC
+                """,
+                [*batch, *batch],
+            ).fetchall()
+            for raw_row in rows:
+                row = dict(raw_row)
+                material_key = str(row.get("material_key") or "").strip()
+                if not material_key or material_key not in preview_map:
+                    continue
+                preview = preview_map[material_key]
+                self._merge_material_preview_fields(preview, row)
+                if self._material_preview_available(preview):
+                    pending.discard(material_key)
+        for table_name in ("material_rollups", "material_snapshots"):
+            if not pending:
+                break
+            for batch in self._chunked_material_keys(sorted(pending)):
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"""
+                    SELECT material_key, video_id, cover_url, aweme_item_id, video_url
+                    FROM {table_name}
+                    WHERE material_key IN ({placeholders})
+                    ORDER BY material_key ASC, snapshot_time DESC
+                    """,
+                    batch,
+                ).fetchall()
+                for raw_row in rows:
+                    row = dict(raw_row)
+                    material_key = str(row.get("material_key") or "").strip()
+                    if not material_key or material_key not in preview_map:
+                        continue
+                    preview = preview_map[material_key]
+                    self._merge_material_preview_fields(preview, row)
+                    if self._material_preview_available(preview):
+                        pending.discard(material_key)
+        return {key: value for key, value in preview_map.items() if any(str(item).strip() for item in value.values())}
+
+    def _apply_latest_material_previews(self, conn: Any, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not items:
+            return items
+        preview_map = self._latest_material_preview_map(
+            conn,
+            [str(item.get("material_key") or "").strip() for item in items],
+        )
+        if not preview_map:
+            return items
+        for item in items:
+            preview = preview_map.get(str(item.get("material_key") or "").strip())
+            if not preview:
+                continue
+            for field in ("video_id", "cover_url", "aweme_item_id", "video_url"):
+                text = str(preview.get(field) or "").strip()
+                if text:
+                    item[field] = text
+        return items
+
     def _aggregate_material_rollups(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -4067,6 +4175,9 @@ class DashboardService:
                 allowed = {int(item) for item in allowed_advertiser_ids}
                 scoped_rows = [row for row in scoped_rows if int(row.get("advertiser_id", 0) or 0) in allowed]
             items = self._build_material_rankings(scoped_rows)
+        if items:
+            with self.db() as preview_conn:
+                items = self._apply_latest_material_previews(preview_conn, items)
         payload = {
             "snapshot_time": str(latest_meta.get("snapshot_time") or "") if latest_meta else target_snapshot,
             "items": items,
