@@ -409,6 +409,16 @@
                   </div>
                 </div>
                 <div id="scopeEditorMeta" class="section-range-meta compact-inline inline-feedback">主管看勾选账户，运营不在这里配。</div>
+                <div id="scopeControls" class="scope-controls hidden">
+                  <div class="scope-toolbar">
+                    <input id="scopeSearchInput" class="search-input" type="search" placeholder="搜索账户名称 / ID" />
+                    <div class="scope-toolbar-actions">
+                      <button type="button" id="scopeSelectVisibleButton" class="button ghost compact">全选当前结果</button>
+                      <button type="button" id="scopeClearSelectedButton" class="button ghost compact">清空已选</button>
+                    </div>
+                  </div>
+                  <div id="scopeSelectionSummary" class="scope-selection-summary">已选 0 个账户</div>
+                </div>
                 <div id="scopeAccountList" class="scope-checklist"></div>
                 <div class="ownership-form-actions ownership-actions-end">
                   <button type="button" id="saveUserScopesButton" class="button primary compact">保存账户范围</button>

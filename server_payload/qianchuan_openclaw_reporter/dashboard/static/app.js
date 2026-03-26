@@ -182,6 +182,11 @@ const userFormReset = document.getElementById("userFormReset");
 const userEditorStatus = document.getElementById("userEditorStatus");
 const uploadPermissionField = document.getElementById("uploadPermissionField");
 const operatorKeywordSeedField = document.getElementById("operatorKeywordSeedField");
+const scopeControls = document.getElementById("scopeControls");
+const scopeSearchInput = document.getElementById("scopeSearchInput");
+const scopeSelectVisibleButton = document.getElementById("scopeSelectVisibleButton");
+const scopeClearSelectedButton = document.getElementById("scopeClearSelectedButton");
+const scopeSelectionSummary = document.getElementById("scopeSelectionSummary");
 const scopeAccountList = document.getElementById("scopeAccountList");
 const saveUserScopesButton = document.getElementById("saveUserScopesButton");
 const scopeEditorMeta = document.getElementById("scopeEditorMeta");
@@ -845,6 +850,34 @@ function enrichMaterialRow(row) {
     settled_amount_rate: totalPayAmount > 0
       ? Number((settledPayAmount / totalPayAmount * 100).toFixed(2))
       : Number(row?.settled_amount_rate || 0),
+  };
+}
+
+function enrichOperatorRow(row) {
+  const statCost = Number(row?.stat_cost || 0);
+  const totalPayAmount = Number(row?.total_pay_amount || 0);
+  const settledPayAmount = Number(row?.settled_pay_amount || 0);
+  const orderCount = Number(row?.order_count || 0);
+  const settledOrderCount = Number(row?.settled_order_count || 0);
+  const refundAmount1h = Number(row?.refund_amount_1h || 0);
+  const refundRateAvailable = row?.refund_rate_1h !== null && row?.refund_rate_1h !== undefined;
+  return {
+    ...row,
+    total_pay_amount: totalPayAmount,
+    settled_pay_amount: settledPayAmount,
+    settled_order_count: settledOrderCount,
+    settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
+    pay_order_cost: orderCount > 0 ? Number((statCost / orderCount).toFixed(2)) : Number(row?.pay_order_cost || 0),
+    settled_amount_rate: totalPayAmount > 0
+      ? Number((settledPayAmount / totalPayAmount * 100).toFixed(2))
+      : Number(row?.settled_amount_rate || 0),
+    refund_amount_1h: refundAmount1h,
+    refund_rate_1h: refundRateAvailable ? Number(row?.refund_rate_1h || 0) : null,
+    refund_rate_1h_available: refundRateAvailable,
+    material_count: Number(row?.material_count ?? row?.plan_count ?? 0),
+    advertiser_count: Number(row?.advertiser_count || 0),
+    keyword_count: Number(row?.keyword_count || 0),
+    plan_count: Number(row?.plan_count || 0),
   };
 }
 
@@ -1746,11 +1779,37 @@ function renderEmployeeDetail(employeeName) {
   const breakdownFilter = sectionFilter("breakdown");
   const payload = rangePayload(breakdownFilter);
   const rows = breakdownRows(payload);
-  const row = rows.find((item) => breakdownEntityName(item) === employeeName);
-  if (!row) return;
+  const sourceRow = rows.find((item) => breakdownEntityName(item) === employeeName);
+  if (!sourceRow) return;
   const operatorMode = breakdownUsesOperators(payload);
   const entityLabel = breakdownEntityLabel(payload);
+  const row = operatorMode ? enrichOperatorRow(sourceRow) : sourceRow;
   employeeDetail.className = "detail-panel";
+  if (operatorMode) {
+    const refundRateText = row.refund_rate_1h_available ? formatPercent(row.refund_rate_1h) : "-";
+    employeeDetail.innerHTML = `
+      <div class="detail-stats">
+        <div class="detail-stat detail-stat-wide"><span class="label">${escapeHtml(entityLabel)}</span><span class="value compact">${escapeHtml(row.operator_name || "-")}</span></div>
+        <div class="detail-stat"><span class="label">登录账号</span><span class="value compact mono">${escapeHtml(row.operator_username || "-")}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
+        <div class="detail-stat"><span class="label">整体成交</span><span class="value mono">${formatMoney(row.total_pay_amount)}</span></div>
+        <div class="detail-stat"><span class="label">净成交</span><span class="value mono">${formatMoney(row.settled_pay_amount)}</span></div>
+        <div class="detail-stat"><span class="label">支付ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+        <div class="detail-stat"><span class="label">净ROI</span><span class="value mono">${formatRate(row.settled_roi)}</span></div>
+        <div class="detail-stat"><span class="label">整体订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
+        <div class="detail-stat"><span class="label">净订单</span><span class="value mono">${formatNumber(row.settled_order_count)}</span></div>
+        <div class="detail-stat"><span class="label">订单成本</span><span class="value mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</span></div>
+        <div class="detail-stat"><span class="label">结算率</span><span class="value mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</span></div>
+        <div class="detail-stat"><span class="label">1h退款率</span><span class="value mono">${refundRateText}</span></div>
+        <div class="detail-stat"><span class="label">账户数</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
+        <div class="detail-stat"><span class="label">关键词数</span><span class="value mono">${formatNumber(row.keyword_count)}</span></div>
+        <div class="detail-stat"><span class="label">素材数</span><span class="value mono">${formatNumber(row.material_count)}</span></div>
+        <div class="detail-stat"><span class="label">计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
+        <div class="detail-stat detail-stat-wide"><span class="label">代表素材</span><span class="value compact">${escapeHtml(row.top_material_name || "暂无代表素材")}</span></div>
+      </div>
+    `;
+    return;
+  }
   if (operatorMode) {
     const materialCount = Number(row.material_count ?? row.plan_count ?? 0);
     employeeDetail.innerHTML = `
@@ -1900,6 +1959,93 @@ function renderEmployeeTable(rows) {
   const payload = rangePayload(sectionFilter("breakdown"));
   const operatorMode = breakdownUsesOperators(payload);
   const entityLabel = breakdownEntityLabel(payload);
+  if (operatorMode) {
+    const enrichedRows = rows.map((row) => enrichOperatorRow(row));
+    const query = employeeSearch.value.trim().toLowerCase();
+    const visibleRows = enrichedRows.filter((row) => {
+      const haystack = [
+        row.operator_name,
+        row.operator_username,
+        row.top_material_name,
+        row.top_account_name,
+      ].join(" ").toLowerCase();
+      return haystack.includes(query);
+    });
+    const columns = [
+      { key: "operator_name", label: entityLabel, sortable: true },
+      { key: "stat_cost", label: "消耗", sortable: true },
+      { key: "total_pay_amount", label: "整体成交", sortable: true },
+      { key: "settled_pay_amount", label: "净成交", sortable: true },
+      { key: "roi", label: "ROI", sortable: true },
+      { key: "settled_roi", label: "净ROI", sortable: true },
+      { key: "order_count", label: "整体订单", sortable: true },
+      { key: "settled_order_count", label: "净订单", sortable: true },
+      { key: "pay_order_cost", label: "订单成本", sortable: true },
+      { key: "settled_amount_rate", label: "结算率", sortable: true },
+      { key: "refund_rate_1h", label: "1h退款率", sortable: true },
+      { key: "material_count", label: "素材数", sortable: true },
+      { key: "advertiser_count", label: "账户数", sortable: true },
+      { key: "keyword_count", label: "关键词数", sortable: true },
+    ];
+    const activeSort = columns.some((column) => column.key === state.employeeSort.key)
+      ? state.employeeSort
+      : { key: "stat_cost", dir: "desc" };
+    if (activeSort.key !== state.employeeSort.key || activeSort.dir !== state.employeeSort.dir) {
+      state.employeeSort = activeSort;
+      saveSort("employee-sort", state.employeeSort);
+    }
+    const sorted = sortRows(visibleRows, activeSort);
+
+    employeeTable.innerHTML = `
+      ${makeHeader(columns, activeSort, "employee-sort")}
+      <tbody>
+        ${sorted.map((row) => {
+          const entityName = breakdownEntityName(row);
+          const subline = [
+            row.operator_username ? `账号 ${row.operator_username}` : "",
+            row.top_account_name ? `代表账户 ${row.top_account_name}` : "",
+            row.top_material_name ? `代表素材 ${row.top_material_name}` : "",
+          ].filter(Boolean);
+          const refundRateText = row.refund_rate_1h_available ? formatPercent(row.refund_rate_1h) : "-";
+          return `
+            <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
+              <td>
+                <div class="cell-primary">${escapeHtml(entityName)}</div>
+                ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+              </td>
+              <td class="mono">${formatMoney(row.stat_cost)}</td>
+              <td class="mono">${formatMoney(row.total_pay_amount)}</td>
+              <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
+              <td class="mono">${formatRate(row.roi)}</td>
+              <td class="mono">${formatRate(row.settled_roi)}</td>
+              <td class="mono">${formatNumber(row.order_count)}</td>
+              <td class="mono">${formatNumber(row.settled_order_count)}</td>
+              <td class="mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</td>
+              <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</td>
+              <td class="mono">${refundRateText}</td>
+              <td class="mono">${formatNumber(row.material_count)}</td>
+              <td class="mono">${formatNumber(row.advertiser_count)}</td>
+              <td class="mono">${formatNumber(row.keyword_count)}</td>
+            </tr>
+          `;
+        }).join("")}
+      </tbody>
+    `;
+
+    employeeTable.querySelectorAll("th[data-key]").forEach((header) => {
+      header.addEventListener("click", () => {
+        const key = header.dataset.key;
+        const column = columns.find((item) => item.key === key);
+        if (!column || !column.sortable) return;
+        state.employeeSort = toggleSort(activeSort, key);
+        saveSort("employee-sort", state.employeeSort);
+        renderEmployeeTable(enrichedRows);
+      });
+    });
+
+    renderEmployeeInteractions(enrichedRows);
+    return;
+  }
   if (operatorMode) {
     const query = employeeSearch.value.trim().toLowerCase();
     const visibleRows = rows.filter((row) => {
@@ -3660,6 +3806,61 @@ function selectedUserRecord() {
 }
 
 
+function resetScopeSearch() {
+  if (scopeSearchInput) scopeSearchInput.value = "";
+}
+
+function focusScopeControl() {
+  if (scopeSearchInput && !scopeSearchInput.disabled && !scopeControls?.classList.contains("hidden")) {
+    scopeSearchInput.focus();
+    return;
+  }
+  scopeAccountList?.querySelector('input[type="checkbox"]')?.focus();
+}
+
+function selectedScopeIdSet() {
+  return new Set(
+    (state.selectedUserScopeIds || [])
+      .map((item) => Number(item))
+      .filter((item) => Number.isFinite(item) && item > 0),
+  );
+}
+
+function filteredScopeAccounts() {
+  const query = String(scopeSearchInput?.value || "").trim().toLowerCase();
+  if (!query) return state.catalogAccounts;
+  return state.catalogAccounts.filter((item) => {
+    const name = String(item.advertiser_name || "").toLowerCase();
+    const advertiserId = String(item.advertiser_id || "");
+    return name.includes(query) || advertiserId.includes(query);
+  });
+}
+
+function setScopeControlsState({
+  active = false,
+  selectedCount = 0,
+  visibleCount = 0,
+  totalCount = 0,
+  query = "",
+} = {}) {
+  scopeControls?.classList.toggle("hidden", !active);
+  if (scopeSearchInput) {
+    scopeSearchInput.disabled = !active;
+    if (!active) scopeSearchInput.value = "";
+  }
+  if (scopeSelectVisibleButton) scopeSelectVisibleButton.disabled = !active || visibleCount === 0;
+  if (scopeClearSelectedButton) scopeClearSelectedButton.disabled = !active || selectedCount === 0;
+  if (!scopeSelectionSummary) return;
+  if (!active) {
+    scopeSelectionSummary.textContent = "";
+    return;
+  }
+  const baseText = `已选 ${formatNumber(selectedCount)} / ${formatNumber(totalCount)} 个账户`;
+  scopeSelectionSummary.textContent = query
+    ? `${baseText} · 当前筛到 ${formatNumber(visibleCount)} 个`
+    : baseText;
+}
+
 function resetUserFormState() {
   state.selectedUserId = null;
   state.selectedUserScopeIds = [];
@@ -3674,6 +3875,7 @@ function resetUserFormState() {
   if (uploadInput) uploadInput.checked = false;
   const keywordSeedInput = userForm?.querySelector('textarea[name="keyword_seed"]');
   if (keywordSeedInput) keywordSeedInput.value = "";
+  resetScopeSearch();
   syncUserRoleFields();
   setInlineFeedback(
     userEditorStatus,
@@ -3757,33 +3959,60 @@ function renderScopeChecklist() {
   if (!scopeAccountList) return;
   const user = selectedUserRecord();
   if (!isAdmin()) {
+    setScopeControlsState();
     scopeAccountList.innerHTML = '<div class="empty-cell">只有管理员可以配置账户范围。</div>';
     return;
   }
   if (!user) {
+    setScopeControlsState();
     scopeAccountList.innerHTML = '<div class="empty-cell">先选择后台账号，再配置账户范围。</div>';
     return;
   }
   if (user.role === "admin") {
+    setScopeControlsState();
     scopeAccountList.innerHTML = '<div class="empty-cell">管理员默认可查看全部账户，不需要单独勾选。</div>';
     return;
   }
   if (user.role === "operator") {
+    setScopeControlsState();
     scopeAccountList.innerHTML = '<div class="empty-cell">运营账号按关键词看数据，这里不配置范围。</div>';
     return;
   }
   if (!state.catalogAccounts.length) {
+    setScopeControlsState();
     scopeAccountList.innerHTML = '<div class="empty-cell">还没有可分配的账户数据。</div>';
     return;
   }
-  const selected = new Set((state.selectedUserScopeIds || []).map((item) => Number(item)));
-  scopeAccountList.innerHTML = state.catalogAccounts.map((item) => `
-    <label class="scope-check">
-      <input type="checkbox" value="${item.advertiser_id}" ${selected.has(Number(item.advertiser_id)) ? "checked" : ""} />
-      <span>${escapeHtml(item.advertiser_name || String(item.advertiser_id))}</span>
-      <span class="scope-check-id mono">${formatNumber(item.advertiser_id)}</span>
-    </label>
-  `).join("");
+  const query = String(scopeSearchInput?.value || "").trim();
+  const selected = selectedScopeIdSet();
+  const visibleAccounts = filteredScopeAccounts();
+  setScopeControlsState({
+    active: true,
+    selectedCount: selected.size,
+    visibleCount: visibleAccounts.length,
+    totalCount: state.catalogAccounts.length,
+    query,
+  });
+  if (!visibleAccounts.length) {
+    scopeAccountList.innerHTML = `<div class="empty-cell scope-empty">${query ? "没有匹配的账户，换个关键词试试。" : "还没有可分配的账户数据。"}</div>`;
+    return;
+  }
+  scopeAccountList.innerHTML = visibleAccounts.map((item) => {
+    const advertiserId = Number(item.advertiser_id);
+    const checked = selected.has(advertiserId);
+    return `
+      <label class="scope-check ${checked ? "is-selected" : ""}">
+        <input type="checkbox" value="${advertiserId}" ${checked ? "checked" : ""} />
+        <span class="scope-check-body">
+          <span class="scope-check-name">${escapeHtml(item.advertiser_name || String(item.advertiser_id))}</span>
+          <span class="scope-check-meta">
+            <span class="scope-check-id mono">ID ${formatNumber(advertiserId)}</span>
+            <span class="scope-check-state">${checked ? "已选" : "未选"}</span>
+          </span>
+        </span>
+      </label>
+    `;
+  }).join("");
 }
 
 async function fetchUsers(force = false) {
@@ -3824,6 +4053,7 @@ async function fetchUserScopes(userId, force = false) {
 
 async function selectUserManager(userId) {
   state.selectedUserId = userId;
+  resetScopeSearch();
   const user = selectedUserRecord();
   fillUserForm(user);
   renderUserTable();
@@ -3841,7 +4071,7 @@ async function selectUserManager(userId) {
   renderUserKeywordTable();
   renderUserMatchedMaterialTable();
   if (isAdmin() && user?.role === "supervisor") {
-    scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
+    focusScopeControl();
   } else if (isAdmin() && user?.role === "operator") {
     focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
   }
@@ -4371,7 +4601,7 @@ function bindInputs() {
       setInlineFeedback(userEditorStatus, `已保存账号 ${item.username || payload.username}${keywordSuffix}。`, "success");
       if (item.role === "supervisor") {
         setInlineFeedback(scopeEditorMeta, "继续勾选该主管可见账户。", "success");
-        scopeAccountList.querySelector('input[type="checkbox"]')?.focus();
+        focusScopeControl();
       } else if (item.role === "operator") {
         if (addedKeywordCount) {
           setInlineFeedback(operatorKeywordStatus, "关键词已保存，可继续追加。", "success");
@@ -4393,6 +4623,59 @@ function bindInputs() {
   userForm?.querySelector('select[name="role"]')?.addEventListener("change", () => {
     syncUserRoleFields();
     syncAccessRolePanels();
+    renderScopeChecklist();
+  });
+
+  scopeSearchInput?.addEventListener("input", () => {
+    renderScopeChecklist();
+  });
+
+  scopeAccountList?.addEventListener("change", (event) => {
+    const user = selectedUserRecord();
+    if (!isAdmin() || !user || user.role !== "supervisor") return;
+    const checkbox = event.target.closest('input[type="checkbox"]');
+    if (!checkbox) return;
+    const advertiserId = Number(checkbox.value);
+    if (!Number.isFinite(advertiserId)) return;
+    const selected = selectedScopeIdSet();
+    if (checkbox.checked) {
+      selected.add(advertiserId);
+    } else {
+      selected.delete(advertiserId);
+    }
+    state.selectedUserScopeIds = [...selected].sort((left, right) => left - right);
+    const card = checkbox.closest(".scope-check");
+    card?.classList.toggle("is-selected", checkbox.checked);
+    const stateBadge = card?.querySelector(".scope-check-state");
+    if (stateBadge) stateBadge.textContent = checkbox.checked ? "已选" : "未选";
+    setScopeControlsState({
+      active: true,
+      selectedCount: selected.size,
+      visibleCount: filteredScopeAccounts().length,
+      totalCount: state.catalogAccounts.length,
+      query: String(scopeSearchInput?.value || "").trim(),
+    });
+  });
+
+  scopeSelectVisibleButton?.addEventListener("click", () => {
+    const user = selectedUserRecord();
+    if (!isAdmin() || !user || user.role !== "supervisor") return;
+    const visibleAccounts = filteredScopeAccounts();
+    if (!visibleAccounts.length) return;
+    const selected = selectedScopeIdSet();
+    visibleAccounts.forEach((item) => {
+      const advertiserId = Number(item.advertiser_id);
+      if (Number.isFinite(advertiserId)) selected.add(advertiserId);
+    });
+    state.selectedUserScopeIds = [...selected].sort((left, right) => left - right);
+    renderScopeChecklist();
+  });
+
+  scopeClearSelectedButton?.addEventListener("click", () => {
+    const user = selectedUserRecord();
+    if (!isAdmin() || !user || user.role !== "supervisor") return;
+    if (!state.selectedUserScopeIds.length) return;
+    state.selectedUserScopeIds = [];
     renderScopeChecklist();
   });
 
@@ -4465,7 +4748,8 @@ function bindInputs() {
       window.alert("管理员默认拥有全部权限，无需设置账户范围。");
       return;
     }
-    const advertiserIds = [...scopeAccountList.querySelectorAll('input[type="checkbox"]:checked')].map((item) => Number(item.value));
+    if (user.role !== "supervisor") return;
+    const advertiserIds = [...selectedScopeIdSet()].sort((left, right) => left - right);
     const response = await fetch(`/api/users/${state.selectedUserId}/account-scopes`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

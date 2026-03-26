@@ -1407,6 +1407,11 @@ class DashboardService:
                 cls._first_text(item.get(key))
                 for key in (
                     "material_id",
+                    "video_material_id",
+                    "image_material_id",
+                    "title_material_id",
+                    "carousel_material_id",
+                    "live_room_material_id",
                     "id",
                     "video_id",
                     "aweme_id",
@@ -1424,10 +1429,12 @@ class DashboardService:
 
         material_id = cls._first_text(
             chosen.get("material_id"),
+            chosen.get("video_material_id"),
+            chosen.get("image_material_id"),
+            chosen.get("title_material_id"),
+            chosen.get("carousel_material_id"),
+            chosen.get("live_room_material_id"),
             chosen.get("id"),
-            chosen.get("video_id"),
-            chosen.get("aweme_id"),
-            chosen.get("room_id"),
         )
         video_id = cls._first_text(chosen.get("video_id"), chosen.get("aweme_id"))
         material_name = cls._first_text(
@@ -2193,6 +2200,7 @@ class DashboardService:
             pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
             total_pay_amount = round(float(row.get("total_pay_amount", 0.0) or 0.0), 2)
             settled_pay_amount = round(float(row.get("settled_pay_amount", 0.0) or 0.0), 2)
+            refund_amount_1h = round(float(row.get("refund_amount_1h", 0.0) or 0.0), 2)
             order_count = int(float(row.get("order_count", 0.0) or 0.0))
             settled_order_count = int(float(row.get("settled_order_count", 0.0) or 0.0))
             material_key = str(row.get("material_key") or "").strip()
@@ -2200,6 +2208,7 @@ class DashboardService:
             advertiser_ids = {int(item) for item in row.get("advertiser_ids", []) if int(item or 0)}
             plan_ids = {int(item) for item in row.get("plan_ids", []) if int(item or 0)}
             top_account_name = str(row.get("top_account_name") or "").strip()
+            has_refund_metric = "refund_amount_1h" in row or "refund_rate_1h" in row
             for match in matches:
                 operator_id = int(match["operator_id"])
                 group = groups.setdefault(
@@ -2212,12 +2221,14 @@ class DashboardService:
                         "pay_amount": 0.0,
                         "total_pay_amount": 0.0,
                         "settled_pay_amount": 0.0,
+                        "refund_amount_1h": 0.0,
                         "order_count": 0,
                         "settled_order_count": 0,
                         "material_keys": set(),
                         "plan_ids": set(),
                         "advertiser_ids": set(),
                         "matched_keywords": set(),
+                        "has_refund_rate_1h": False,
                         "top_material_name": "",
                         "top_account_name": "",
                         "top_material_orders": -1,
@@ -2228,6 +2239,7 @@ class DashboardService:
                 group["pay_amount"] = round(group["pay_amount"] + pay_amount, 2)
                 group["total_pay_amount"] = round(group["total_pay_amount"] + total_pay_amount, 2)
                 group["settled_pay_amount"] = round(group["settled_pay_amount"] + settled_pay_amount, 2)
+                group["refund_amount_1h"] = round(group["refund_amount_1h"] + refund_amount_1h, 2)
                 group["order_count"] += order_count
                 group["settled_order_count"] += settled_order_count
                 if material_key:
@@ -2235,6 +2247,7 @@ class DashboardService:
                 group["plan_ids"].update(plan_ids)
                 group["advertiser_ids"].update(advertiser_ids)
                 group["matched_keywords"].update(match["matched_keywords"])
+                group["has_refund_rate_1h"] = bool(group["has_refund_rate_1h"]) or has_refund_metric
                 if (
                     order_count > group["top_material_orders"]
                     or (order_count == group["top_material_orders"] and pay_amount > group["top_material_pay_amount"])
@@ -2248,9 +2261,18 @@ class DashboardService:
         for group in groups.values():
             stat_cost = round(float(group["stat_cost"] or 0.0), 2)
             pay_amount = round(float(group["pay_amount"] or 0.0), 2)
+            total_pay_amount = round(float(group["total_pay_amount"] or 0.0), 2)
             settled_pay_amount = round(float(group["settled_pay_amount"] or 0.0), 2)
+            refund_amount_1h = round(float(group["refund_amount_1h"] or 0.0), 2)
             order_count = int(group["order_count"] or 0)
             settled_order_count = int(group["settled_order_count"] or 0)
+            settled_amount_rate = round(settled_pay_amount / total_pay_amount * 100.0, 2) if total_pay_amount > 0 else 0.0
+            pay_order_cost = round(stat_cost / order_count, 2) if order_count > 0 else 0.0
+            refund_rate_1h = (
+                round(refund_amount_1h / total_pay_amount * 100.0, 2)
+                if total_pay_amount > 0 and bool(group["has_refund_rate_1h"])
+                else None
+            )
             rows.append(
                 {
                     "operator_id": group["operator_id"],
@@ -2258,8 +2280,10 @@ class DashboardService:
                     "operator_username": group["operator_username"],
                     "stat_cost": stat_cost,
                     "pay_amount": pay_amount,
-                    "total_pay_amount": round(float(group["total_pay_amount"] or 0.0), 2),
+                    "total_pay_amount": total_pay_amount,
                     "settled_pay_amount": settled_pay_amount,
+                    "refund_amount_1h": refund_amount_1h,
+                    "refund_rate_1h": refund_rate_1h,
                     "order_count": order_count,
                     "settled_order_count": settled_order_count,
                     "material_count": len(group["material_keys"]),
@@ -2270,6 +2294,8 @@ class DashboardService:
                     "top_account_name": group["top_account_name"],
                     "roi": round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
                     "settled_roi": round(settled_pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
+                    "pay_order_cost": pay_order_cost,
+                    "settled_amount_rate": settled_amount_rate,
                 }
             )
         rows.sort(
@@ -4208,6 +4234,177 @@ class DashboardService:
             return build_custom_performance_window(start_date, end_date, tz_name)
         return build_performance_window(normalized, tz_name)
 
+    @staticmethod
+    def _numeric_material_id_text(*values: Any) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text.isdigit():
+                return text
+        return ""
+
+    def _material_snapshot_rows_for_curve(
+        self,
+        material_key: str,
+        start_date: str,
+        end_date: str,
+        snapshot_time: str,
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        material_key_text = str(material_key or "").strip()
+        if not material_key_text:
+            return []
+        clauses = ["material_key = ?"]
+        params: list[Any] = [material_key_text]
+        target_snapshot = str(snapshot_time or "").strip()
+        if target_snapshot:
+            clauses.append("snapshot_time = ?")
+            params.append(target_snapshot)
+        else:
+            clauses.append("substr(snapshot_time, 1, 10) >= ?")
+            params.append(str(start_date or "").strip())
+            clauses.append("substr(snapshot_time, 1, 10) <= ?")
+            params.append(str(end_date or "").strip())
+        if allowed_advertiser_ids is not None:
+            allowed = sorted(int(item) for item in allowed_advertiser_ids if int(item or 0))
+            if not allowed:
+                return []
+            placeholders = ",".join("?" for _ in allowed)
+            clauses.append(f"advertiser_id IN ({placeholders})")
+            params.extend(allowed)
+        with self.db() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    snapshot_time,
+                    advertiser_id,
+                    advertiser_name,
+                    ad_id,
+                    ad_name,
+                    material_type,
+                    material_key,
+                    material_id,
+                    material_name,
+                    video_id,
+                    aweme_item_id,
+                    cover_url,
+                    video_url,
+                    stat_cost,
+                    pay_amount,
+                    order_count,
+                    raw_json
+                FROM material_snapshots
+                WHERE {" AND ".join(clauses)}
+                ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, stat_cost DESC
+                LIMIT 200
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @classmethod
+    def _material_curve_source_from_snapshot_row(cls, row: dict[str, Any]) -> dict[str, Any] | None:
+        raw_payload = cls._json_object(row.get("raw_json"))
+        material_type = str(row.get("material_type") or raw_payload.get("material_type") or "VIDEO").strip().upper()
+        identity = cls._extract_material_identity(material_type, raw_payload) if raw_payload else {}
+        preview = cls._extract_material_preview(material_type, raw_payload) if raw_payload else {}
+        resolved_material_id = cls._numeric_material_id_text(
+            identity.get("material_id"),
+            row.get("material_id"),
+        )
+        if not resolved_material_id:
+            return None
+        resolved_video_id = cls._first_text(
+            identity.get("video_id"),
+            row.get("video_id"),
+        )
+        resolved_aweme_item_id = cls._first_text(
+            preview.get("aweme_item_id"),
+            row.get("aweme_item_id"),
+        )
+        return {
+            "snapshot_time": str(row.get("snapshot_time") or ""),
+            "advertiser_id": int(row.get("advertiser_id", 0) or 0),
+            "advertiser_name": str(row.get("advertiser_name") or "").strip(),
+            "ad_id": int(row.get("ad_id", 0) or 0),
+            "ad_name": str(row.get("ad_name") or "").strip(),
+            "material_id": resolved_material_id,
+            "video_id": resolved_video_id,
+            "aweme_item_id": resolved_aweme_item_id,
+            "order_count": int(float(row.get("order_count", 0) or 0)),
+            "pay_amount": round(float(row.get("pay_amount", 0.0) or 0.0), 2),
+            "stat_cost": round(float(row.get("stat_cost", 0.0) or 0.0), 2),
+            "source": "material_snapshots.raw_json",
+        }
+
+    def _resolve_material_curve_source(
+        self,
+        row: dict[str, Any],
+        start_date: str,
+        end_date: str,
+        snapshot_time: str,
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> dict[str, Any] | None:
+        ranking_material_id = self._numeric_material_id_text(row.get("material_id"))
+        ranking_video_id = str(row.get("video_id") or "").strip()
+        ranking_aweme_item_id = str(row.get("aweme_item_id") or "").strip()
+        top_account_name = str(row.get("top_account_name") or "").strip()
+        top_plan_name = str(row.get("top_plan_name") or "").strip()
+
+        candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        seen: set[tuple[int, int, str]] = set()
+        for snapshot_row in self._material_snapshot_rows_for_curve(
+            str(row.get("material_key") or ""),
+            start_date,
+            end_date,
+            snapshot_time,
+            allowed_advertiser_ids,
+        ):
+            candidate = self._material_curve_source_from_snapshot_row(snapshot_row)
+            if not candidate:
+                continue
+            dedupe_key = (
+                int(candidate["advertiser_id"]),
+                int(candidate["ad_id"]),
+                str(candidate["material_id"]),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            score = (
+                0 if ranking_material_id and candidate["material_id"] == ranking_material_id else 1,
+                0 if ranking_aweme_item_id and candidate["aweme_item_id"] == ranking_aweme_item_id else 1,
+                0 if ranking_video_id and candidate["video_id"] == ranking_video_id else 1,
+                0 if top_account_name and candidate["advertiser_name"] == top_account_name else 1,
+                0 if top_plan_name and candidate["ad_name"] == top_plan_name else 1,
+                -int(candidate["order_count"]),
+                -float(candidate["pay_amount"]),
+                -float(candidate["stat_cost"]),
+            )
+            candidates.append((score, candidate))
+
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            return dict(candidates[0][1])
+
+        advertiser_ids = [int(item) for item in row.get("advertiser_ids", []) if int(item or 0)]
+        advertiser_id = advertiser_ids[0] if advertiser_ids else 0
+        if ranking_material_id and advertiser_id:
+            return {
+                "snapshot_time": "",
+                "advertiser_id": advertiser_id,
+                "advertiser_name": str(row.get("top_account_name") or "").strip(),
+                "ad_id": 0,
+                "ad_name": str(row.get("top_plan_name") or "").strip(),
+                "material_id": ranking_material_id,
+                "video_id": ranking_video_id,
+                "aweme_item_id": ranking_aweme_item_id,
+                "order_count": int(float(row.get("order_count", 0) or 0)),
+                "pay_amount": round(float(row.get("pay_amount", 0.0) or 0.0), 2),
+                "stat_cost": round(float(row.get("stat_cost", 0.0) or 0.0), 2),
+                "source": "material_rankings.material_id",
+            }
+        return None
+
     def material_preview_curve(
         self,
         material_key: str,
@@ -4275,6 +4472,10 @@ class DashboardService:
             "material_name": str(row.get("material_name") or ""),
             "material_type": material_type,
             "advertiser_id": advertiser_id,
+            "curve_material_id": "",
+            "curve_advertiser_id": 0,
+            "curve_ad_id": 0,
+            "material_id_source": "",
             "advertiser_count": len(advertiser_ids),
             "top_account_name": str(row.get("top_account_name") or ""),
             "supported": material_type == "VIDEO",
@@ -4305,12 +4506,6 @@ class DashboardService:
         if material_type != "VIDEO":
             response_payload["message"] = "仅视频素材支持互动峰形图。"
             return response_payload
-        if not response_payload["material_id"]:
-            response_payload["message"] = "当前素材缺少 material_id，无法查询峰形图。"
-            return response_payload
-        if not advertiser_id:
-            response_payload["message"] = "当前素材缺少 advertiser_id，无法查询峰形图。"
-            return response_payload
 
         query_start_dt = requested_start_dt
         query_end_dt = min(requested_end_dt, latest_available_end)
@@ -4335,6 +4530,25 @@ class DashboardService:
         response_payload["query_end_date"] = query_end_dt.strftime("%Y-%m-%d")
         response_payload["is_clamped_to_yesterday"] = clamped
 
+        resolved_source = self._resolve_material_curve_source(
+            row,
+            response_payload["query_start_date"],
+            response_payload["query_end_date"],
+            snapshot_time,
+            allowed_advertiser_ids,
+        )
+        if resolved_source:
+            response_payload["curve_material_id"] = str(resolved_source.get("material_id") or "")
+            response_payload["curve_advertiser_id"] = int(resolved_source.get("advertiser_id", 0) or 0)
+            response_payload["curve_ad_id"] = int(resolved_source.get("ad_id", 0) or 0)
+            response_payload["material_id_source"] = str(resolved_source.get("source") or "")
+        if not response_payload["curve_material_id"]:
+            response_payload["message"] = "未找到可用于峰形图查询的素材唯一 ID。"
+            return response_payload
+        if not response_payload["curve_advertiser_id"]:
+            response_payload["message"] = "未找到可用于峰形图查询的投放账户 ID。"
+            return response_payload
+
         notices: list[str] = []
         if clamped:
             notices.append(f"该接口仅支持 T+1 数据，当前展示截至 {latest_available_day.isoformat()} 的数据。")
@@ -4347,8 +4561,8 @@ class DashboardService:
 
         client = self.build_client(config)
         response = client.get_video_user_lose(
-            advertiser_id=advertiser_id,
-            material_id=response_payload["material_id"],
+            advertiser_id=int(response_payload["curve_advertiser_id"]),
+            material_id=response_payload["curve_material_id"],
             start_date=response_payload["query_start_date"],
             end_date=response_payload["query_end_date"],
         )
