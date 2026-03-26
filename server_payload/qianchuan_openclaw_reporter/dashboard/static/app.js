@@ -76,6 +76,7 @@ const state = {
   uploadJobs: [],
   uploadSelectedPlanIds: [],
   uploadFiles: [],
+  uploadRetryingJobId: null,
   unassignedScope: "all",
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
@@ -1089,20 +1090,30 @@ function normalizeUploadJobNote(note) {
 
 function uploadJobStatusLabel(status) {
   const value = String(status || "").trim().toLowerCase();
-  if (value === "ok") return "完成";
+  if (value === "ok" || value === "success") return "完成";
   if (value === "running") return "进行中";
   if (value === "partial") return "部分完成";
   if (value === "failed") return "失败";
-  if (value === "prepared") return "待执行";
+  if (value === "prepared" || value === "queued") return "待执行";
   return status || "--";
 }
 
 function uploadJobStatusClass(status) {
   const value = String(status || "").trim().toLowerCase();
-  if (value === "ok") return "live";
-  if (value === "running" || value === "prepared") return "paused";
+  if (value === "ok" || value === "success") return "live";
+  if (value === "running" || value === "prepared" || value === "queued") return "paused";
   if (value === "partial" || value === "failed") return "system";
   return "neutral";
+}
+
+function canRetryUploadJob(item) {
+  const status = String(item?.status || "").trim().toLowerCase();
+  if (status === "queued" || status === "running") return false;
+  return Number(item?.failed_files || 0) > 0 || Number(item?.failed_targets || 0) > 0 || status === "failed" || status === "partial";
+}
+
+function uploadRetryButtonLabel(item) {
+  return Number(state.uploadRetryingJobId || 0) === Number(item?.id || 0) ? "重试中..." : "重试失败项";
 }
 
 function renderUploadJobNote(item) {
@@ -1198,7 +1209,7 @@ function renderUploadJobTable() {
   if (!uploadJobTable) return;
   const items = state.uploadJobs || [];
   if (!items.length) {
-    uploadJobTable.innerHTML = '<tbody><tr><td colspan="8" class="empty-cell">还没有上传任务。</td></tr></tbody>';
+    uploadJobTable.innerHTML = '<tbody><tr><td colspan="9" class="empty-cell">还没有上传任务。</td></tr></tbody>';
     return;
   }
   uploadJobTable.innerHTML = `
@@ -1212,6 +1223,7 @@ function renderUploadJobTable() {
         <th>失败</th>
         <th>时间</th>
         <th>备注</th>
+        <th>操作</th>
       </tr>
     </thead>
     <tbody>
@@ -1235,11 +1247,16 @@ function renderUploadJobTable() {
           <td>
             <div class="cell-primary mono">${formatNumber(item.failed_files || 0)}</div>
             <div class="cell-subline">
-              <span class="cell-subitem">${item.failed_files ? "查看备注" : "--"}</span>
+              <span class="cell-subitem">计划失败 ${formatNumber(item.failed_targets || 0)}</span>
             </div>
           </td>
           <td>${escapeHtml(item.created_at || "--")}</td>
           <td>${renderUploadJobNote(item)}</td>
+          <td>
+            ${canRetryUploadJob(item)
+              ? `<button type="button" class="button ghost compact" data-action="retry-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadRetryButtonLabel(item))}</button>`
+              : '<span class="cell-subitem">--</span>'}
+          </td>
         </tr>
       `).join("")}
     </tbody>
@@ -1284,6 +1301,32 @@ async function fetchUploadJobs() {
   const payload = await response.json();
   state.uploadJobs = payload.items || [];
   renderUploadJobTable();
+}
+
+async function retryUploadJob(jobId) {
+  const normalizedJobId = Number(jobId || 0);
+  if (!normalizedJobId || state.uploadRetryingJobId === normalizedJobId) return;
+  state.uploadRetryingJobId = normalizedJobId;
+  renderUploadJobTable();
+  setInlineFeedback(uploadJobStatus, `正在重试任务 #${normalizedJobId}…`, "neutral");
+  try {
+    const response = await fetch(`/api/upload/jobs/${encodeURIComponent(String(normalizedJobId))}/retry`, { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(payload.detail || "重试上传任务失败");
+      setInlineFeedback(uploadJobStatus, "重试上传任务失败。", "warn");
+      return;
+    }
+    setInlineFeedback(
+      uploadJobStatus,
+      `已创建重试任务 #${payload.id}，来源任务 #${payload.source_job_id || normalizedJobId}。`,
+      "success",
+    );
+    await fetchUploadJobs();
+  } finally {
+    state.uploadRetryingJobId = null;
+    renderUploadJobTable();
+  }
 }
 
 function renderAlertSummary(events) {
@@ -3573,6 +3616,13 @@ function bindInputs() {
       uploadSelectAll.checked = total > 0 && state.uploadSelectedPlanIds.length === total;
     }
     renderUploadTargetSummary();
+  });
+  uploadJobTable?.addEventListener("click", async (event) => {
+    const button = event.target.closest('[data-action="retry-upload-job"]');
+    if (!button) return;
+    const jobId = Number(button.dataset.jobId || 0);
+    if (!jobId) return;
+    await retryUploadJob(jobId);
   });
   uploadFileInput?.addEventListener("change", () => {
     state.uploadFiles = Array.from(uploadFileInput.files || []);

@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import secrets
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -644,6 +645,248 @@ class DashboardService:
 
     def list_material_upload_jobs(self, user: dict[str, Any]) -> list[dict[str, Any]]:
         return self.upload_access.list_material_upload_jobs(user)
+
+    def _material_upload_job_row_for_user_locked(
+        self,
+        conn: Any,
+        user: dict[str, Any],
+        job_id: int,
+    ) -> Any:
+        role = str(user.get("role") or "")
+        if role == ROLE_ADMIN:
+            return conn.execute(
+                "SELECT * FROM material_upload_jobs WHERE id = ? LIMIT 1",
+                (int(job_id),),
+            ).fetchone()
+        return conn.execute(
+            """
+            SELECT *
+            FROM material_upload_jobs
+            WHERE id = ? AND created_by_user_id = ?
+            LIMIT 1
+            """,
+            (int(job_id), int(user.get("id", 0) or 0)),
+        ).fetchone()
+
+    def _store_material_upload_file_source(
+        self,
+        job_id: int,
+        index: int,
+        source: dict[str, Any],
+        created_at: str,
+    ) -> tuple[Any, ...]:
+        original_name = Path(str(source.get("original_name") or "")).name or f"video-{index}.mp4"
+        safe_name = f"{index:03d}_{secrets.token_hex(6)}_{original_name}"
+        relative_path = f"{job_id}/{safe_name}"
+        destination = UPLOAD_DIR / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        content = source.get("content")
+        if isinstance(content, bytes):
+            destination.write_bytes(content)
+            file_size = len(content)
+            file_sha256 = hashlib.sha256(content).hexdigest()
+            file_md5 = hashlib.md5(content).hexdigest()
+        else:
+            source_path = Path(str(source.get("source_path") or ""))
+            if not source_path.exists():
+                raise FileNotFoundError(f"source file missing: {source_path}")
+            shutil.copy2(source_path, destination)
+            file_size = int(source.get("file_size") or 0) or int(destination.stat().st_size)
+            file_sha256 = str(source.get("file_sha256") or "")
+            file_md5 = str(source.get("file_md5") or "")
+            if not file_sha256 or not file_md5:
+                copied = destination.read_bytes()
+                if not file_sha256:
+                    file_sha256 = hashlib.sha256(copied).hexdigest()
+                if not file_md5:
+                    file_md5 = hashlib.md5(copied).hexdigest()
+        return (
+            int(job_id),
+            original_name,
+            safe_name,
+            relative_path,
+            file_size,
+            str(source.get("mime_type") or ""),
+            file_sha256,
+            file_md5,
+            created_at,
+            "stored",
+            created_at,
+        )
+
+    def _create_material_upload_job_locked(
+        self,
+        conn: Any,
+        created_by_user_id: int,
+        scope: str,
+        query_text: str,
+        target_plans: list[dict[str, Any]],
+        file_sources: list[dict[str, Any]],
+        note: str,
+    ) -> dict[str, Any]:
+        now = now_text()
+        job_row = conn.execute(
+            """
+            INSERT INTO material_upload_jobs (
+                created_by_user_id, scope, query_text, status, total_files, total_targets,
+                uploaded_files, processed_files, success_files, failed_files,
+                processed_targets, success_targets, failed_targets, note, created_at, updated_at
+            ) VALUES (?, ?, ?, 'queued', ?, ?, 0, 0, 0, 0, 0, 0, 0, ?, ?, ?)
+            RETURNING *
+            """,
+            (
+                int(created_by_user_id),
+                str(scope or "plan"),
+                str(query_text or "").strip(),
+                len(file_sources),
+                len(target_plans),
+                str(note or "上传任务已创建，等待后台执行。"),
+                now,
+                now,
+            ),
+        ).fetchone()
+        job_id = int(job_row["id"])
+        (UPLOAD_DIR / str(job_id)).mkdir(parents=True, exist_ok=True)
+        file_rows = [
+            self._store_material_upload_file_source(job_id, index, source, now)
+            for index, source in enumerate(file_sources, start=1)
+        ]
+        conn.executemany(
+            """
+            INSERT INTO material_upload_job_files (
+                job_id, original_name, stored_name, relative_path, file_size, mime_type,
+                file_sha256, file_md5, updated_at, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            file_rows,
+        )
+        conn.executemany(
+            """
+            INSERT INTO material_upload_job_targets (
+                job_id, advertiser_id, advertiser_name, ad_id, ad_name, status, message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'queued', '', ?, ?)
+            """,
+            [
+                (
+                    job_id,
+                    int(item["advertiser_id"]),
+                    str(item["advertiser_name"]),
+                    int(item["ad_id"]),
+                    str(item["ad_name"]),
+                    now,
+                    now,
+                )
+                for item in target_plans
+            ],
+        )
+        return {
+            "id": job_id,
+            "status": "queued",
+            "scope": str(scope or "plan"),
+            "query_text": str(query_text or "").strip(),
+            "total_files": len(file_sources),
+            "total_targets": len(target_plans),
+            "note": str(note or "上传任务已创建，等待后台执行。"),
+            "created_at": now,
+        }
+
+    def retry_material_upload_job(self, user: dict[str, Any], job_id: int) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        with self.db() as conn:
+            job = self._material_upload_job_row_for_user_locked(conn, user, int(job_id))
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="上传任务不存在")
+            job = dict(job)
+            status_text = str(job.get("status") or "").strip().lower()
+            if status_text in {"queued", "running"}:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务仍在执行中，暂时不能重试")
+            file_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM material_upload_job_files
+                    WHERE job_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (int(job_id),),
+                ).fetchall()
+            ]
+            target_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM material_upload_job_targets
+                    WHERE job_id = ?
+                    ORDER BY advertiser_id ASC, ad_id ASC
+                    """,
+                    (int(job_id),),
+                ).fetchall()
+            ]
+            retry_file_rows = [
+                row for row in file_rows if str(row.get("status") or "").strip().lower() in {"failed", "partial"}
+            ]
+            retry_target_rows = [
+                row for row in target_rows if str(row.get("status") or "").strip().lower() in {"failed", "partial"}
+            ]
+            if not retry_file_rows and int(job.get("failed_targets", 0) or 0) > 0:
+                retry_file_rows = list(file_rows)
+            if not retry_target_rows and (
+                int(job.get("failed_files", 0) or 0) > 0
+                or int(job.get("failed_targets", 0) or 0) > 0
+                or status_text in {"failed", "partial"}
+            ):
+                retry_target_rows = list(target_rows)
+            if not retry_file_rows or not retry_target_rows:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
+            file_sources: list[dict[str, Any]] = []
+            missing_files = 0
+            for row in retry_file_rows:
+                source_path = UPLOAD_DIR / str(row.get("relative_path") or "")
+                if not source_path.exists():
+                    missing_files += 1
+                    continue
+                file_sources.append(
+                    {
+                        "original_name": str(row.get("original_name") or ""),
+                        "mime_type": str(row.get("mime_type") or ""),
+                        "source_path": source_path,
+                        "file_size": int(row.get("file_size", 0) or 0),
+                        "file_sha256": str(row.get("file_sha256") or ""),
+                        "file_md5": str(row.get("file_md5") or ""),
+                    }
+                )
+            if not file_sources:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="失败文件已丢失，无法重试")
+            retry_note = f"重试任务来自 #{int(job_id)}，等待后台执行。"
+            if missing_files > 0:
+                retry_note = f"{retry_note} 已跳过 {missing_files} 个缺失文件。"
+            payload = self._create_material_upload_job_locked(
+                conn,
+                int(user.get("id", 0) or 0),
+                str(job.get("scope") or "plan"),
+                str(job.get("query_text") or ""),
+                [
+                    {
+                        "advertiser_id": int(item.get("advertiser_id", 0) or 0),
+                        "advertiser_name": str(item.get("advertiser_name") or ""),
+                        "ad_id": int(item.get("ad_id", 0) or 0),
+                        "ad_name": str(item.get("ad_name") or ""),
+                    }
+                    for item in retry_target_rows
+                ],
+                file_sources,
+                retry_note,
+            )
+        payload["source_job_id"] = int(job_id)
+        payload["retry_file_count"] = len(file_sources)
+        payload["retry_target_count"] = len(retry_target_rows)
+        if missing_files > 0:
+            payload["skipped_missing_files"] = missing_files
+        return payload
 
     def _collect_balance_snapshot(self, client: OceanEngineClient, accounts: list[dict[str, Any]]) -> dict[str, Any]:
         return self.balance_access.collect_balance_snapshot(client, accounts)
@@ -2664,95 +2907,26 @@ class DashboardService:
         if not target_plans:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="所选计划不在当前可用范围内")
 
-        now = now_text()
+        file_sources = []
+        for upload in valid_files:
+            content = await upload.read()
+            file_sources.append(
+                {
+                    "original_name": str(upload.filename or ""),
+                    "mime_type": str(upload.content_type or ""),
+                    "content": content,
+                }
+            )
         with self.db() as conn:
-            job_row = conn.execute(
-                """
-                INSERT INTO material_upload_jobs (
-                    created_by_user_id, scope, query_text, status, total_files, total_targets,
-                    uploaded_files, processed_files, success_files, failed_files,
-                    processed_targets, success_targets, failed_targets, note, created_at, updated_at
-                ) VALUES (?, ?, ?, 'queued', ?, ?, 0, 0, 0, 0, 0, 0, 0, ?, ?, ?)
-                RETURNING *
-                """,
-                (
-                    int(user.get("id", 0) or 0),
-                    normalized_scope,
-                    str(query or "").strip(),
-                    len(valid_files),
-                    len(target_plans),
-                    "上传任务已创建，等待后台执行。",
-                    now,
-                    now,
-                ),
-            ).fetchone()
-            job_id = int(job_row["id"])
-            job_dir = UPLOAD_DIR / str(job_id)
-            job_dir.mkdir(parents=True, exist_ok=True)
-            file_rows: list[tuple[Any, ...]] = []
-            for index, upload in enumerate(valid_files, start=1):
-                content = await upload.read()
-                original_name = Path(str(upload.filename or "")).name or f"video-{index}.mp4"
-                safe_name = f"{index:03d}_{secrets.token_hex(6)}_{original_name}"
-                relative_path = f"{job_id}/{safe_name}"
-                destination = UPLOAD_DIR / relative_path
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(content)
-                file_sha256 = hashlib.sha256(content).hexdigest()
-                file_md5 = hashlib.md5(content).hexdigest()
-                file_rows.append(
-                    (
-                        job_id,
-                        original_name,
-                        safe_name,
-                        relative_path,
-                        len(content),
-                        str(upload.content_type or ""),
-                        file_sha256,
-                        file_md5,
-                        now,
-                        "stored",
-                        now,
-                    )
-                )
-            conn.executemany(
-                """
-                INSERT INTO material_upload_job_files (
-                    job_id, original_name, stored_name, relative_path, file_size, mime_type,
-                    file_sha256, file_md5, updated_at, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                file_rows,
+            return self._create_material_upload_job_locked(
+                conn,
+                int(user.get("id", 0) or 0),
+                normalized_scope,
+                str(query or "").strip(),
+                target_plans,
+                file_sources,
+                "上传任务已创建，等待后台执行。",
             )
-            conn.executemany(
-                """
-                INSERT INTO material_upload_job_targets (
-                    job_id, advertiser_id, advertiser_name, ad_id, ad_name, status, message, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'queued', '', ?, ?)
-                """,
-                [
-                    (
-                        job_id,
-                        int(item["advertiser_id"]),
-                        str(item["advertiser_name"]),
-                        int(item["ad_id"]),
-                        str(item["ad_name"]),
-                        now,
-                        now,
-                    )
-                    for item in target_plans
-                ],
-            )
-        return {
-            "id": job_id,
-            "status": "queued",
-            "scope": normalized_scope,
-            "query_text": str(query or "").strip(),
-            "total_files": len(valid_files),
-            "total_targets": len(target_plans),
-            "note": "上传任务已创建，等待后台执行。",
-            "created_at": now,
-        }
 
     def _previous_plan_order_map(self, conn: Any, snapshot_time: str) -> dict[int, int]:
         previous = conn.execute(
