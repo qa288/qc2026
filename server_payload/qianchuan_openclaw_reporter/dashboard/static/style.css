@@ -1963,6 +1963,13 @@ body {
   line-height: 1.2;
 }
 
+.plan-source-pill {
+  min-height: 30px;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
 .marketing-goal-pill.product {
   background: rgba(20, 59, 47, 0.1);
   color: var(--brand);
@@ -2547,12 +2554,27 @@ body {
   color: #607086;
 }
 
+.plan-source-pill.neutral {
+  background: rgba(111, 125, 144, 0.12);
+  color: #607086;
+}
+
 .marketing-goal-pill.product {
   background: rgba(22, 119, 255, 0.1);
   color: var(--brand);
 }
 
+.plan-source-pill.uni {
+  background: rgba(22, 119, 255, 0.1);
+  color: var(--brand);
+}
+
 .marketing-goal-pill.live-room {
+  background: rgba(15, 157, 122, 0.12);
+  color: var(--pay);
+}
+
+.plan-source-pill.standard {
   background: rgba(15, 157, 122, 0.12);
   color: var(--pay);
 }

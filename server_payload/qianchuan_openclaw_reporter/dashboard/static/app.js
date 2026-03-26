@@ -740,6 +740,19 @@ function renderMarketingGoalBadge(row) {
   return `<span class="pill marketing-goal-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
 }
 
+function planSourceTone(sourceText) {
+  if (sourceText === "鍩虹鎶曟斁") return "standard";
+  if (sourceText === "鍏ㄥ煙鎶曟斁") return "uni";
+  return "neutral";
+}
+
+function renderPlanSourceBadge(row) {
+  const text = row.plan_source_text || (String(row.plan_source || "").trim().toUpperCase() === "STANDARD" ? "鍩虹鎶曟斁" : "鍏ㄥ煙鎶曟斁");
+  const tone = planSourceTone(text);
+  const title = row.plan_source || text;
+  return `<span class="pill plan-source-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
+}
+
 function enrichPlanRow(row) {
   const statCost = Number(row?.stat_cost || 0);
   const totalPayAmount = Number(row?.total_pay_amount || 0);
@@ -749,6 +762,45 @@ function enrichPlanRow(row) {
   const refundAmount1h = Number(row?.refund_amount_1h || 0);
   return {
     ...row,
+    plan_source_text: row?.plan_source_text || (String(row?.plan_source || "").trim().toUpperCase() === "STANDARD" ? "鍩虹鎶曟斁" : "鍏ㄥ煙鎶曟斁"),
+    marketing_goal_text: row?.marketing_goal_text || row?.marketing_goal_label || row?.marketing_goal || "-",
+    status_text: row?.status_text || `${row?.status || ""}/${row?.opt_status || ""}`,
+    settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
+    settled_order_count: settledOrderCount,
+    pay_order_cost: orderCount > 0 ? Number((statCost / orderCount).toFixed(2)) : Number(row?.pay_order_cost || 0),
+    settled_amount_rate: totalPayAmount > 0
+      ? Number((settledPayAmount / totalPayAmount * 100).toFixed(2))
+      : Number(row?.settled_amount_rate || 0),
+    refund_rate_1h: totalPayAmount > 0
+      ? Number((refundAmount1h / totalPayAmount * 100).toFixed(2))
+      : Number(row?.refund_rate_1h || 0),
+  };
+}
+
+function planSourceTone(source) {
+  if (source === "STANDARD") return "standard";
+  if (source === "UNI_PROMOTION") return "uni";
+  return "neutral";
+}
+
+function renderPlanSourceBadge(row) {
+  const source = String(row?.plan_source || "").trim().toUpperCase();
+  const text = row?.plan_source_text || (source === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u5168\u57df\u6295\u653e");
+  const tone = planSourceTone(source);
+  const title = source || text;
+  return `<span class="pill plan-source-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
+}
+
+function enrichPlanRow(row) {
+  const statCost = Number(row?.stat_cost || 0);
+  const totalPayAmount = Number(row?.total_pay_amount || 0);
+  const settledPayAmount = Number(row?.settled_pay_amount || 0);
+  const orderCount = Number(row?.order_count || 0);
+  const settledOrderCount = Number(row?.settled_order_count || 0);
+  const refundAmount1h = Number(row?.refund_amount_1h || 0);
+  return {
+    ...row,
+    plan_source_text: row?.plan_source_text || (String(row?.plan_source || "").trim().toUpperCase() === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u5168\u57df\u6295\u653e"),
     marketing_goal_text: row?.marketing_goal_text || row?.marketing_goal_label || row?.marketing_goal || "-",
     status_text: row?.status_text || `${row?.status || ""}/${row?.opt_status || ""}`,
     settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
@@ -2536,6 +2588,7 @@ function renderPlanTable(plans) {
   const query = planSearch.value.trim().toLowerCase();
   const accountFilter = planAccountFilter.value;
   const columns = [
+    { key: "plan_source_text", label: "投放类型", sortable: true },
     { key: "ad_name", label: "计划", sortable: true },
     { key: "stat_cost", label: "消耗", sortable: true },
     { key: "total_pay_amount", label: "整体成交", sortable: true },
@@ -2560,6 +2613,7 @@ function renderPlanTable(plans) {
       row.anchor_name,
       row.ad_id,
       row.product_id,
+      row.plan_source_text,
       row.marketing_goal_text,
       row.status_text,
     ].join(" ").toLowerCase();
@@ -2581,6 +2635,105 @@ function renderPlanTable(plans) {
               <span class="cell-subitem">PID ${escapeHtml(String(row.ad_id || "-"))}</span>
             </div>
           </td>
+          <td>${renderPlanSourceBadge(row)}</td>
+          <td class="mono">${formatMoney(row.stat_cost)}</td>
+          <td class="mono">${formatMoney(row.total_pay_amount)}</td>
+          <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
+          <td class="mono">${formatRate(row.roi)}</td>
+          <td class="mono">${formatRate(row.settled_roi)}</td>
+          <td class="mono">${formatNumber(row.order_count)}</td>
+          <td class="mono">${formatNumber(row.settled_order_count)}</td>
+          <td class="mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</td>
+          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</td>
+          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.product_name || "-")}</div>
+            <div class="cell-subline">
+              ${row.product_id ? `<span class="cell-subitem mono" title="商品 ID：${escapeHtml(row.product_id)}">GID ${escapeHtml(truncateMiddle(row.product_id, 7, 5))}</span>` : ""}
+              ${row.anchor_name ? `<span class="cell-subitem">主播 ${escapeHtml(row.anchor_name)}</span>` : ""}
+            </div>
+          </td>
+          <td>${escapeHtml(row.advertiser_name)}</td>
+          <td>${renderPlanStatusBadge(row)}</td>
+        </tr>
+      `).join("")}
+    </tbody>
+  `;
+
+  planTable.querySelectorAll("th[data-key]").forEach((header) => {
+    header.addEventListener("click", () => {
+      const key = header.dataset.key;
+      const column = columns.find((item) => item.key === key);
+      if (!column || !column.sortable) return;
+      state.planSort = toggleSort(state.planSort, key);
+      saveSort("plan-sort", state.planSort);
+      renderPlanTable(plans);
+    });
+  });
+
+  renderPlanInteractions(plans);
+}
+
+function renderPlanTable(plans) {
+  if (state.planSort.key === "status") {
+    state.planSort = { ...state.planSort, key: "status_text" };
+    saveSort("plan-sort", state.planSort);
+  }
+  if (state.planSort.key === "marketing_goal") {
+    state.planSort = { ...state.planSort, key: "marketing_goal_text" };
+    saveSort("plan-sort", state.planSort);
+  }
+  const query = planSearch.value.trim().toLowerCase();
+  const accountFilter = planAccountFilter.value;
+  const columns = [
+    { key: "ad_name", label: "计划", sortable: true },
+    { key: "plan_source_text", label: "投放类型", sortable: true },
+    { key: "stat_cost", label: "消耗", sortable: true },
+    { key: "total_pay_amount", label: "整体成交", sortable: true },
+    { key: "settled_pay_amount", label: "净成交", sortable: true },
+    { key: "roi", label: "支付ROI", sortable: true },
+    { key: "settled_roi", label: "净ROI", sortable: true },
+    { key: "order_count", label: "整体订单", sortable: true },
+    { key: "settled_order_count", label: "净订单", sortable: true },
+    { key: "pay_order_cost", label: "订单成本", sortable: true },
+    { key: "settled_amount_rate", label: "结算率", sortable: true },
+    { key: "refund_rate_1h", label: "1h退款率", sortable: true },
+    { key: "product_name", label: "商品 / 主播", sortable: true },
+    { key: "advertiser_name", label: "账户", sortable: true },
+    { key: "status_text", label: "投放状态", sortable: true },
+  ];
+  const enrichedRows = plans.map((row) => enrichPlanRow(row));
+  const rows = enrichedRows.filter((row) => {
+    const haystack = [
+      row.ad_name,
+      row.product_name,
+      row.advertiser_name,
+      row.anchor_name,
+      row.ad_id,
+      row.product_id,
+      row.plan_source_text,
+      row.marketing_goal_text,
+      row.status_text,
+    ].join(" ").toLowerCase();
+    const matchQuery = haystack.includes(query);
+    const matchAccount = !accountFilter || row.advertiser_name === accountFilter;
+    return matchQuery && matchAccount;
+  });
+  const sortedRows = sortRows(rows, state.planSort);
+  const supportsPlanDetail = Boolean(planDetail && planAssetSummary);
+
+  planTable.innerHTML = `
+    ${makeHeader(columns, state.planSort, "plan-sort")}
+    <tbody>
+      ${sortedRows.map((row) => `
+        <tr data-plan-id="${row.ad_id}" class="${supportsPlanDetail && state.selectedPlanId === row.ad_id ? "active-row" : ""}">
+          <td>
+            <div class="cell-primary">${escapeHtml(row.ad_name)}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">PID ${escapeHtml(String(row.ad_id || "-"))}</span>
+            </div>
+          </td>
+          <td>${renderPlanSourceBadge(row)}</td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatMoney(row.total_pay_amount)}</td>
           <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
