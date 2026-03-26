@@ -811,6 +811,49 @@ function formatMaterialSettledAmountRate(row) {
     : "-";
 }
 
+function renderDetailEmptyState(panel, eyebrow, title, hint) {
+  if (!panel) return;
+  panel.className = "detail-panel empty";
+  panel.innerHTML = `
+    <div class="detail-empty-state">
+      <span class="detail-eyebrow">${escapeHtml(eyebrow)}</span>
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(hint)}</p>
+    </div>
+  `;
+}
+
+function detailMetaPill(content, className = "") {
+  return `<span class="detail-meta-pill ${className}">${content}</span>`;
+}
+
+function detailHighlightCard(label, value, valueClass = "") {
+  return `
+    <div class="detail-highlight">
+      <span class="label">${label}</span>
+      <strong class="value ${valueClass}">${value}</strong>
+    </div>
+  `;
+}
+
+function detailMetricCard(label, value, valueClass = "", cardClass = "") {
+  return `
+    <div class="detail-stat ${cardClass}">
+      <span class="label">${label}</span>
+      <span class="value ${valueClass}">${value}</span>
+    </div>
+  `;
+}
+
+function detailNoteCard(label, content) {
+  return `
+    <div class="detail-note-card">
+      <span class="label">${label}</span>
+      <div class="value compact">${content}</div>
+    </div>
+  `;
+}
+
 function notificationChannelOptions(current) {
   const options = ["feishu", "dingtalk", "wechat"];
   if (current && !options.includes(current)) {
@@ -1863,9 +1906,13 @@ function renderProductTable(rows) {
 
 function clearMaterialDetail() {
   if (!materialDetail) return;
-  materialDetailStage?.classList.add("hidden");
-  materialDetail.className = "detail-panel empty";
-  materialDetail.textContent = "选中素材后查看补充信息。";
+  materialDetailStage?.classList.remove("hidden");
+  renderDetailEmptyState(
+    materialDetail,
+    "素材详情",
+    "选中素材后查看补充信息",
+    "这里会展示素材预览入口、核心效果指标和归属关系。",
+  );
 }
 
 function renderMaterialDetail(materialKey) {
@@ -1876,30 +1923,56 @@ function renderMaterialDetail(materialKey) {
   if (!row) return;
   materialDetailStage?.classList.remove("hidden");
   materialDetail.className = "detail-panel";
+  const summaryText = materialSupportsSettledMetrics(row)
+    ? `当前素材消耗 ${formatMoney(row.stat_cost)}，整体成交 ${formatMaterialTotalPayAmount(row)}，净成交 ${formatMaterialSettledPayAmount(row)}，净成交 ROI ${formatMaterialSettledRoi(row)}。`
+    : `当前素材消耗 ${formatMoney(row.stat_cost)}，整体成交 ${formatMaterialTotalPayAmount(row)}，支付 ROI ${formatRate(row.roi)}。该素材类型暂不支持净成交口径。`;
   materialDetail.innerHTML = `
-    <div class="detail-block-head">
-      <h4>${escapeHtml(row.material_name || "素材详情")}</h4>
-      <span>补充信息</span>
+    <div class="detail-shell-head">
+      <div class="detail-shell-copy">
+        <span class="detail-eyebrow">素材详情</span>
+        <h4 class="detail-shell-title">${escapeHtml(row.material_name || "未命名素材")}</h4>
+        <div class="detail-meta-row">
+          ${detailMetaPill(escapeHtml(row.material_type || "OTHER"))}
+          ${detailMetaPill(row.is_original ? "首发素材" : "非首发素材")}
+          ${detailMetaPill(`覆盖账户 ${formatNumber(row.advertiser_count)}`)}
+          ${detailMetaPill(`覆盖计划 ${formatNumber(row.plan_count)}`)}
+        </div>
+      </div>
+      <div class="detail-actions">
+        ${canPreviewMaterial(row)
+          ? `<button type="button" class="button ghost compact" data-action="open-material-preview" data-material-key="${escapeHtml(row.material_key)}">查看预览</button>`
+          : ""}
+      </div>
     </div>
-    <div class="detail-inline-actions">
-      <button type="button" class="button ghost compact" data-action="open-material-preview" data-material-key="${escapeHtml(row.material_key)}">预览素材</button>
+    <div class="detail-highlight-grid">
+      ${detailHighlightCard("消耗", formatMoney(row.stat_cost), "mono")}
+      ${detailHighlightCard("整体成交", formatMaterialTotalPayAmount(row), "mono")}
+      ${detailHighlightCard("净成交", formatMaterialSettledPayAmount(row), "mono")}
+      ${detailHighlightCard("支付 ROI", formatRate(row.roi), "mono")}
     </div>
-    <div class="detail-stats">
-      <div class="detail-stat"><span class="label">消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
-      <div class="detail-stat"><span class="label">整体成交</span><span class="value mono">${formatMaterialTotalPayAmount(row)}</span></div>
-      <div class="detail-stat"><span class="label">净成交</span><span class="value mono">${formatMaterialSettledPayAmount(row)}</span></div>
-      <div class="detail-stat"><span class="label">支付 ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
-      <div class="detail-stat"><span class="label">净成交 ROI</span><span class="value mono">${formatMaterialSettledRoi(row)}</span></div>
-      <div class="detail-stat"><span class="label">支付金额</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
-      <div class="detail-stat"><span class="label">成交订单数</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
-      <div class="detail-stat"><span class="label">净成交订单数</span><span class="value mono">${materialSupportsSettledMetrics(row) ? formatNumber(row.settled_order_count) : "-"}</span></div>
-      <div class="detail-stat"><span class="label">净成交结算率</span><span class="value mono">${formatMaterialSettledAmountRate(row)}</span></div>
-      <div class="detail-stat"><span class="label">覆盖账户数</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
-      <div class="detail-stat"><span class="label">覆盖计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
-      <div class="detail-stat"><span class="label">首发视频</span><span class="value compact">${row.is_original ? "是" : "否"}</span></div>
-      <div class="detail-stat detail-stat-wide"><span class="label">代表计划</span><span class="value compact">${escapeHtml(row.top_plan_name || "-")}</span></div>
-      <div class="detail-stat detail-stat-wide"><span class="label">代表账户</span><span class="value compact">${escapeHtml(row.top_account_name || "-")}</span></div>
+    <div class="detail-grid-section">
+      <div class="detail-section-title">效果拆分</div>
+      <div class="detail-metric-grid">
+        ${detailMetricCard("净成交 ROI", formatMaterialSettledRoi(row), "mono")}
+        ${detailMetricCard("支付金额", formatMoney(row.pay_amount), "mono")}
+        ${detailMetricCard("成交订单数", formatNumber(row.order_count), "mono")}
+        ${detailMetricCard("净成交订单数", materialSupportsSettledMetrics(row) ? formatNumber(row.settled_order_count) : "-", "mono")}
+        ${detailMetricCard("净成交结算率", formatMaterialSettledAmountRate(row), "mono")}
+        ${detailMetricCard("素材标记", row.is_original ? "首发素材" : "常规素材", "compact")}
+      </div>
     </div>
+    <div class="detail-grid-section">
+      <div class="detail-section-title">归属与识别</div>
+      <div class="detail-metric-grid">
+        ${detailMetricCard("素材 ID", escapeHtml(row.material_id || "-"), "compact mono")}
+        ${detailMetricCard("视频 ID", escapeHtml(row.video_id || "-"), "compact mono")}
+        ${detailMetricCard("代表账户", escapeHtml(row.top_account_name || "-"), "compact")}
+        ${detailMetricCard("代表计划", escapeHtml(row.top_plan_name || "-"), "compact")}
+        ${detailMetricCard("账户覆盖数", formatNumber(row.advertiser_count), "mono")}
+        ${detailMetricCard("计划覆盖数", formatNumber(row.plan_count), "mono")}
+      </div>
+    </div>
+    ${detailNoteCard("当前判断", escapeHtml(summaryText))}
   `;
   materialDetail.querySelector('[data-action="open-material-preview"]')?.addEventListener("click", () => {
     openMaterialPreview(row.material_key);
@@ -2165,8 +2238,12 @@ function fillPlanAccountFilter(accountNames) {
 
 function clearPlanAssetSummary() {
   if (!planAssetSummary) return;
-  planAssetSummary.className = "detail-panel empty";
-  planAssetSummary.textContent = "选中计划后查看商品和素材摘要。";
+  renderDetailEmptyState(
+    planAssetSummary,
+    "素材与商品",
+    "选中计划后查看资产摘要",
+    "这里会展示该计划下的商品、素材类型分布和代表素材。",
+  );
 }
 
 function planAssetCacheKey(adId, snapshotTime) {
@@ -2208,30 +2285,32 @@ function renderPlanAssetSummaryPayload(payload) {
     .sort((left, right) => Number(right[1]) - Number(left[1]))
     .map(([type, count]) => `<span class="pill">${escapeHtml(type)} ${formatNumber(count)}</span>`)
     .join("");
+  const materialTypeCount = Object.keys(typeCount).length;
 
   planAssetSummary.className = "detail-panel";
   planAssetSummary.innerHTML = `
-    <div class="asset-group">
-      <div class="asset-group-head">
-        <h4>素材与商品摘要</h4>
-        <span>基于最近一次明细同步：${escapeHtml(payload?.snapshot_time || "-")}</span>
-      </div>
-      <div class="asset-card-grid">
-        <div class="asset-mini-card"><span>商品行</span><strong class="mono">${formatNumber(products.length)}</strong></div>
-        <div class="asset-mini-card"><span>素材行</span><strong class="mono">${formatNumber(materials.length)}</strong></div>
-        <div class="asset-mini-card"><span>首发视频</span><strong class="mono">${formatNumber(payload?.originalVideoCount || 0)}</strong></div>
+    <div class="detail-shell-head">
+      <div class="detail-shell-copy">
+        <span class="detail-eyebrow">商品与素材摘要</span>
+        <h4 class="detail-shell-title">计划资产补充信息</h4>
+        <div class="detail-meta-row">
+          ${detailMetaPill(`明细快照 ${escapeHtml(payload?.snapshot_time || "-")}`)}
+          ${detailMetaPill(`素材类型 ${formatNumber(materialTypeCount)}`)}
+        </div>
       </div>
     </div>
-    <div class="asset-group">
-      <div class="asset-group-head">
-        <h4>素材类型分布</h4>
-      </div>
+    <div class="detail-highlight-grid">
+      ${detailHighlightCard("商品条数", formatNumber(products.length), "mono")}
+      ${detailHighlightCard("素材条数", formatNumber(materials.length), "mono")}
+      ${detailHighlightCard("首发视频", formatNumber(payload?.originalVideoCount || 0), "mono")}
+      ${detailHighlightCard("素材类型", formatNumber(materialTypeCount), "mono")}
+    </div>
+    <div class="detail-grid-section">
+      <div class="detail-section-title">素材类型分布</div>
       <div class="asset-tag-row">${typeTags || '<span class="pill">暂无素材</span>'}</div>
     </div>
-    <div class="asset-group">
-      <div class="asset-group-head">
-        <h4>代表商品</h4>
-      </div>
+    <div class="detail-grid-section">
+      <div class="detail-section-title">代表商品</div>
       <div class="asset-list">
         ${topProducts.length ? topProducts.map((item) => `
           <article class="asset-item">
@@ -2248,10 +2327,8 @@ function renderPlanAssetSummaryPayload(payload) {
         `).join("") : '<div class="asset-item">当前没有同步到商品明细。</div>'}
       </div>
     </div>
-    <div class="asset-group">
-      <div class="asset-group-head">
-        <h4>代表素材</h4>
-      </div>
+    <div class="detail-grid-section">
+      <div class="detail-section-title">代表素材</div>
       <div class="asset-list">
         ${topMaterials.length ? topMaterials.map((item) => `
           <article class="asset-item">
@@ -2281,8 +2358,12 @@ async function renderPlanAssets(adId) {
     const payload = await fetchPlanAssets(adId);
     renderPlanAssetSummaryPayload(payload);
   } catch {
-    planAssetSummary.className = "detail-panel empty";
-    planAssetSummary.textContent = "计划素材摘要加载失败，请稍后重试。";
+    renderDetailEmptyState(
+      planAssetSummary,
+      "素材与商品",
+      "计划资产摘要加载失败",
+      "请稍后重试，或刷新页面后重新选中该计划。",
+    );
   }
 }
 
@@ -2297,43 +2378,65 @@ async function renderPlanDetail(adId) {
   const currentRangeLabel = rangeLabel(planFilter);
   planDetailStage?.classList.remove("hidden");
   planDetail.className = "detail-panel";
+  const rangeSummary = `${currentRangeLabel}内整体支付 ROI ${formatRate(row.roi)}，整体成交 ${formatMoney(row.total_pay_amount)}，净成交 ${formatMoney(row.settled_pay_amount)}，1 小时内退款率 ${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}`;
   planDetail.innerHTML = `
-    <div class="detail-block-head">
-      <h4>${escapeHtml(row.ad_name)}</h4>
-      <span>补充信息</span>
+    <div class="detail-shell-head">
+      <div class="detail-shell-copy">
+        <span class="detail-eyebrow">计划效果明细</span>
+        <h4 class="detail-shell-title">${escapeHtml(row.ad_name)}</h4>
+        <div class="detail-meta-row">
+          ${detailMetaPill(escapeHtml(row.advertiser_name || "-"))}
+          ${detailMetaPill(escapeHtml(row.product_name || "未关联商品"))}
+          ${renderMarketingGoalBadge(row)}
+          ${renderPlanStatusBadge(row)}
+        </div>
+      </div>
     </div>
-    <div class="detail-stats detail-stats-plan">
-      <div class="detail-stat"><span class="label">计划 ID</span><span class="value compact mono">${formatNumber(row.ad_id)}</span></div>
-      <div class="detail-stat"><span class="label">账户</span><span class="value compact">${escapeHtml(row.advertiser_name)}</span></div>
-      <div class="detail-stat"><span class="label">商品</span><span class="value compact">${escapeHtml(row.product_name || "-")}</span></div>
-      <div class="detail-stat"><span class="label">主播</span><span class="value compact">${escapeHtml(row.anchor_name || "-")}</span></div>
-      <div class="detail-stat"><span class="label">营销目标</span><span class="value">${renderMarketingGoalBadge(row)}</span></div>
-      <div class="detail-stat"><span class="label">投放状态</span><span class="value">${renderPlanStatusBadge(row)}</span></div>
-      <div class="detail-stat"><span class="label">商品 ID</span><span class="value compact mono">${escapeHtml(row.product_id || "-")}</span></div>
-      <div class="detail-stat"><span class="label">账户 ID</span><span class="value compact mono">${formatNumber(row.advertiser_id)}</span></div>
-      <div class="detail-stat"><span class="label">目标 ROI</span><span class="value mono">${formatRate(row.roi_goal)}</span></div>
-      <div class="detail-stat"><span class="label">ROI 差值</span><span class="value mono ${roiGap >= 0 ? "positive" : "negative"}">${roiGap >= 0 ? "+" : ""}${formatRate(roiGap)}</span></div>
-      <div class="detail-stat"><span class="label">支付金额</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
-      <div class="detail-stat"><span class="label">整体成交金额</span><span class="value mono">${formatMoney(row.total_pay_amount)}</span></div>
-      <div class="detail-stat"><span class="label">净成交金额</span><span class="value mono">${formatMoney(row.settled_pay_amount)}</span></div>
-      <div class="detail-stat"><span class="label">整体支付 ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
-      <div class="detail-stat"><span class="label">净成交 ROI</span><span class="value mono">${formatRate(row.settled_roi)}</span></div>
-      <div class="detail-stat"><span class="label">整体成交订单数</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
-      <div class="detail-stat"><span class="label">净成交订单数</span><span class="value mono">${formatNumber(row.settled_order_count)}</span></div>
-      <div class="detail-stat"><span class="label">整体成交订单成本</span><span class="value mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</span></div>
-      <div class="detail-stat"><span class="label">净成交金额结算率</span><span class="value mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</span></div>
-      <div class="detail-stat"><span class="label">1 小时内退款率</span><span class="value mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}</span></div>
-      <div class="detail-stat detail-stat-wide"><span class="label">${escapeHtml(currentRangeLabel)}补充判断</span><span class="value compact">当前区间整体支付 ROI ${formatRate(row.roi)}，整体成交 ${formatMoney(row.total_pay_amount)}，净成交 ${formatMoney(row.settled_pay_amount)}，1 小时内退款率 ${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}。</span></div>
+    <div class="detail-highlight-grid">
+      ${detailHighlightCard("消耗", formatMoney(row.stat_cost), "mono")}
+      ${detailHighlightCard("整体成交金额", formatMoney(row.total_pay_amount), "mono")}
+      ${detailHighlightCard("净成交金额", formatMoney(row.settled_pay_amount), "mono")}
+      ${detailHighlightCard("整体支付 ROI", formatRate(row.roi), "mono")}
     </div>
+    <div class="detail-grid-section">
+      <div class="detail-section-title">效果拆分</div>
+      <div class="detail-metric-grid">
+        ${detailMetricCard("净成交 ROI", formatRate(row.settled_roi), "mono")}
+        ${detailMetricCard("支付金额", formatMoney(row.pay_amount), "mono")}
+        ${detailMetricCard("整体成交订单数", formatNumber(row.order_count), "mono")}
+        ${detailMetricCard("净成交订单数", formatNumber(row.settled_order_count), "mono")}
+        ${detailMetricCard("整体成交订单成本", Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-", "mono")}
+        ${detailMetricCard("净成交金额结算率", Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-", "mono")}
+        ${detailMetricCard("1 小时内退款率", Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-", "mono")}
+        ${detailMetricCard("目标 ROI", formatRate(row.roi_goal), "mono")}
+        ${detailMetricCard("ROI 差值", `${roiGap >= 0 ? "+" : ""}${formatRate(roiGap)}`, `mono ${roiGap >= 0 ? "positive" : "negative"}`)}
+      </div>
+    </div>
+    <div class="detail-grid-section">
+      <div class="detail-section-title">计划信息</div>
+      <div class="detail-metric-grid">
+        ${detailMetricCard("计划 ID", formatNumber(row.ad_id), "compact mono")}
+        ${detailMetricCard("账户 ID", formatNumber(row.advertiser_id), "compact mono")}
+        ${detailMetricCard("商品 ID", escapeHtml(row.product_id || "-"), "compact mono")}
+        ${detailMetricCard("主播", escapeHtml(row.anchor_name || "-"), "compact")}
+        ${detailMetricCard("归属账户", escapeHtml(row.advertiser_name || "-"), "compact")}
+        ${detailMetricCard("关联商品", escapeHtml(row.product_name || "-"), "compact")}
+      </div>
+    </div>
+    ${detailNoteCard(`${escapeHtml(currentRangeLabel)}判断`, escapeHtml(rangeSummary))}
   `;
   await renderPlanAssets(adId);
 }
 
 function clearPlanDetail() {
   if (!planDetail || !planAssetSummary) return;
-  planDetailStage?.classList.add("hidden");
-  planDetail.className = "detail-panel empty";
-  planDetail.textContent = "选中计划后查看补充信息。";
+  planDetailStage?.classList.remove("hidden");
+  renderDetailEmptyState(
+    planDetail,
+    "计划效果明细",
+    "选中计划后查看补充信息",
+    "这里会展示计划效果拆分、状态标签和资产摘要。",
+  );
   clearPlanAssetSummary();
 }
 

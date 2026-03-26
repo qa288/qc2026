@@ -210,20 +210,30 @@
             </div>
           </div>
           <div class="section-range-meta" id="planRangeMeta">统计范围：加载中</div>
-          <div class="table-shell tall">
-            <table id="planTable" class="data-table"></table>
+          <div class="decision-layout detail-view-layout">
+            <div class="decision-main">
+              <div class="table-shell tall">
+                <table id="planTable" class="data-table"></table>
+              </div>
+            </div>
+            <aside class="decision-side">
+              <div id="planDetailStage" class="detail-stage">
+                <article id="planDetail" class="detail-panel empty">选中计划后查看补充信息。</article>
+                <article id="planAssetSummary" class="detail-panel empty">选中计划后查看商品和素材摘要。</article>
+              </div>
+            </aside>
           </div>
         </section>
       </section>
 
       <section class="view-section" data-view="materials">
-        <section class="panel">
+        <section class="panel decision-panel">
           <div class="panel-head panel-head-compact">
             <div>
               <h2 id="materialsPanelTitle">素材排行</h2>
             </div>
             <div class="head-control-stack">
-              <div class="toolbar toolbar-inline toolbar-inline-primary">
+              <div class="toolbar toolbar-inline toolbar-inline-primary toolbar-inline-material">
                 <div class="range-filter-group">
                   <div class="range-switch" id="materialRangeSwitch">
                     <button type="button" class="range-button" data-range="day">日</button>
@@ -249,10 +259,19 @@
             </div>
           </div>
           <div class="section-range-meta" id="materialSyncMeta">素材榜基于最近一次明细同步生成。</div>
-          <div class="table-shell tall">
-            <table id="materialTable" class="data-table"></table>
+          <div class="decision-layout detail-view-layout">
+            <div class="decision-main">
+              <div class="table-shell tall">
+                <table id="materialTable" class="data-table"></table>
+              </div>
+              <div id="materialTablePager" class="table-pager hidden"></div>
+            </div>
+            <aside class="decision-side">
+              <div id="materialDetailStage" class="detail-stage">
+                <article id="materialDetail" class="detail-panel empty">选中素材后查看补充信息。</article>
+              </div>
+            </aside>
           </div>
-          <div id="materialTablePager" class="table-pager hidden"></div>
         </section>
       </section>
 
