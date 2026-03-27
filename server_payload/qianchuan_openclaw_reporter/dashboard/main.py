@@ -2504,6 +2504,7 @@ class DashboardService:
                     "top_plan_orders": -1,
                     "top_plan_pay_amount": -1.0,
                     "top_account_name": "",
+                    "top_anchor_name": str(row.get("top_anchor_name") or row.get("anchor_name") or "").strip(),
                 },
             )
             stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
@@ -2537,6 +2538,7 @@ class DashboardService:
                 group["top_plan_orders"] = order_count
                 group["top_plan_pay_amount"] = pay_amount
                 group["top_account_name"] = str(row.get("advertiser_name") or "").strip()
+                group["top_anchor_name"] = str(row.get("top_anchor_name") or row.get("anchor_name") or "").strip()
 
         return groups
 
@@ -2576,6 +2578,7 @@ class DashboardService:
                     "is_original": bool(group["is_original"]),
                     "top_plan_name": group["top_plan_name"],
                     "top_account_name": group["top_account_name"],
+                    "top_anchor_name": str(group.get("top_anchor_name") or ""),
                     "roi": roi,
                     "settled_roi": settled_roi,
                     "pay_order_cost": pay_order_cost,
@@ -2723,6 +2726,65 @@ class DashboardService:
                     item[field] = text
         return items
 
+    def _apply_material_top_anchor_names(
+        self,
+        conn: Any,
+        items: list[dict[str, Any]],
+        snapshot_times: list[str],
+    ) -> list[dict[str, Any]]:
+        if not items or not snapshot_times:
+            return items
+        unresolved_keys = {
+            (
+                str(item.get("top_account_name") or "").strip(),
+                str(item.get("top_plan_name") or "").strip(),
+            )
+            for item in items
+            if not str(item.get("top_anchor_name") or "").strip()
+            and str(item.get("top_account_name") or "").strip()
+            and str(item.get("top_plan_name") or "").strip()
+        }
+        if not unresolved_keys:
+            return items
+        placeholders = ",".join("?" for _ in snapshot_times)
+        rows = conn.execute(
+            f"""
+            SELECT snapshot_time, advertiser_name, ad_name, anchor_name
+            FROM plan_snapshots
+            WHERE snapshot_time IN ({placeholders})
+              AND COALESCE(anchor_name, '') <> ''
+            ORDER BY snapshot_time DESC, ad_id DESC
+            """,
+            snapshot_times,
+        ).fetchall()
+        anchor_map: dict[tuple[str, str], str] = {}
+        for row in rows:
+            row = dict(row)
+            key = (
+                str(row.get("advertiser_name") or "").strip(),
+                str(row.get("ad_name") or "").strip(),
+            )
+            if key not in unresolved_keys or key in anchor_map:
+                continue
+            anchor_name = str(row.get("anchor_name") or "").strip()
+            if anchor_name:
+                anchor_map[key] = anchor_name
+        if not anchor_map:
+            return items
+        enriched_items: list[dict[str, Any]] = []
+        for item in items:
+            enriched = dict(item)
+            if not str(enriched.get("top_anchor_name") or "").strip():
+                enriched["top_anchor_name"] = anchor_map.get(
+                    (
+                        str(enriched.get("top_account_name") or "").strip(),
+                        str(enriched.get("top_plan_name") or "").strip(),
+                    ),
+                    "",
+                )
+            enriched_items.append(enriched)
+        return enriched_items
+
     def _aggregate_material_rollups(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -2744,6 +2806,7 @@ class DashboardService:
                 group["advertiser_ids"] = set()
                 group["_top_plan_orders"] = -1
                 group["_top_plan_pay_amount"] = -1.0
+                group["top_anchor_name"] = str(group.get("top_anchor_name") or row.get("top_anchor_name") or row.get("anchor_name") or "")
                 groups[material_key] = group
             stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
             pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
@@ -2769,6 +2832,7 @@ class DashboardService:
             ):
                 group["top_plan_name"] = str(row.get("top_plan_name") or "")
                 group["top_account_name"] = str(row.get("top_account_name") or "")
+                group["top_anchor_name"] = str(row.get("top_anchor_name") or row.get("anchor_name") or "")
                 group["_top_plan_orders"] = order_count
                 group["_top_plan_pay_amount"] = pay_amount
 
@@ -2803,6 +2867,7 @@ class DashboardService:
                     "is_original": bool(group.get("is_original")),
                     "top_plan_name": str(group.get("top_plan_name") or ""),
                     "top_account_name": str(group.get("top_account_name") or ""),
+                    "top_anchor_name": str(group.get("top_anchor_name") or ""),
                     "roi": round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
                     "settled_roi": round(settled_pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
                     "pay_order_cost": round(stat_cost / order_count, 2) if order_count > 0 else 0.0,
@@ -5037,6 +5102,7 @@ class DashboardService:
         if items:
             with self.db() as preview_conn:
                 items = self._apply_latest_material_previews(preview_conn, items)
+                items = self._apply_material_top_anchor_names(preview_conn, items, snapshot_times)
         payload = {
             "snapshot_time": str(latest_meta.get("snapshot_time") or "") if latest_meta else target_snapshot,
             "items": items,

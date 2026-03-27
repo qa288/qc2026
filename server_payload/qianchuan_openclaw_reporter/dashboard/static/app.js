@@ -842,6 +842,7 @@ function enrichMaterialRow(row) {
   const settledOrderCount = Number(row?.settled_order_count || 0);
   return {
     ...row,
+    top_anchor_name: String(row?.top_anchor_name || "").trim(),
     total_pay_amount: totalPayAmount,
     settled_pay_amount: settledPayAmount,
     settled_order_count: settledOrderCount,
@@ -2558,14 +2559,14 @@ function renderMaterialTable(rows) {
   const enrichedRows = rows.map((row) => enrichMaterialRow(row));
   if (
     operatorMode
-    && !["material_name", "stat_cost", "top_account_name", "top_plan_name"].includes(String(state.materialSort.key || ""))
+    && !["material_name", "stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.materialSort.key || ""))
   ) {
     state.materialSort = { key: "stat_cost", dir: "desc" };
     saveSort("material-sort", state.materialSort);
   }
   const query = materialSearch.value.trim().toLowerCase();
   const visibleRows = enrichedRows.filter((row) => {
-    const haystack = [row.material_name, row.material_id, row.video_id, row.top_plan_name, row.top_account_name].join(" ").toLowerCase();
+    const haystack = [row.material_name, row.material_id, row.video_id, row.top_plan_name, row.top_account_name, row.top_anchor_name].join(" ").toLowerCase();
     return haystack.includes(query);
   });
   const columns = operatorMode
@@ -2575,6 +2576,7 @@ function renderMaterialTable(rows) {
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "top_account_name", label: "归属账户", sortable: true },
         { key: "top_plan_name", label: "归属计划", sortable: true },
+        { key: "top_anchor_name", label: "达人", sortable: true },
       ]
     : [
         { key: "material_name", label: "素材", sortable: true },
@@ -2587,6 +2589,7 @@ function renderMaterialTable(rows) {
         { key: "order_count", label: "订单", sortable: true },
         { key: "top_account_name", label: "归属账户", sortable: true },
         { key: "top_plan_name", label: "归属计划", sortable: true },
+        { key: "top_anchor_name", label: "达人", sortable: true },
         { key: "plan_count", label: "计划数", sortable: true },
         { key: "advertiser_count", label: "账户数", sortable: true },
       ];
@@ -2624,6 +2627,7 @@ function renderMaterialTable(rows) {
             ? `
           <td>${escapeHtml(row.top_account_name || "--")}</td>
           <td>${escapeHtml(row.top_plan_name || "--")}</td>
+          <td>${escapeHtml(row.top_anchor_name || "--")}</td>
           `
             : `
           <td class="mono">${formatMaterialTotalPayAmount(row)}</td>
@@ -2633,6 +2637,7 @@ function renderMaterialTable(rows) {
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td>${escapeHtml(row.top_account_name || "--")}</td>
           <td>${escapeHtml(row.top_plan_name || "--")}</td>
+          <td>${escapeHtml(row.top_anchor_name || "--")}</td>
           <td class="mono">${formatNumber(row.plan_count)}</td>
           <td class="mono">${formatNumber(row.advertiser_count)}</td>
           `}
@@ -3570,7 +3575,7 @@ function openMaterialPreviewFromRow(row) {
     materialPreviewTitle.textContent = row.material_name || "素材预览";
   }
   if (materialPreviewMeta) {
-    materialPreviewMeta.textContent = [row.top_account_name || "", row.top_plan_name || ""].filter(Boolean).join(" / ") || "素材预览";
+    materialPreviewMeta.textContent = [row.top_account_name || "", row.top_plan_name || "", row.top_anchor_name || ""].filter(Boolean).join(" / ") || "素材预览";
   }
   const previewBlock = directVideoUrl
     ? `<video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>`
@@ -3589,6 +3594,7 @@ function openMaterialPreviewFromRow(row) {
     <div class="preview-detail-grid">
       <div class="preview-stat"><span>归属账户</span><strong>${escapeHtml(row.top_account_name || "--")}</strong></div>
       <div class="preview-stat"><span>归属计划</span><strong>${escapeHtml(row.top_plan_name || "--")}</strong></div>
+      <div class="preview-stat"><span>达人</span><strong>${escapeHtml(row.top_anchor_name || "--")}</strong></div>
       <div class="preview-stat"><span>消耗</span><strong class="mono">${formatMoney(row.stat_cost)}</strong></div>
       <div class="preview-stat"><span>整体成交</span><strong class="mono">${formatMaterialTotalPayAmount(row)}</strong></div>
       <div class="preview-stat"><span>净成交</span><strong class="mono">${formatMaterialSettledPayAmount(row)}</strong></div>
