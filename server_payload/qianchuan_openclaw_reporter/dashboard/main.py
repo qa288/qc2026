@@ -6,7 +6,9 @@ import hashlib
 import json
 import secrets
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -1805,45 +1807,107 @@ class DashboardService:
             for video_item in video_material:
                 if not isinstance(video_item, dict):
                     continue
+                defaults: dict[str, str] = {}
                 image_mode = cls._first_text(video_item.get("image_mode"), video_item.get("imageMode"))
                 if image_mode:
-                    return {"image_mode": image_mode}
+                    defaults["image_mode"] = image_mode
+                video_cover_id = cls._first_text(video_item.get("video_cover_id"), video_item.get("videoCoverId"))
+                if video_cover_id:
+                    defaults["video_cover_id"] = video_cover_id
+                if defaults:
+                    return defaults
         return {}
+
+    @staticmethod
+    def _resolve_ffmpeg_executable() -> str:
+        binary = shutil.which("ffmpeg")
+        if binary:
+            return binary
+        try:
+            import imageio_ffmpeg  # type: ignore
+
+            resolved = str(imageio_ffmpeg.get_ffmpeg_exe() or "").strip()
+        except Exception:  # noqa: BLE001
+            resolved = ""
+        if resolved:
+            return resolved
+        raise RuntimeError("未找到可用的 ffmpeg/imageio_ffmpeg，无法从视频截帧生成图片素材。")
+
+    @classmethod
+    def _extract_cover_frame_image(cls, video_path: Path, output_path: Path, image_mode: str = "") -> None:
+        ffmpeg = cls._resolve_ffmpeg_executable()
+        max_bytes = 1_450_000
+        desired_mode = str(image_mode or "").strip().upper()
+        seek_seconds = 1.0
+        try:
+            probe_result = probe_video_file(video_path)
+            duration_seconds = float(getattr(probe_result, "duration_seconds", 0.0) or 0.0)
+            if duration_seconds > 0:
+                seek_seconds = max(0.0, min(1.0, duration_seconds / 2.0))
+        except Exception:  # noqa: BLE001
+            pass
+        filter_args: list[str] = []
+        if desired_mode == "SQUARE":
+            filter_args = ["-vf", "crop='min(iw,ih)':'min(iw,ih)'"]
+        attempts = [
+            ["-ss", f"{seek_seconds:.2f}", "-i", str(video_path), *filter_args, "-frames:v", "1", "-q:v", "6", str(output_path)],
+            ["-ss", f"{seek_seconds:.2f}", "-i", str(video_path), *filter_args, "-frames:v", "1", "-q:v", "10", str(output_path)],
+            ["-ss", "0.00", "-i", str(video_path), *filter_args, "-frames:v", "1", "-q:v", "12", str(output_path)],
+        ]
+        last_error = ""
+        for args in attempts:
+            if output_path.exists():
+                output_path.unlink()
+            completed = subprocess.run(
+                [ffmpeg, "-y", *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if (
+                completed.returncode == 0
+                and output_path.exists()
+                and output_path.stat().st_size > 0
+                and output_path.stat().st_size <= max_bytes
+            ):
+                return
+            last_error = completed.stderr.strip() or completed.stdout.strip() or f"ffmpeg exit code {completed.returncode}"
+            if output_path.exists() and output_path.stat().st_size > max_bytes:
+                last_error = f"封面图超过图片上传限制: {output_path.stat().st_size} bytes"
+        raise RuntimeError(f"从视频截取封面失败: {last_error}")
 
     def _build_cover_image_material(
         self,
         client: OceanEngineClient,
         advertiser_id: int,
-        asset: dict[str, Any],
+        file_path: Path,
         plan_context: dict[str, Any],
         material_title: str,
         cache: dict[tuple[int, str], list[dict[str, Any]]],
     ) -> list[dict[str, Any]]:
-        video_id = str(asset.get("video_id") or "").strip()
-        if not video_id:
-            return []
-        cache_key = (int(advertiser_id), video_id)
+        cache_key = (int(advertiser_id), str(file_path))
         cached = cache.get(cache_key)
         if cached is not None:
             return [dict(item) for item in cached]
-        video_info = client.get_uploaded_video(advertiser_id, video_id)
-        poster_url = self._first_text(video_info.get("poster_url"), video_info.get("posterUrl"))
-        if not poster_url:
+        if not file_path.exists():
             return []
-        image_upload = client.upload_image_by_url(
-            advertiser_id=advertiser_id,
-            material_name=f"{material_title}-cover",
-            image_url=poster_url,
-        )
+        generated_image_mode = "SQUARE"
+        with tempfile.TemporaryDirectory(prefix="upload-cover-") as temp_dir:
+            cover_path = Path(temp_dir) / f"{file_path.stem}_cover.jpg"
+            self._extract_cover_frame_image(file_path, cover_path, generated_image_mode)
+            image_upload = client.upload_image_file(
+                advertiser_id=advertiser_id,
+                material_name=f"{material_title}-cover",
+                file_path=cover_path,
+            )
         data = image_upload.get("data") or {}
         image_id = self._first_text(data.get("image_id"), data.get("id"))
         if not image_id:
             return []
-        image_material: list[dict[str, Any]] = [{"image_ids": [image_id]}]
-        defaults = self._extract_plan_video_material_defaults(plan_context)
-        image_mode = str(defaults.get("image_mode") or "").strip()
-        if image_mode:
-            image_material[0]["image_mode"] = image_mode
+        image_material: list[dict[str, Any]] = [{"image_ids": [image_id], "image_mode": generated_image_mode}]
         cache[cache_key] = [dict(item) for item in image_material]
         return image_material
 
@@ -3974,8 +4038,10 @@ class DashboardService:
             failed_count = 0
             bind_errors: list[str] = []
             reused_image_material = self._extract_plan_image_material(context)
+            video_material_defaults = self._extract_plan_video_material_defaults(context)
             for file_row in candidate_file_rows:
                 file_id = int(file_row["id"])
+                cover_source_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
                 asset = file_assets.get((file_id, advertiser_id))
                 if not asset or not str(asset.get("video_id") or ""):
                     failed_count += 1
@@ -3993,19 +4059,24 @@ class DashboardService:
                 try:
                     material_title = self._material_title_from_filename(str(file_row.get("original_name") or ""))
                     bind_image_material = [dict(item) for item in reused_image_material]
+                    bind_video_cover_id = ""
                     if not bind_image_material and str(context.get("marketing_goal") or "").strip() == "VIDEO_PROM_GOODS":
                         bind_image_material = self._build_cover_image_material(
                             client,
                             advertiser_id,
-                            asset,
+                            cover_source_path,
                             context,
                             material_title,
                             generated_image_material_cache,
                         )
                         if not bind_image_material:
                             raise RuntimeError(
-                                "VIDEO_PROM_GOODS 计划缺少可用图片素材，且无法从上传视频生成封面图片。"
+                                "VIDEO_PROM_GOODS 计划缺少可用图片素材，且无法仅依赖 /open_api/2/file/video/ad/ 自动补图。"
                             )
+                        bind_video_cover_id = self._first_text(
+                            bind_image_material[0].get("image_ids", [None])[0] if bind_image_material else "",
+                            bind_image_material[0].get("image_id") if bind_image_material else "",
+                        )
                     client.add_plan_material(
                         advertiser_id=advertiser_id,
                         ad_id=ad_id,
@@ -4014,6 +4085,8 @@ class DashboardService:
                         marketing_goal=str(context.get("marketing_goal") or ""),
                         product_id=str(context.get("product_id") or ""),
                         image_material=bind_image_material,
+                        video_image_mode=str(video_material_defaults.get("image_mode") or ""),
+                        video_cover_id=bind_video_cover_id,
                     )
                     success_count += 1
                     with self.db() as conn:

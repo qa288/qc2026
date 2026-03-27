@@ -1293,6 +1293,9 @@ function uploadScopeLabel(scope) {
 function normalizeUploadJobNote(note) {
   const text = String(note || "").trim();
   if (!text) return "--";
+  if (text.includes("permission") && text.includes("/file/video/ad/get/")) {
+    return "当前应用缺少 /file/video/ad/get/ 权限。视频上传本身可能已成功，但系统无法查询视频封面并自动补齐图片素材。";
+  }
   if (
     text.includes("permission") &&
     (text.includes("/local/file/video/upload/") || text.includes("/file/video/ad/"))

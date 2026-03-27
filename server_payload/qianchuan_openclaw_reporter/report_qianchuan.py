@@ -1249,6 +1249,64 @@ class OceanEngineClient:
             response["data"] = normalized_data
         return response
 
+    def upload_image_file(
+        self,
+        advertiser_id: int,
+        material_name: str,
+        file_path: Path,
+        image_signature: str | None = None,
+        mime_type: str | None = None,
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        raw = file_path.read_bytes()
+        signature = str(image_signature or hashlib.md5(raw).hexdigest())
+        detected_type = mime_type or mimetypes.guess_type(file_path.name)[0] or "image/jpeg"
+        fields = {
+            "advertiser_id": int(advertiser_id),
+            "filename": sanitize_material_title(material_name, max_length=255),
+            "upload_type": "UPLOAD_BY_FILE",
+            "image_signature": signature,
+        }
+        files = [
+            (
+                "image_file",
+                file_path.name,
+                detected_type,
+                raw,
+            )
+        ]
+        response = post_api_multipart_with_retries(
+            IMAGE_AD_UPLOAD_URL,
+            access_token,
+            fields,
+            files,
+            timeout=120,
+        )
+        if response.get("code") != 0:
+            raise ApiError(f"upload image file failed: {response}")
+        data = response.get("data")
+        normalized_data = dict(data) if isinstance(data, dict) else {}
+        image_id = normalized_data.get("id")
+        if image_id is None:
+            image_id = normalized_data.get("image_id")
+        if image_id not in (None, ""):
+            normalized_data["image_id"] = str(image_id)
+            normalized_data["id"] = str(image_id)
+        material_id = normalized_data.get("material_id")
+        if material_id is None:
+            material_id = normalized_data.get("materialId")
+        if material_id not in (None, ""):
+            normalized_data["material_id"] = str(material_id)
+        image_asset_url = normalized_data.get("url")
+        if image_asset_url is None:
+            image_asset_url = normalized_data.get("image_url")
+        if image_asset_url not in (None, ""):
+            normalized_data["url"] = str(image_asset_url)
+        if normalized_data:
+            response = dict(response)
+            response["data"] = normalized_data
+        return response
+
     def add_plan_material(
         self,
         advertiser_id: int,
@@ -1258,10 +1316,19 @@ class OceanEngineClient:
         marketing_goal: str = "",
         product_id: str = "",
         image_material: list[dict[str, Any]] | None = None,
+        video_image_mode: str = "",
+        video_cover_id: str = "",
     ) -> dict[str, Any]:
         access_token = self.get_access_token()
         title = sanitize_material_title(material_title)
-        video_material = [{"video_id": str(video_id)}]
+        video_material_item: dict[str, Any] = {"video_id": str(video_id)}
+        video_image_mode_text = str(video_image_mode or "").strip()
+        if video_image_mode_text:
+            video_material_item["image_mode"] = video_image_mode_text
+        video_cover_id_text = str(video_cover_id or "").strip()
+        if video_cover_id_text:
+            video_material_item["video_cover_id"] = video_cover_id_text
+        video_material = [video_material_item]
         title_material = [{"title": title}]
         normalized_image_material = [
             dict(item)
