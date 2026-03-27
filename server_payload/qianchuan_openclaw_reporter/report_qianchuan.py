@@ -45,6 +45,9 @@ PLAN_MATERIAL_ADD_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni
 VIDEO_USER_LOSE_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/video_user_lose/get/"
 VIDEO_ORIGINAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/file/video/original/get/"
 LOCAL_VIDEO_UPLOAD_URL = "https://api.oceanengine.com/open_api/v3.0/local/file/video/upload/"
+COMMENT_LIST_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/get/"
+COMMENT_REPLY_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/reply/"
+COMMENT_HIDE_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/hide/"
 
 REPORT_FIELDS = [
     "stat_cost",
@@ -991,6 +994,106 @@ class OceanEngineClient:
         response = get_json_with_retries(VIDEO_USER_LOSE_URL, access_token, params)
         if response.get("code") != 0:
             raise ApiError(f"get video user lose failed: {response}")
+        return response
+
+    def get_comments(
+        self,
+        advertiser_id: int,
+        start_time: str,
+        end_time: str,
+        filtering: dict[str, Any] | None = None,
+        order_field: str | None = None,
+        order_type: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        params: dict[str, Any] = {
+            "advertiser_id": int(advertiser_id),
+            "start_time": str(start_time).strip(),
+            "end_time": str(end_time).strip(),
+            "page": int(page),
+            "page_size": int(page_size),
+        }
+        if filtering:
+            params["filtering"] = filtering
+        if order_field:
+            params["order_field"] = str(order_field).strip()
+        if order_type:
+            params["order_type"] = str(order_type).strip()
+        response = get_json_with_retries(COMMENT_LIST_URL, access_token, params)
+        if response.get("code") != 0:
+            raise ApiError(f"get comments failed: {response}")
+        return response
+
+    def list_comments(
+        self,
+        advertiser_id: int,
+        start_time: str,
+        end_time: str,
+        filtering: dict[str, Any] | None = None,
+        order_field: str | None = None,
+        order_type: str | None = None,
+        page_size: int = 100,
+    ) -> list[dict[str, Any]]:
+        page = 1
+        rows: list[dict[str, Any]] = []
+        while True:
+            response = self.get_comments(
+                advertiser_id=advertiser_id,
+                start_time=start_time,
+                end_time=end_time,
+                filtering=filtering,
+                order_field=order_field,
+                order_type=order_type,
+                page=page,
+                page_size=page_size,
+            )
+            data = response.get("data") or {}
+            rows.extend(data.get("comment_list") or [])
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page:
+                break
+            page += 1
+        return rows
+
+    def reply_comments(
+        self,
+        advertiser_id: int,
+        comment_ids: list[str | int],
+        reply_text: str,
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        normalized_comment_ids = [str(item).strip() for item in comment_ids if str(item).strip()]
+        if not normalized_comment_ids:
+            raise ValueError("comment_ids is required")
+        payload = {
+            "advertiser_id": int(advertiser_id),
+            "comment_ids": normalized_comment_ids,
+            "reply_text": str(reply_text).strip(),
+        }
+        response = post_api_json_with_retries(COMMENT_REPLY_URL, access_token, payload)
+        if response.get("code") != 0:
+            raise ApiError(f"reply comments failed: {response}")
+        return response
+
+    def hide_comments(
+        self,
+        advertiser_id: int,
+        comment_ids: list[str | int],
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        normalized_comment_ids = [str(item).strip() for item in comment_ids if str(item).strip()]
+        if not normalized_comment_ids:
+            raise ValueError("comment_ids is required")
+        payload = {
+            "advertiser_id": int(advertiser_id),
+            "comment_ids": normalized_comment_ids,
+        }
+        response = post_api_json_with_retries(COMMENT_HIDE_URL, access_token, payload)
+        if response.get("code") != 0:
+            raise ApiError(f"hide comments failed: {response}")
         return response
 
     def upload_local_video(

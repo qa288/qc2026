@@ -57,6 +57,9 @@ const RULE_ENTITY_CONFIG = {
 const MATERIAL_PAGE_SIZE = 100;
 const MATERIAL_CACHE_TTL_MS = 55 * 1000;
 const MATERIAL_SEARCH_DEBOUNCE_MS = 180;
+const COMMENT_PAGE_SIZE = 50;
+const COMMENT_CACHE_TTL_MS = 30 * 1000;
+const COMMENT_SEARCH_DEBOUNCE_MS = 180;
 const MATERIAL_TOTAL_PAY_TYPES = new Set(["VIDEO", "IMAGE", "TITLE"]);
 const MATERIAL_SETTLED_TYPES = new Set(["VIDEO", "IMAGE"]);
 
@@ -67,6 +70,8 @@ const state = {
   planAssetCache: {},
   materialPayloads: {},
   materialPayloadFetchedAt: {},
+  commentPayloads: {},
+  commentPayloadFetchedAt: {},
   materialPreviewCurveCache: {},
   users: [],
   catalogAccounts: [],
@@ -83,6 +88,7 @@ const state = {
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
   employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
   materialSort: loadSort("material-sort", { key: "stat_cost", dir: "desc" }),
+  commentSort: loadSort("comment-sort", { key: "create_time", dir: "desc" }),
   activeView: loadPreference("active-view", "overview"),
   ruleTargetOptions: [],
   performanceFilters: {
@@ -90,11 +96,14 @@ const state = {
     plan: loadRangeFilter("plan-range-filter", "day"),
     breakdown: loadRangeFilter("breakdown-range-filter", "day"),
     material: loadRangeFilter("material-range-filter", "day"),
+    comment: loadRangeFilter("comment-range-filter", "day"),
   },
   rangeEditorOpen: {},
   materialPage: 1,
+  commentPage: 1,
   selectedPlanId: null,
   selectedMaterialKey: null,
+  commentReplyTarget: null,
   materialPreviewRequestToken: 0,
   selectedUserId: null,
   selectedUserScopeIds: [],
@@ -109,6 +118,8 @@ const employeeTable = document.getElementById("employeeTable");
 const ruleTable = document.getElementById("ruleTable");
 const materialTable = document.getElementById("materialTable");
 const materialTablePager = document.getElementById("materialTablePager");
+const commentTable = document.getElementById("commentTable");
+const commentTablePager = document.getElementById("commentTablePager");
 const alertSummary = document.getElementById("alertSummary");
 const accountSearch = document.getElementById("accountSearch");
 const planSearch = document.getElementById("planSearch");
@@ -117,6 +128,7 @@ const productSearch = document.getElementById("productSearch");
 const breakdownTitle = document.getElementById("breakdownTitle");
 const teamPanelTitle = document.getElementById("teamPanelTitle");
 const materialSearch = document.getElementById("materialSearch");
+const commentSearch = document.getElementById("commentSearch");
 const productTable = document.getElementById("productTable");
 const employeeDetail = document.getElementById("employeeDetail");
 const productDetail = document.getElementById("productDetail");
@@ -176,6 +188,14 @@ const materialDateEnd = document.getElementById("materialDateEnd");
 const materialDateApply = document.getElementById("materialDateApply");
 const materialSyncMeta = document.getElementById("materialSyncMeta");
 const materialsPanelTitle = document.getElementById("materialsPanelTitle");
+const commentsPanelTitle = document.getElementById("commentsPanelTitle");
+const commentRangeSwitch = document.getElementById("commentRangeSwitch");
+const commentDateStart = document.getElementById("commentDateStart");
+const commentDateEnd = document.getElementById("commentDateEnd");
+const commentDateApply = document.getElementById("commentDateApply");
+const commentSyncMeta = document.getElementById("commentSyncMeta");
+const commentAccountFilter = document.getElementById("commentAccountFilter");
+const commentRefreshButton = document.getElementById("commentRefreshButton");
 const userTable = document.getElementById("userTable");
 const userForm = document.getElementById("userForm");
 const userFormReset = document.getElementById("userFormReset");
@@ -217,6 +237,12 @@ const materialPreviewModal = document.getElementById("materialPreviewModal");
 const materialPreviewTitle = document.getElementById("materialPreviewTitle");
 const materialPreviewMeta = document.getElementById("materialPreviewMeta");
 const materialPreviewBody = document.getElementById("materialPreviewBody");
+const commentReplyModal = document.getElementById("commentReplyModal");
+const commentReplyTitle = document.getElementById("commentReplyTitle");
+const commentReplyMeta = document.getElementById("commentReplyMeta");
+const commentReplyInput = document.getElementById("commentReplyInput");
+const commentReplyStatus = document.getElementById("commentReplyStatus");
+const commentReplySubmit = document.getElementById("commentReplySubmit");
 const ruleTemplateButtons = Array.from(document.querySelectorAll(".signal-template-button"));
 const PERFORMANCE_SECTION_CONFIG = {
   account: {
@@ -250,6 +276,14 @@ const PERFORMANCE_SECTION_CONFIG = {
     startEl: materialDateStart,
     endEl: materialDateEnd,
     applyEl: materialDateApply,
+  },
+  comment: {
+    storageKey: "comment-range-filter",
+    switchEl: commentRangeSwitch,
+    metaEl: commentSyncMeta,
+    startEl: commentDateStart,
+    endEl: commentDateEnd,
+    applyEl: commentDateApply,
   },
 };
 
@@ -1217,12 +1251,28 @@ function materialRangePayload(filter) {
   return state.materialPayloads[performanceFilterKey(filter)] || null;
 }
 
+function commentRequestAdvertiserId() {
+  return Number(commentAccountFilter?.value || 0) || 0;
+}
+
+function commentCacheKey(filter, advertiserId = commentRequestAdvertiserId()) {
+  return `${performanceFilterKey(filter)}:${Number(advertiserId || 0)}`;
+}
+
+function commentRangePayload(filter, advertiserId = commentRequestAdvertiserId()) {
+  return state.commentPayloads[commentCacheKey(filter, advertiserId)] || null;
+}
+
 function latestMaterialSnapshotToken() {
   return String(state.payload?.extendedSync?.snapshot_time || state.payload?.latest?.extendedSync?.snapshot_time || "").trim();
 }
 
 function materialRowsForCurrentFilter() {
   return (materialRangePayload(sectionFilter("material"))?.items || []).map((row) => enrichMaterialRow(row));
+}
+
+function commentRowsForCurrentFilter() {
+  return commentRangePayload(sectionFilter("comment"))?.items || [];
 }
 
 function rangeLabel(filter) {
@@ -2661,6 +2711,296 @@ function renderMaterialTable(rows) {
   renderMaterialInteractions(enrichedRows);
 }
 
+function fillCommentAccountFilter(accounts) {
+  if (!commentAccountFilter) return;
+  const current = String(commentAccountFilter.value || "");
+  const options = ['<option value="">鍏ㄩ儴璐︽埛</option>']
+    .concat((accounts || []).map((item) => (
+      `<option value="${escapeHtml(item.advertiser_id)}">${escapeHtml(item.advertiser_name || item.advertiser_id)}</option>`
+    )));
+  commentAccountFilter.innerHTML = options.join("");
+  if ([...commentAccountFilter.options].some((option) => option.value === current)) {
+    commentAccountFilter.value = current;
+  } else {
+    commentAccountFilter.value = "";
+  }
+}
+
+function renderCommentPager(totalRows, currentPage, totalPages, startIndex, endIndex) {
+  if (!commentTablePager) return;
+  if (totalRows <= COMMENT_PAGE_SIZE) {
+    commentTablePager.innerHTML = "";
+    commentTablePager.classList.add("hidden");
+    return;
+  }
+  const pages = materialPagerPages(totalPages, currentPage);
+  commentTablePager.classList.remove("hidden");
+  commentTablePager.innerHTML = `
+    <div class="table-pager-summary">鏄剧ず ${formatNumber(startIndex)}-${formatNumber(endIndex)} / ${formatNumber(totalRows)} 鏉¤瘎璁恒€?/div>
+    <div class="table-pager-actions">
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage - 1}"
+        ${currentPage <= 1 ? "disabled" : ""}
+      >涓婁竴椤?/button>
+      ${pages.map((page, index) => `
+        ${index > 0 && page - pages[index - 1] > 1 ? '<span class="table-pager-ellipsis">...</span>' : ""}
+        <button
+          type="button"
+          class="button ghost compact table-page-button ${page === currentPage ? "is-active" : ""}"
+          data-page="${page}"
+          ${page === currentPage ? 'aria-current="page"' : ""}
+        >${formatNumber(page)}</button>
+      `).join("")}
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage + 1}"
+        ${currentPage >= totalPages ? "disabled" : ""}
+      >涓嬩竴椤?/button>
+    </div>
+  `;
+  commentTablePager.querySelectorAll("button[data-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextPage = Number(button.dataset.page || 0);
+      if (!nextPage || nextPage === state.commentPage) return;
+      state.commentPage = nextPage;
+      renderCommentTable(commentRowsForCurrentFilter());
+    });
+  });
+}
+
+function closeCommentReplyModal() {
+  state.commentReplyTarget = null;
+  if (commentReplyInput) commentReplyInput.value = "";
+  setInlineFeedback(commentReplyStatus, "", "neutral");
+  if (!commentReplyModal) return;
+  commentReplyModal.classList.add("hidden");
+  commentReplyModal.setAttribute("aria-hidden", "true");
+}
+
+function openCommentReplyModal(row) {
+  if (!row || !commentReplyModal) return;
+  state.commentReplyTarget = {
+    advertiser_id: Number(row.advertiser_id || 0),
+    comment_id: String(row.comment_id || ""),
+  };
+  if (commentReplyTitle) {
+    commentReplyTitle.textContent = "回复评论";
+  }
+  if (commentReplyMeta) {
+    const commentText = String(row.text || "").trim();
+    const previewText = commentText.length > 48 ? `${commentText.slice(0, 48)}...` : commentText;
+    commentReplyMeta.textContent = `${row.advertiser_name || "-"} · ${row.create_time || "-"} · ${previewText || "无评论内容"}`;
+  }
+  if (commentReplyInput) {
+    commentReplyInput.value = "";
+    commentReplyInput.focus();
+  }
+  setInlineFeedback(commentReplyStatus, "回复将直接发送到巨量评论管理。", "neutral");
+  commentReplyModal.classList.remove("hidden");
+  commentReplyModal.setAttribute("aria-hidden", "false");
+}
+
+async function submitCommentReply() {
+  const target = state.commentReplyTarget;
+  if (!target) return;
+  const replyText = String(commentReplyInput?.value || "").trim();
+  if (!replyText) {
+    setInlineFeedback(commentReplyStatus, "请输入回复内容。", "error");
+    commentReplyInput?.focus();
+    return;
+  }
+  if (commentReplySubmit) commentReplySubmit.disabled = true;
+  setInlineFeedback(commentReplyStatus, "正在发布回复…", "neutral");
+  try {
+    const response = await fetch("/api/comments/reply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        advertiser_id: target.advertiser_id,
+        comment_id: target.comment_id,
+        reply_text: replyText,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || "回复评论失败");
+    }
+    closeCommentReplyModal();
+    await refreshCommentSection(true);
+  } catch (error) {
+    setInlineFeedback(commentReplyStatus, error.message || "回复评论失败。", "error");
+  } finally {
+    if (commentReplySubmit) commentReplySubmit.disabled = false;
+  }
+}
+
+async function hideComment(row) {
+  if (!row || String(row.hide_status || "").trim().toUpperCase() === "HIDE") return;
+  const confirmed = window.confirm("确认隐藏这条评论吗？");
+  if (!confirmed) return;
+  const response = await fetch("/api/comments/hide", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      advertiser_id: Number(row.advertiser_id || 0),
+      comment_id: String(row.comment_id || ""),
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.detail || "隐藏评论失败");
+  }
+  await refreshCommentSection(true);
+}
+
+function renderCommentTable(rows) {
+  if (!commentTable) return;
+  const query = String(commentSearch?.value || "").trim().toLowerCase();
+  const visibleRows = rows.filter((row) => {
+    const haystack = [
+      row.text,
+      row.comment_user_name,
+      row.comment_user_id,
+      row.item_title,
+      row.promotion_display_name,
+      row.material_display_name,
+      row.advertiser_name,
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+  const columns = [
+    { key: "text", label: "璇勮鍐呭", sortable: true },
+    { key: "actions", label: "鎿嶄綔", sortable: false },
+    { key: "reply_status_text", label: "鍥炲鐘舵€?", sortable: true },
+    { key: "hide_status_text", label: "闅愯棌鐘舵€?", sortable: true },
+    { key: "level_type_text", label: "璇勮灞傜骇", sortable: true },
+    { key: "comment_user_name", label: "璇勮鐢ㄦ埛", sortable: true },
+    { key: "create_time", label: "璇勮鏃堕棿", sortable: true },
+    { key: "reply_count", label: "鐩稿叧鍥炲鏁?", sortable: true },
+    { key: "like_count", label: "鐐硅禐鏁?", sortable: true },
+    { key: "item_title", label: "瑙嗛鏍囬", sortable: true },
+    { key: "video_owner_aweme_id", label: "瑙嗛鎵€灞炴姈闊冲彿", sortable: true },
+    { key: "comment_type_text", label: "璇勮绫诲瀷", sortable: true },
+    { key: "promotion_display_name", label: "璇勮鏉ユ簮璁″垝", sortable: true },
+    { key: "material_display_name", label: "鍏宠仈瑙嗛绱犳潗", sortable: true },
+  ];
+  const sortedRows = sortRows(visibleRows, state.commentSort);
+  const totalRows = sortedRows.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / COMMENT_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(Number(state.commentPage) || 1, 1), totalPages);
+  const pageStart = totalRows ? (currentPage - 1) * COMMENT_PAGE_SIZE : 0;
+  const pageRows = sortedRows.slice(pageStart, pageStart + COMMENT_PAGE_SIZE);
+  state.commentPage = currentPage;
+  commentTable.innerHTML = `
+    ${makeHeader(columns, state.commentSort, "comment-sort")}
+    <tbody>
+      ${pageRows.map((row) => `
+        <tr data-comment-id="${escapeHtml(row.comment_id)}" data-advertiser-id="${escapeHtml(row.advertiser_id)}">
+          <td>
+            <div class="cell-primary comment-cell-copy">${escapeHtml(row.text || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">CID ${escapeHtml(truncateMiddle(row.comment_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td>
+            <div class="comment-action-buttons">
+              <button
+                type="button"
+                class="button ghost compact"
+                data-action="reply-comment"
+                data-comment-id="${escapeHtml(row.comment_id)}"
+                data-advertiser-id="${escapeHtml(row.advertiser_id)}"
+              >鍥炲璇勮</button>
+              <button
+                type="button"
+                class="button ghost compact"
+                data-action="hide-comment"
+                data-comment-id="${escapeHtml(row.comment_id)}"
+                data-advertiser-id="${escapeHtml(row.advertiser_id)}"
+                ${String(row.hide_status || "").trim().toUpperCase() === "HIDE" ? "disabled" : ""}
+              >${String(row.hide_status || "").trim().toUpperCase() === "HIDE" ? "宸查殣钘? : "闅愯棌璇勮"}</button>
+            </div>
+          </td>
+          <td>${escapeHtml(row.reply_status_text || "-")}</td>
+          <td>${escapeHtml(row.hide_status_text || "-")}</td>
+          <td>${escapeHtml(row.level_type_text || "-")}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.comment_user_name || "鏈煡鐢ㄦ埛")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">${escapeHtml(row.comment_user_id || "-")}</span>
+            </div>
+          </td>
+          <td class="mono">${escapeHtml(row.create_time || "-")}</td>
+          <td class="mono">${formatNumber(row.reply_count || 0)}</td>
+          <td class="mono">${formatNumber(row.like_count || 0)}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.item_title || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">VID ${escapeHtml(truncateMiddle(row.item_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td class="mono">${escapeHtml(row.video_owner_aweme_id || "-")}</td>
+          <td>${escapeHtml(row.comment_type_text || "-")}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.promotion_display_name || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">PID ${escapeHtml(truncateMiddle(row.promotion_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.material_display_name || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+        </tr>
+      `).join("")}
+    </tbody>
+  `;
+  commentTable.querySelectorAll("th[data-key]").forEach((header) => {
+    header.addEventListener("click", () => {
+      const key = header.dataset.key;
+      const column = columns.find((item) => item.key === key);
+      if (!column || !column.sortable) return;
+      state.commentSort = toggleSort(state.commentSort, key);
+      saveSort("comment-sort", state.commentSort);
+      renderCommentTable(rows);
+    });
+  });
+  commentTable.querySelectorAll('[data-action="reply-comment"]').forEach((button) => {
+    button.addEventListener("click", () => {
+      const commentId = String(button.dataset.commentId || "");
+      const advertiserId = Number(button.dataset.advertiserId || 0);
+      const row = visibleRows.find((item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId);
+      if (!row) return;
+      openCommentReplyModal(row);
+    });
+  });
+  commentTable.querySelectorAll('[data-action="hide-comment"]').forEach((button) => {
+    button.addEventListener("click", async () => {
+      const commentId = String(button.dataset.commentId || "");
+      const advertiserId = Number(button.dataset.advertiserId || 0);
+      const row = visibleRows.find((item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId);
+      if (!row) return;
+      try {
+        await hideComment(row);
+      } catch (error) {
+        window.alert(error.message || "隐藏评论失败");
+      }
+    });
+  });
+  renderCommentPager(
+    totalRows,
+    currentPage,
+    totalPages,
+    totalRows ? pageStart + 1 : 0,
+    pageStart + pageRows.length,
+  );
+}
+
 async function fetchMaterialRankings(force = false) {
   const filter = sectionFilter("material");
   const cacheKey = performanceFilterKey(filter);
@@ -2692,6 +3032,38 @@ async function fetchMaterialRankings(force = false) {
   const payload = await response.json();
   state.materialPayloads[cacheKey] = payload;
   state.materialPayloadFetchedAt[cacheKey] = Date.now();
+  return payload;
+}
+
+async function fetchComments(force = false) {
+  const filter = sectionFilter("comment");
+  const advertiserId = commentRequestAdvertiserId();
+  const cacheKey = commentCacheKey(filter, advertiserId);
+  const cachedPayload = state.commentPayloads[cacheKey];
+  const cachedAt = Number(state.commentPayloadFetchedAt[cacheKey] || 0);
+  if (!force && cachedPayload && cachedAt > 0 && Date.now() - cachedAt < COMMENT_CACHE_TTL_MS) {
+    return cachedPayload;
+  }
+  const params = new URLSearchParams();
+  params.set("range", filter.mode);
+  if (filter.mode === "custom") {
+    params.set("start_date", filter.start);
+    params.set("end_date", filter.end);
+  }
+  if (advertiserId > 0) {
+    params.set("advertiser_id", String(advertiserId));
+  }
+  const response = await fetch(`/api/comments?${params.toString()}`).catch(() => null);
+  if (!response || !response.ok) {
+    const errorPayload = response ? await response.json().catch(() => ({})) : {};
+    if (cachedPayload) {
+      return cachedPayload;
+    }
+    throw new Error(errorPayload.detail || "comments fetch failed");
+  }
+  const payload = await response.json();
+  state.commentPayloads[cacheKey] = payload;
+  state.commentPayloadFetchedAt[cacheKey] = Date.now();
   return payload;
 }
 
@@ -3833,14 +4205,15 @@ function applyRoleViewPolicy() {
   const planTab = viewTabs?.querySelector('[data-view="plans"]');
   const breakdownTab = viewTabs?.querySelector('[data-view="breakdown"]');
   const materialsTab = viewTabs?.querySelector('[data-view="materials"]');
+  const commentsTab = viewTabs?.querySelector('[data-view="comments"]');
   const uploadsTab = viewTabs?.querySelector('[data-view="uploads"]');
   const tabOrder = admin
-    ? ["overview", "accounts", "plans", "materials", "breakdown", "uploads", "access", "signals"]
+    ? ["overview", "accounts", "plans", "materials", "comments", "breakdown", "uploads", "access", "signals"]
     : supervisor
       ? (canUseUploadModule()
-        ? ["overview", "accounts", "plans", "materials", "breakdown", "uploads"]
-        : ["overview", "accounts", "plans", "materials", "breakdown"])
-      : ["overview", "materials", "breakdown"];
+        ? ["overview", "accounts", "plans", "materials", "comments", "breakdown", "uploads"]
+        : ["overview", "accounts", "plans", "materials", "comments", "breakdown"])
+      : ["overview", "materials", "comments", "breakdown"];
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
     accessTab.textContent = "账号权限";
@@ -3860,6 +4233,10 @@ function applyRoleViewPolicy() {
   }
   if (materialsTab) {
     materialsTab.textContent = operator ? "我的素材" : "素材";
+  }
+  if (commentsTab) {
+    commentsTab.classList.remove("hidden");
+    commentsTab.textContent = "评论";
   }
   if (uploadsTab) {
     uploadsTab.classList.toggle("hidden", !canUseUploadModule());
@@ -3892,6 +4269,9 @@ function applyRoleViewPolicy() {
   if (materialsPanelTitle) {
     materialsPanelTitle.textContent = operator ? "我的素材" : "素材排行";
   }
+  if (commentsPanelTitle) {
+    commentsPanelTitle.textContent = "评论";
+  }
   if (materialSearch) {
     materialSearch.placeholder = operator ? "搜索素材名称" : "搜索素材";
   }
@@ -3903,10 +4283,10 @@ function applyRoleViewPolicy() {
         : "我的素材、团队排名。";
   }
   const allowedViews = admin
-    ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "uploads", "access", "signals"])
+    ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "comments", "uploads", "access", "signals"])
     : supervisor
-      ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials"])
-      : new Set(["overview", "breakdown", "materials"]);
+      ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "comments", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials", "comments"])
+      : new Set(["overview", "breakdown", "materials", "comments"]);
   if (viewTabs) {
     tabOrder.forEach((view) => {
       const tab = viewTabs.querySelector(`[data-view="${view}"]`);
@@ -4305,6 +4685,20 @@ async function refreshMaterialSection(force = false) {
   materialSyncMeta.textContent = syncText;
 }
 
+async function refreshCommentSection(force = false) {
+  syncSectionRangeControls("comment");
+  const payload = await fetchComments(force);
+  fillCommentAccountFilter(payload?.accounts || []);
+  renderCommentTable(payload?.items || []);
+  const meta = payload?.meta || {};
+  const rangeText = formatDateWindowMeta(payload);
+  const commentCount = Array.isArray(payload?.items) ? payload.items.length : Number(meta.comment_count || 0);
+  const accountCount = Array.isArray(payload?.accounts) ? payload.accounts.length : Number(meta.account_count || 0);
+  const visibleCount = Number(meta.visible_count || 0);
+  const visibleSuffix = visibleCount > 0 && visibleCount !== commentCount ? ` 路 鍙 ${formatNumber(visibleCount)} 鏉?` : "";
+  commentSyncMeta.textContent = `${rangeText} 路 璇勮 ${formatNumber(commentCount)} 鏉?路 璐︽埛 ${formatNumber(accountCount)} 涓?路 閿欒 ${formatNumber(meta.error_count || 0)}${visibleSuffix}`;
+}
+
 async function applyQuickRange(sectionKey, mode) {
   const current = sectionFilter(sectionKey);
   if (current.mode === mode) return;
@@ -4314,6 +4708,11 @@ async function applyQuickRange(sectionKey, mode) {
     if (sectionKey === "material") {
       state.materialPage = 1;
       await refreshMaterialSection(false);
+      return;
+    }
+    if (sectionKey === "comment") {
+      state.commentPage = 1;
+      await refreshCommentSection(false);
       return;
     }
     await refreshPerformanceSections(true);
@@ -4341,6 +4740,11 @@ async function applyCustomRange(sectionKey) {
     if (sectionKey === "material") {
       state.materialPage = 1;
       await refreshMaterialSection(false);
+      return;
+    }
+    if (sectionKey === "comment") {
+      state.commentPage = 1;
+      await refreshCommentSection(false);
       return;
     }
     await refreshPerformanceSections(true);
@@ -4389,15 +4793,28 @@ function bindInputs() {
     state.materialPage = 1;
     renderMaterialTable(materialRowsForCurrentFilter());
   }, MATERIAL_SEARCH_DEBOUNCE_MS);
+  const debouncedCommentSearch = debounce(() => {
+    state.commentPage = 1;
+    renderCommentTable(commentRowsForCurrentFilter());
+  }, COMMENT_SEARCH_DEBOUNCE_MS);
   materialPreviewModal?.addEventListener("click", (event) => {
     const trigger = event.target.closest('[data-action="close-preview"]');
     if (trigger) {
       closeMaterialPreview();
     }
   });
+  commentReplyModal?.addEventListener("click", (event) => {
+    const trigger = event.target.closest('[data-action="close-comment-reply"]');
+    if (trigger) {
+      closeCommentReplyModal();
+    }
+  });
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && materialPreviewModal && !materialPreviewModal.classList.contains("hidden")) {
       closeMaterialPreview();
+    }
+    if (event.key === "Escape" && commentReplyModal && !commentReplyModal.classList.contains("hidden")) {
+      closeCommentReplyModal();
     }
   });
   if (viewTabs) {
@@ -4407,6 +4824,9 @@ function bindInputs() {
         setActiveView(view);
         if (view === "materials") {
           await refreshMaterialSection(false);
+        }
+        if (view === "comments") {
+          await refreshCommentSection(false);
         }
         if (view === "uploads") {
           await fetchUploadTargets(true);
@@ -4424,6 +4844,7 @@ function bindInputs() {
   employeeSearch?.addEventListener("input", () => renderEmployeeTable(breakdownRows(rangePayload(sectionFilter("breakdown")))));
   productSearch?.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
   materialSearch?.addEventListener("input", debouncedMaterialSearch);
+  commentSearch?.addEventListener("input", debouncedCommentSearch);
   operatorMaterialSearch?.addEventListener("input", () => renderUserMatchedMaterialTable());
   toggleOperatorMaterialsButton?.addEventListener("click", async () => {
     const nextVisible = operatorMaterialContent?.classList.contains("hidden");
@@ -4434,6 +4855,23 @@ function bindInputs() {
     }
   });
   planAccountFilter?.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
+  commentAccountFilter?.addEventListener("change", async () => {
+    state.commentPage = 1;
+    await refreshCommentSection(false);
+  });
+  commentRefreshButton?.addEventListener("click", async () => {
+    state.commentPage = 1;
+    await refreshCommentSection(true);
+  });
+  commentReplySubmit?.addEventListener("click", async () => {
+    await submitCommentReply();
+  });
+  commentReplyInput?.addEventListener("keydown", async (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      await submitCommentReply();
+    }
+  });
   uploadSearchForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     await fetchUploadTargets(true);
@@ -4509,6 +4947,7 @@ function bindInputs() {
   bindRangeFilterControls("plan");
   bindRangeFilterControls("breakdown");
   bindRangeFilterControls("material");
+  bindRangeFilterControls("comment");
 
 
   ruleForm?.querySelector('select[name="entity_type"]')?.addEventListener("change", () => {
@@ -4921,6 +5360,13 @@ async function render(payload) {
       await refreshMaterialSection(false);
     } catch (error) {
       console.error("refreshMaterialSection failed", error);
+    }
+  }
+  if (state.activeView === "comments") {
+    try {
+      await refreshCommentSection(false);
+    } catch (error) {
+      console.error("refreshCommentSection failed", error);
     }
   }
   if (state.activeView === "access") {

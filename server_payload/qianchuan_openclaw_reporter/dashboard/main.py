@@ -106,6 +106,20 @@ ROLE_OPERATOR = "operator"
 PUBLIC_SORT_FIELDS = {"stat_cost", "pay_amount", "order_count", "roi"}
 EMPLOYEE_KEYWORD_SCOPES = {"all", "account", "plan", "product", "material"}
 EMPLOYEE_BINDING_TYPES = {"account", "plan", "product", "material"}
+COMMENT_TYPE_LABELS = {
+    "TEXT_COMMENT": "文字评论",
+    "IMAGE_COMMENT": "图片评论",
+    "IMAGE_TEXT_COMMENT": "图文评论",
+}
+COMMENT_HIDE_STATUS_LABELS = {
+    "HIDE": "已隐藏",
+    "NOT_HIDE": "未隐藏",
+}
+COMMENT_LEVEL_LABELS = {
+    "LEVEL_ONE": "一级评论",
+    "LEVEL_TWO": "二级评论",
+}
+COMMENT_REPLY_MAX_LENGTH = 100
 MATERIAL_REPORT_CORE_METRICS = [
     "stat_cost_for_roi2",
     "total_pay_order_gmv_for_roi2",
@@ -232,6 +246,20 @@ def build_material_cache_key(
     )
 
 
+def build_comment_cache_key(
+    range_key: str,
+    start_date: str = "",
+    end_date: str = "",
+    advertiser_id: int | None = None,
+    allowed_advertiser_ids: set[int] | None = None,
+) -> str:
+    return (
+        f"{build_performance_cache_key(range_key, start_date, end_date)}:"
+        f"{build_scope_cache_key(allowed_advertiser_ids)}:"
+        f"{int(advertiser_id or 0)}"
+    )
+
+
 class DashboardService:
     def __init__(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -240,6 +268,7 @@ class DashboardService:
         self._templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
         self._performance_cache: dict[str, dict[str, Any]] = {}
         self._material_cache: dict[str, dict[str, Any]] = {}
+        self._comment_cache: dict[str, dict[str, Any]] = {}
         self._backfill_queue_marks: dict[str, float] = {}
         self.user_access = UserAccess(
             self.db,
@@ -1386,6 +1415,21 @@ class DashboardService:
     def _employee_name(value: Any) -> str:
         text = str(value or "").strip()
         return text or "未归属"
+
+    @staticmethod
+    def _comment_type_label(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        return COMMENT_TYPE_LABELS.get(text, text or "-")
+
+    @staticmethod
+    def _comment_hide_status_label(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        return COMMENT_HIDE_STATUS_LABELS.get(text, text or "未隐藏")
+
+    @staticmethod
+    def _comment_level_label(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        return COMMENT_LEVEL_LABELS.get(text, text or "-")
 
     @staticmethod
     def _product_key(item: dict[str, Any]) -> str:
@@ -3032,6 +3076,382 @@ class DashboardService:
         next_payload = dict(payload)
         next_payload["items"] = self._filter_material_items_for_operator(payload.get("items", []), int(user.get("id", 0) or 0))
         return next_payload
+
+    def _apply_comment_scope(self, payload: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        if str(user.get("role") or "") != ROLE_OPERATOR:
+            return payload
+        user_id = int(user.get("id", 0) or 0)
+        scoped_items = self._filter_material_items_for_operator(payload.get("items", []), user_id)
+        account_map: dict[int, dict[str, Any]] = {}
+        for row in scoped_items:
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            if not advertiser_id or advertiser_id in account_map:
+                continue
+            account_map[advertiser_id] = {
+                "advertiser_id": advertiser_id,
+                "advertiser_name": str(row.get("advertiser_name") or advertiser_id),
+            }
+        next_payload = dict(payload)
+        next_payload["items"] = scoped_items
+        next_payload["accounts"] = sorted(account_map.values(), key=lambda item: (str(item["advertiser_name"]), item["advertiser_id"]))
+        meta = dict(next_payload.get("meta") or {})
+        meta["visible_count"] = len(scoped_items)
+        next_payload["meta"] = meta
+        return next_payload
+
+    @staticmethod
+    def _comment_account_candidates(
+        client: OceanEngineClient,
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        accounts: list[dict[str, Any]] = []
+        allowed = {int(item) for item in allowed_advertiser_ids} if allowed_advertiser_ids is not None else None
+        for item in client.list_accounts():
+            advertiser_id = int(item.get("advertiser_id") or item.get("account_id") or 0)
+            if not advertiser_id:
+                continue
+            if allowed is not None and advertiser_id not in allowed:
+                continue
+            advertiser_name = str(
+                item.get("advertiser_name")
+                or item.get("account_name")
+                or item.get("name")
+                or advertiser_id
+            ).strip()
+            accounts.append(
+                {
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": advertiser_name,
+                }
+            )
+        accounts.sort(key=lambda item: (str(item["advertiser_name"]), int(item["advertiser_id"])))
+        return accounts
+
+    def _fetch_account_comments(
+        self,
+        client: OceanEngineClient,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_time: str,
+        end_time: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        try:
+            rows = client.list_comments(
+                advertiser_id=advertiser_id,
+                start_time=start_time,
+                end_time=end_time,
+                page_size=100,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return [], {
+                "advertiser_id": int(advertiser_id),
+                "advertiser_name": str(advertiser_name or advertiser_id),
+                "error": str(exc),
+            }
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            reply_count = int(float(row.get("reply_count", 0) or 0))
+            like_count = int(float(row.get("like_count", 0) or 0))
+            hide_status = str(row.get("hide_status") or "NOT_HIDE").strip().upper()
+            level_type = str(row.get("level_type") or "").strip().upper()
+            comment_type = str(row.get("comment_type") or "").strip().upper()
+            material_id = str(row.get("material_id") or "").strip()
+            promotion_id = str(row.get("promotion_id") or "").strip()
+            item_payload = {
+                "comment_id": str(row.get("comment_id") or "").strip(),
+                "advertiser_id": int(advertiser_id),
+                "advertiser_name": str(advertiser_name or advertiser_id),
+                "text": str(row.get("text") or "").strip(),
+                "reply_count": reply_count,
+                "is_replied": reply_count > 0,
+                "reply_status_text": "已回复" if reply_count > 0 else "未回复",
+                "hide_status": hide_status,
+                "hide_status_text": self._comment_hide_status_label(hide_status),
+                "level_type": level_type,
+                "level_type_text": self._comment_level_label(level_type),
+                "comment_user_name": str(row.get("aweme_name") or "").strip(),
+                "comment_user_id": str(row.get("aweme_id") or "").strip(),
+                "create_time": str(row.get("create_time") or "").strip(),
+                "reply_count_text": reply_count,
+                "like_count": like_count,
+                "item_title": str(row.get("item_title") or "").strip(),
+                "video_owner_aweme_id": "",
+                "comment_type": comment_type,
+                "comment_type_text": self._comment_type_label(comment_type),
+                "promotion_id": promotion_id,
+                "promotion_name": "",
+                "promotion_display_name": f"计划 {promotion_id}" if promotion_id else "-",
+                "material_id": material_id,
+                "material_name": "",
+                "material_display_name": f"素材 {material_id}" if material_id else "-",
+                "item_id": str(row.get("item_id") or "").strip(),
+            }
+            item_payload["material_name"] = item_payload["material_name"]
+            items.append(item_payload)
+        return items, None
+
+    def _comment_plan_name_maps(
+        self,
+        conn: Any,
+        advertiser_ids: set[int],
+        promotion_ids: set[int],
+    ) -> tuple[dict[tuple[int, int], str], dict[int, str]]:
+        if not advertiser_ids or not promotion_ids:
+            return {}, {}
+        advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
+        promotion_placeholders = ",".join("?" for _ in promotion_ids)
+        params: list[Any] = [*sorted(promotion_ids), *sorted(advertiser_ids)]
+        rows = conn.execute(
+            f"""
+            SELECT snapshot_time, advertiser_id, ad_id, ad_name
+            FROM plan_snapshots
+            WHERE ad_id IN ({promotion_placeholders})
+              AND advertiser_id IN ({advertiser_placeholders})
+            ORDER BY snapshot_time DESC
+            """,
+            params,
+        ).fetchall()
+        exact: dict[tuple[int, int], str] = {}
+        fallback: dict[int, str] = {}
+        for row in rows:
+            advertiser_id = int(row["advertiser_id"])
+            ad_id = int(row["ad_id"])
+            ad_name = str(row["ad_name"] or ad_id).strip()
+            exact.setdefault((advertiser_id, ad_id), ad_name)
+            fallback.setdefault(ad_id, ad_name)
+        return exact, fallback
+
+    def _comment_material_name_maps(
+        self,
+        conn: Any,
+        advertiser_ids: set[int],
+        material_ids: set[str],
+    ) -> tuple[dict[tuple[int, str], str], dict[str, str]]:
+        normalized_material_ids = sorted(str(item).strip() for item in material_ids if str(item).strip())
+        if not advertiser_ids or not normalized_material_ids:
+            return {}, {}
+        advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
+        material_placeholders = ",".join("?" for _ in normalized_material_ids)
+        params: list[Any] = [*normalized_material_ids, *sorted(advertiser_ids)]
+        rows = conn.execute(
+            f"""
+            SELECT snapshot_time, advertiser_id, material_id, material_name
+            FROM material_snapshots
+            WHERE material_id IN ({material_placeholders})
+              AND advertiser_id IN ({advertiser_placeholders})
+              AND COALESCE(material_id, '') <> ''
+            ORDER BY snapshot_time DESC
+            """,
+            params,
+        ).fetchall()
+        exact: dict[tuple[int, str], str] = {}
+        fallback: dict[str, str] = {}
+        for row in rows:
+            advertiser_id = int(row["advertiser_id"])
+            material_id = str(row["material_id"] or "").strip()
+            material_name = str(row["material_name"] or material_id).strip()
+            if not material_id:
+                continue
+            exact.setdefault((advertiser_id, material_id), material_name)
+            fallback.setdefault(material_id, material_name)
+        return exact, fallback
+
+    def comment_items(
+        self,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        advertiser_id: int | None = None,
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(range_key or "day").strip().lower()
+        if normalized not in PERFORMANCE_RANGES:
+            raise ValueError("range must be one of day/yesterday/week/month/custom")
+        config = self.read_config()
+        if normalized == "custom":
+            start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
+        else:
+            start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
+        selected_advertiser_id = int(advertiser_id or 0)
+        cache_key = build_comment_cache_key(
+            normalized,
+            start_date,
+            end_date,
+            selected_advertiser_id,
+            allowed_advertiser_ids,
+        )
+        cached = self._comment_cache.get(cache_key)
+        now_ts = time.time()
+        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
+            return dict(cached["payload"])
+
+        client = self.build_client(config)
+        client.get_access_token()
+        all_accounts = self._comment_account_candidates(client, allowed_advertiser_ids)
+        accounts = list(all_accounts)
+        if selected_advertiser_id:
+            accounts = [item for item in accounts if int(item["advertiser_id"]) == selected_advertiser_id]
+        if not accounts:
+            payload = {
+                "items": [],
+                "accounts": all_accounts,
+                "meta": {
+                    "comment_count": 0,
+                    "account_count": 0,
+                    "error_count": 0,
+                    "errors": [],
+                },
+                "range_key": normalized,
+                "range_label": range_label,
+                "query_start_date": start_dt.strftime("%Y-%m-%d"),
+                "query_end_date": end_dt.strftime("%Y-%m-%d"),
+                "window_start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "window_end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "selected_advertiser_id": selected_advertiser_id,
+                "fetched_at": now_text(config["timezone"]),
+            }
+            self._comment_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+            return payload
+
+        window_start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        window_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        max_workers = max(1, min(int(config.get("comment_max_workers", 4) or 4), len(accounts)))
+        items: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {
+                pool.submit(
+                    self._fetch_account_comments,
+                    client,
+                    int(account["advertiser_id"]),
+                    str(account["advertiser_name"]),
+                    window_start,
+                    window_end,
+                ): account
+                for account in accounts
+            }
+            for future in as_completed(future_map):
+                account_items, error_payload = future.result()
+                items.extend(account_items)
+                if error_payload:
+                    errors.append(error_payload)
+
+        advertiser_ids = {int(item["advertiser_id"]) for item in items if int(item.get("advertiser_id", 0) or 0)}
+        promotion_ids = {
+            int(str(item.get("promotion_id") or "").strip())
+            for item in items
+            if str(item.get("promotion_id") or "").strip().isdigit()
+        }
+        material_ids = {str(item.get("material_id") or "").strip() for item in items if str(item.get("material_id") or "").strip()}
+        with self.db() as conn:
+            plan_map, fallback_plan_map = self._comment_plan_name_maps(conn, advertiser_ids, promotion_ids)
+            material_map, fallback_material_map = self._comment_material_name_maps(conn, advertiser_ids, material_ids)
+
+        for item in items:
+            advertiser_id_value = int(item.get("advertiser_id", 0) or 0)
+            promotion_text = str(item.get("promotion_id") or "").strip()
+            material_text = str(item.get("material_id") or "").strip()
+            promotion_name = ""
+            if promotion_text.isdigit():
+                promotion_id_value = int(promotion_text)
+                promotion_name = plan_map.get((advertiser_id_value, promotion_id_value), "") or fallback_plan_map.get(
+                    promotion_id_value,
+                    "",
+                )
+            material_name = material_map.get((advertiser_id_value, material_text), "") or fallback_material_map.get(
+                material_text,
+                "",
+            )
+            item["promotion_name"] = promotion_name
+            item["promotion_display_name"] = promotion_name or (f"计划 {promotion_text}" if promotion_text else "-")
+            item["material_name"] = material_name
+            item["material_display_name"] = material_name or (f"素材 {material_text}" if material_text else "-")
+
+        items.sort(
+            key=lambda item: (
+                str(item.get("create_time") or ""),
+                int(item.get("like_count", 0) or 0),
+                int(item.get("reply_count", 0) or 0),
+                str(item.get("comment_id") or ""),
+            ),
+            reverse=True,
+        )
+        payload = {
+            "items": items,
+            "accounts": all_accounts,
+            "meta": {
+                "comment_count": len(items),
+                "account_count": len(accounts),
+                "error_count": len(errors),
+                "errors": errors,
+            },
+            "range_key": normalized,
+            "range_label": range_label,
+            "query_start_date": start_dt.strftime("%Y-%m-%d"),
+            "query_end_date": end_dt.strftime("%Y-%m-%d"),
+            "window_start": window_start,
+            "window_end": window_end,
+            "selected_advertiser_id": selected_advertiser_id,
+            "fetched_at": now_text(config["timezone"]),
+        }
+        self._comment_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+        return payload
+
+    def reply_comment(
+        self,
+        advertiser_id: int,
+        comment_id: str,
+        reply_text: str,
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> dict[str, Any]:
+        advertiser_id_value = int(advertiser_id or 0)
+        if advertiser_id_value <= 0:
+            raise ValueError("advertiser_id is required")
+        if allowed_advertiser_ids is not None and advertiser_id_value not in {int(item) for item in allowed_advertiser_ids}:
+            raise PermissionError("advertiser is not allowed")
+        comment_text = str(comment_id or "").strip()
+        if not comment_text:
+            raise ValueError("comment_id is required")
+        reply_body = str(reply_text or "").strip()
+        if not reply_body:
+            raise ValueError("reply_text is required")
+        if len(reply_body) > COMMENT_REPLY_MAX_LENGTH:
+            raise ValueError(f"reply_text must be <= {COMMENT_REPLY_MAX_LENGTH} chars")
+        client = self.build_client(self.read_config())
+        response = client.reply_comments(advertiser_id_value, [comment_text], reply_body)
+        self._comment_cache.clear()
+        return {
+            "ok": True,
+            "advertiser_id": advertiser_id_value,
+            "comment_id": comment_text,
+            "reply_text": reply_body,
+            "response": response,
+        }
+
+    def hide_comment(
+        self,
+        advertiser_id: int,
+        comment_id: str,
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> dict[str, Any]:
+        advertiser_id_value = int(advertiser_id or 0)
+        if advertiser_id_value <= 0:
+            raise ValueError("advertiser_id is required")
+        if allowed_advertiser_ids is not None and advertiser_id_value not in {int(item) for item in allowed_advertiser_ids}:
+            raise PermissionError("advertiser is not allowed")
+        comment_text = str(comment_id or "").strip()
+        if not comment_text:
+            raise ValueError("comment_id is required")
+        client = self.build_client(self.read_config())
+        response = client.hide_comments(advertiser_id_value, [comment_text])
+        self._comment_cache.clear()
+        return {
+            "ok": True,
+            "advertiser_id": advertiser_id_value,
+            "comment_id": comment_text,
+            "response": response,
+        }
 
     def matched_materials_for_user(
         self,

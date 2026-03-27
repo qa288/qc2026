@@ -47,6 +47,7 @@
         <div class="top-nav-row">
           <div class="worktop-bar">
             <div class="view-tabs" id="viewTabs">
+              <button type="button" class="view-tab" data-view="comments">评论</button>
               <button type="button" class="view-tab active" data-view="overview">总览</button>
               <button type="button" class="view-tab" data-view="accounts">账户</button>
               <button type="button" class="view-tab" data-view="plans">计划</button>
@@ -251,6 +252,48 @@
             <table id="materialTable" class="data-table"></table>
           </div>
           <div id="materialTablePager" class="table-pager hidden"></div>
+        </section>
+      </section>
+
+      <section class="view-section" data-view="comments">
+        <section class="panel decision-panel">
+          <div class="panel-head panel-head-compact">
+            <div>
+              <h2 id="commentsPanelTitle">评论</h2>
+            </div>
+            <div class="head-control-stack">
+              <div class="toolbar toolbar-inline toolbar-inline-primary toolbar-inline-comment">
+                <div class="range-filter-group">
+                  <div class="range-switch" id="commentRangeSwitch">
+                    <button type="button" class="range-button" data-range="day">今日</button>
+                    <button type="button" class="range-button" data-range="yesterday">昨日</button>
+                    <button type="button" class="range-button" data-range="week">近7天</button>
+                    <button type="button" class="range-button" data-range="month">近30天</button>
+                  </div>
+                  <div class="date-range-inline custom-date-inline">
+                    <div class="custom-date-fields">
+                      <input id="commentDateStart" class="date-input" type="date" />
+                      <span class="date-range-sep">至</span>
+                      <input id="commentDateEnd" class="date-input" type="date" />
+                      <button id="commentDateApply" class="date-apply-button" type="button">查询</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="toolbar-search-actions">
+                  <input id="commentSearch" class="search-input" type="search" placeholder="搜索评论 / 视频 / 计划 / 素材" />
+                  <select id="commentAccountFilter" class="select-input">
+                    <option value="">全部账户</option>
+                  </select>
+                  <button id="commentRefreshButton" class="button ghost compact" type="button">刷新评论</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="section-range-meta" id="commentSyncMeta">评论加载中</div>
+          <div class="table-shell tall">
+            <table id="commentTable" class="data-table"></table>
+          </div>
+          <div id="commentTablePager" class="table-pager hidden"></div>
         </section>
       </section>
 
@@ -627,6 +670,29 @@
           <button type="button" class="button ghost compact" data-action="close-preview">关闭</button>
         </div>
         <div class="preview-body" id="materialPreviewBody"></div>
+      </div>
+    </div>
+    <div class="preview-modal hidden" id="commentReplyModal" aria-hidden="true">
+      <div class="preview-backdrop" data-action="close-comment-reply"></div>
+      <div class="preview-dialog comment-reply-dialog" role="dialog" aria-modal="true" aria-labelledby="commentReplyTitle">
+        <div class="preview-head">
+          <div>
+            <h3 id="commentReplyTitle">回复评论</h3>
+            <div id="commentReplyMeta" class="section-range-meta compact-inline">请选择一条评论后再回复。</div>
+          </div>
+          <button type="button" class="button ghost compact" data-action="close-comment-reply">关闭</button>
+        </div>
+        <div class="preview-body comment-reply-body">
+          <label class="comment-reply-field">
+            <span>回复内容</span>
+            <textarea id="commentReplyInput" rows="4" maxlength="100" placeholder="输入回复内容，最多 100 字"></textarea>
+          </label>
+          <div id="commentReplyStatus" class="inline-feedback" data-tone="neutral"></div>
+          <div class="comment-reply-actions">
+            <button type="button" class="button ghost" data-action="close-comment-reply">取消</button>
+            <button type="button" class="button primary" id="commentReplySubmit">发布回复</button>
+          </div>
+        </div>
       </div>
     </div>
     <script src="/static/app.js"></script>

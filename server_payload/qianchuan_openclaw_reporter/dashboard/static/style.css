@@ -940,6 +940,10 @@ body {
   grid-template-columns: minmax(0, 1fr) minmax(360px, 520px);
 }
 
+.toolbar-inline-comment {
+  grid-template-columns: minmax(0, 1fr) minmax(520px, 760px);
+}
+
 .toolbar-secondary {
   width: auto;
   justify-content: flex-end;
@@ -1136,6 +1140,20 @@ body {
 
 .toolbar-inline-plan .toolbar-search-actions > .search-input {
   min-width: 0;
+}
+
+.toolbar-inline-comment .toolbar-search-actions {
+  justify-self: stretch;
+  max-width: 760px;
+}
+
+.toolbar-inline-comment .toolbar-search-actions > .search-input {
+  min-width: 0;
+}
+
+.toolbar-inline-comment .toolbar-search-actions > .select-input {
+  flex: 0 0 176px;
+  min-width: 176px;
 }
 
 .toolbar-inline-triple > .select-input,
@@ -3501,6 +3519,19 @@ body {
   margin-bottom: 12px;
 }
 
+.comment-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.comment-cell-copy {
+  max-width: 360px;
+  line-height: 1.55;
+  white-space: normal;
+  word-break: break-word;
+}
+
 .preview-modal {
   position: fixed;
   inset: 0;
@@ -3549,6 +3580,44 @@ body {
   gap: 16px;
   padding: 20px;
   overflow: auto;
+}
+
+.comment-reply-dialog {
+  width: min(640px, calc(100vw - 48px));
+}
+
+.comment-reply-body {
+  gap: 14px;
+}
+
+.comment-reply-field {
+  display: grid;
+  gap: 8px;
+}
+
+.comment-reply-field > span {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.comment-reply-field textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--ink);
+  font: inherit;
+  resize: vertical;
+}
+
+.comment-reply-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .preview-media-shell {
