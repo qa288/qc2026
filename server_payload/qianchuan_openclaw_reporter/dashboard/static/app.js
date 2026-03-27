@@ -2843,14 +2843,14 @@ function renderCommentTable(rows) {
     { key: "hide_status_text", label: "隐藏状态", sortable: true },
     { key: "level_type_text", label: "评论层级", sortable: true },
     { key: "comment_user_name", label: "评论用户", sortable: true },
-    { key: "create_time", label: "评论时间", sortable: true },
+    { key: "material_display_name", label: "关联视频素材", sortable: true },
     { key: "reply_count", label: "相关回复数", sortable: true },
     { key: "like_count", label: "点赞数", sortable: true },
     { key: "item_title", label: "视频标题", sortable: true },
     { key: "video_owner_aweme_id", label: "视频所属抖音号", sortable: true },
     { key: "comment_type_text", label: "评论类型", sortable: true },
     { key: "promotion_display_name", label: "评论来源计划", sortable: true },
-    { key: "material_display_name", label: "关联视频素材", sortable: true },
+    { key: "create_time", label: "评论时间", sortable: true },
   ];
   const columnWidths = [
     "240px",
@@ -2859,14 +2859,14 @@ function renderCommentTable(rows) {
     "84px",
     "84px",
     "160px",
-    "150px",
+    "240px",
     "76px",
     "76px",
     "300px",
     "112px",
     "96px",
     "160px",
-    "240px",
+    "150px",
   ];
   const sortedRows = sortRows(visibleRows, state.commentSort);
   const totalRows = sortedRows.length;
@@ -2917,7 +2917,12 @@ function renderCommentTable(rows) {
               <span class="cell-subitem">${escapeHtml(row.comment_user_id || "-")}</span>
             </div>
           </td>
-          <td class="mono">${escapeHtml(row.create_time || "-")}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.material_display_name || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
+            </div>
+          </td>
           <td class="mono">${formatNumber(row.reply_count || 0)}</td>
           <td class="mono">${formatNumber(row.like_count || 0)}</td>
           <td>
@@ -2934,12 +2939,7 @@ function renderCommentTable(rows) {
               <span class="cell-subitem">PID ${escapeHtml(truncateMiddle(row.promotion_id || "-", 8, 6))}</span>
             </div>
           </td>
-          <td>
-            <div class="cell-primary">${escapeHtml(row.material_display_name || "-")}</div>
-            <div class="cell-subline mono">
-              <span class="cell-subitem">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
-            </div>
-          </td>
+          <td class="mono">${escapeHtml(row.create_time || "-")}</td>
         </tr>
       `).join("")}
     </tbody>
