@@ -171,6 +171,21 @@ def register_query_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
 
+    @app.get("/api/team-material-rankings")
+    async def team_material_rankings(
+        snapshot_time: str = "",
+        range: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        user: dict[str, Any] = Depends(require_auth),
+    ) -> JSONResponse:
+        allowed = service.allowed_advertiser_ids_for_user(user)
+        try:
+            payload = service.material_rankings(range, start_date, end_date, snapshot_time, allowed)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
     @app.get("/api/material-preview-curve")
     async def material_preview_curve(
         material_key: str,

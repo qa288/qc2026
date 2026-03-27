@@ -7,7 +7,6 @@ import json
 import secrets
 import shutil
 import sys
-import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -77,8 +76,6 @@ from dashboard.video_probe import (  # noqa: E402
     VideoProbeError,
     format_video_probe_summary,
     probe_video_file,
-    should_auto_normalize_for_upload,
-    transcode_video_for_upload,
     validate_video_probe_for_upload,
 )
 
@@ -1792,88 +1789,27 @@ class DashboardService:
             return summary
         return f"{base}; {summary}"
 
-    @staticmethod
-    def _file_md5(path: Path) -> str:
-        digest = hashlib.md5()
-        with path.open("rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-        return digest.hexdigest()
-
     @classmethod
-    def _probe_upload_video(
-        cls,
-        file_row: dict[str, Any],
-        file_path: Path,
-    ) -> tuple[str, str, Path, str, str, tempfile.TemporaryDirectory[str] | None]:
+    def _probe_upload_video(cls, file_row: dict[str, Any], file_path: Path) -> tuple[str, str]:
         material_name = str(file_row.get("original_name") or file_row.get("stored_name") or file_path.name)
-        original_signature = str(file_row.get("file_md5") or "").strip() or cls._file_md5(file_path)
-        original_mime_type = str(file_row.get("mime_type") or "video/mp4")
         try:
             probe_result = probe_video_file(file_path)
         except VideoProbeError as exc:
             summary = f"\u89c6\u9891\u5143\u6570\u636e\u63a2\u6d4b\u5931\u8d25: {exc}"
             print(f"[upload-video-probe] {material_name} | {summary}", file=sys.stderr)
-            return summary, "", file_path, original_signature, original_mime_type, None
+            return summary, ""
         summary = format_video_probe_summary(probe_result)
         print(f"[upload-video-probe] {material_name} | {summary}", file=sys.stderr)
-        if should_auto_normalize_for_upload(probe_result):
-            temporary_directory: tempfile.TemporaryDirectory[str] | None = None
-            try:
-                temporary_directory = tempfile.TemporaryDirectory(prefix="upload_video_fix_")
-                normalized_path = Path(temporary_directory.name) / f"{file_path.stem}_normalized.mp4"
-                target_width, target_height = transcode_video_for_upload(file_path, normalized_path, probe_result)
-                normalized_probe = probe_video_file(normalized_path)
-                normalized_summary = format_video_probe_summary(normalized_probe)
-                print(
-                    (
-                        f"[upload-video-probe] {material_name} | "
-                        f"auto-normalized={target_width}x{target_height} | {normalized_summary}"
-                    ),
-                    file=sys.stderr,
-                )
-                normalized_problems = validate_video_probe_for_upload(normalized_probe)
-                combined_summary = (
-                    summary
-                    + "; "
-                    + "\u81ea\u52a8\u8f6c\u7801\u540e: "
-                    + normalized_summary
-                )
-                if normalized_problems:
-                    failure_message = (
-                        "\u89c6\u9891\u81ea\u52a8\u8f6c\u7801\u540e\u4ecd\u672a\u901a\u8fc7\u9884\u68c0: "
-                        + "; ".join(normalized_problems)
-                        + ". "
-                        + combined_summary
-                    )
-                    return combined_summary, failure_message, file_path, original_signature, original_mime_type, temporary_directory
-                normalized_signature = cls._file_md5(normalized_path)
-                return combined_summary, "", normalized_path, normalized_signature, "video/mp4", temporary_directory
-            except VideoProbeError as exc:
-                summary = cls._append_upload_probe_summary(
-                    summary,
-                    f"\u81ea\u52a8\u8f6c\u7801\u5931\u8d25: {exc}",
-                )
-                failure_message = (
-                    "\u89c6\u9891\u81ea\u52a8\u8f6c\u7801\u5931\u8d25: "
-                    + str(exc)
-                    + ". "
-                    + summary
-                )
-                return summary, failure_message, file_path, original_signature, original_mime_type, temporary_directory
         problems = validate_video_probe_for_upload(probe_result)
         if not problems:
-            return summary, "", file_path, original_signature, original_mime_type, None
+            return summary, ""
         failure_message = (
             "\u89c6\u9891\u5143\u6570\u636e\u9884\u68c0\u5931\u8d25: "
             + "; ".join(problems)
             + ". "
             + summary
         )
-        return summary, failure_message, file_path, original_signature, original_mime_type, None
+        return summary, failure_message
 
     @classmethod
     def _normalize_material_row(
@@ -3776,158 +3712,147 @@ class DashboardService:
                     self._recompute_material_upload_job_locked(conn, int(job_id))
                 continue
 
-            (
-                probe_summary,
-                preflight_failure_message,
-                upload_file_path,
-                upload_file_signature,
-                upload_mime_type,
-                upload_temp_dir,
-            ) = self._probe_upload_video(file_row, file_path)
-            try:
-                success_advertisers = 0
-                failed_advertisers = 0
-                first_asset: dict[str, str] | None = None
-                file_errors: list[str] = []
-                for advertiser_id in retry_advertiser_ids:
-                    targets = advertiser_plan_map.get(advertiser_id) or []
-                    if not targets:
-                        continue
-                    advertiser_name = str(targets[0].get("advertiser_name") or "")
+            probe_summary, preflight_failure_message = self._probe_upload_video(file_row, file_path)
+            success_advertisers = 0
+            failed_advertisers = 0
+            first_asset: dict[str, str] | None = None
+            file_errors: list[str] = []
+            for advertiser_id in retry_advertiser_ids:
+                targets = advertiser_plan_map.get(advertiser_id) or []
+                if not targets:
+                    continue
+                advertiser_name = str(targets[0].get("advertiser_name") or "")
+                with self.db() as conn:
+                    cached = self._find_advertiser_material_asset_locked(
+                        conn,
+                        advertiser_id,
+                        str(file_row.get("file_sha256") or ""),
+                    )
+                if cached and str(cached.get("video_id") or ""):
+                    asset = {
+                        "material_id": str(cached.get("material_id") or ""),
+                        "video_id": str(cached.get("video_id") or ""),
+                        "video_url": str(cached.get("video_url") or ""),
+                    }
+                    file_assets[(file_id, advertiser_id)] = asset
+                    first_asset = first_asset or asset
+                    success_advertisers += 1
                     with self.db() as conn:
-                        cached = self._find_advertiser_material_asset_locked(
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "success",
+                            material_id=asset["material_id"],
+                            video_id=asset["video_id"],
+                            video_url=asset["video_url"],
+                            message=reuse_message,
+                        )
+                    continue
+                if preflight_failure_message:
+                    failed_advertisers += 1
+                    message = preflight_failure_message
+                    file_errors.append(f"{advertiser_name or advertiser_id}: {message}")
+                    with self.db() as conn:
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "failed",
+                            message=message,
+                        )
+                    continue
+                try:
+                    upload_response = client.upload_local_video(
+                        advertiser_id=advertiser_id,
+                        material_name=str(file_row.get("original_name") or ""),
+                        file_path=file_path,
+                        video_signature=str(file_row.get("file_md5") or ""),
+                        mime_type=str(file_row.get("mime_type") or "video/mp4"),
+                    )
+                    data = upload_response.get("data") or {}
+                    asset = {
+                        "material_id": str(data.get("material_id") or ""),
+                        "video_id": str(data.get("video_id") or ""),
+                        "video_url": str(data.get("video_url") or ""),
+                    }
+                    if not asset["video_id"]:
+                        raise RuntimeError(f"upload response missing video_id: {upload_response}")
+                    file_assets[(file_id, advertiser_id)] = asset
+                    first_asset = first_asset or asset
+                    success_advertisers += 1
+                    with self.db() as conn:
+                        self._upsert_advertiser_material_asset_locked(
                             conn,
                             advertiser_id,
                             str(file_row.get("file_sha256") or ""),
+                            asset["material_id"],
+                            asset["video_id"],
+                            asset["video_url"],
+                            str(file_row.get("original_name") or ""),
                         )
-                    if cached and str(cached.get("video_id") or ""):
-                        asset = {
-                            "material_id": str(cached.get("material_id") or ""),
-                            "video_id": str(cached.get("video_id") or ""),
-                            "video_url": str(cached.get("video_url") or ""),
-                        }
-                        file_assets[(file_id, advertiser_id)] = asset
-                        first_asset = first_asset or asset
-                        success_advertisers += 1
-                        with self.db() as conn:
-                            self._upsert_material_upload_file_asset_locked(
-                                conn,
-                                int(job_id),
-                                file_id,
-                                advertiser_id,
-                                advertiser_name,
-                                "success",
-                                material_id=asset["material_id"],
-                                video_id=asset["video_id"],
-                                video_url=asset["video_url"],
-                                message=reuse_message,
-                            )
-                        continue
-                    if preflight_failure_message:
-                        failed_advertisers += 1
-                        message = preflight_failure_message
-                        file_errors.append(f"{advertiser_name or advertiser_id}: {message}")
-                        with self.db() as conn:
-                            self._upsert_material_upload_file_asset_locked(
-                                conn,
-                                int(job_id),
-                                file_id,
-                                advertiser_id,
-                                advertiser_name,
-                                "failed",
-                                message=message,
-                            )
-                        continue
-                    try:
-                        upload_response = client.upload_local_video(
-                            advertiser_id=advertiser_id,
-                            material_name=str(file_row.get("original_name") or ""),
-                            file_path=upload_file_path,
-                            video_signature=upload_file_signature,
-                            mime_type=upload_mime_type,
-                        )
-                        data = upload_response.get("data") or {}
-                        asset = {
-                            "material_id": str(data.get("material_id") or ""),
-                            "video_id": str(data.get("video_id") or ""),
-                            "video_url": str(data.get("video_url") or ""),
-                        }
-                        if not asset["video_id"]:
-                            raise RuntimeError(f"upload response missing video_id: {upload_response}")
-                        file_assets[(file_id, advertiser_id)] = asset
-                        first_asset = first_asset or asset
-                        success_advertisers += 1
-                        with self.db() as conn:
-                            self._upsert_advertiser_material_asset_locked(
-                                conn,
-                                advertiser_id,
-                                str(file_row.get("file_sha256") or ""),
-                                asset["material_id"],
-                                asset["video_id"],
-                                asset["video_url"],
-                                str(file_row.get("original_name") or ""),
-                            )
-                            self._upsert_material_upload_file_asset_locked(
-                                conn,
-                                int(job_id),
-                                file_id,
-                                advertiser_id,
-                                advertiser_name,
-                                "success",
-                                material_id=asset["material_id"],
-                                video_id=asset["video_id"],
-                                video_url=asset["video_url"],
-                                message=upload_success_message,
-                            )
-                    except Exception as exc:
-                        failed_advertisers += 1
-                        message = self._append_upload_probe_summary(str(exc), probe_summary)
-                        file_errors.append(f"{advertiser_name or advertiser_id}: {message}")
-                        with self.db() as conn:
-                            self._upsert_material_upload_file_asset_locked(
-                                conn,
-                                int(job_id),
-                                file_id,
-                                advertiser_id,
-                                advertiser_name,
-                                "failed",
-                                message=message,
-                            )
-
-                file_status = "success" if failed_advertisers == 0 and success_advertisers > 0 else "failed"
-                if success_advertisers > 0 and failed_advertisers > 0:
-                    file_status = "partial"
-                file_message = upload_success_message if file_status == "success" else "?".join(file_errors[:3]) or "\u4e0a\u4f20\u5931\u8d25\u3002"
-                if probe_summary and (
-                    file_status != "success"
-                    or not probe_summary.startswith("\u89c6\u9891\u5143\u6570\u636e\u63a2\u6d4b\u5931\u8d25")
-                ):
-                    file_message = self._append_upload_probe_summary(file_message, probe_summary)
-                with self.db() as conn:
-                    conn.execute(
-                        """
-                        UPDATE material_upload_job_files
-                        SET status = ?, message = ?, material_id = ?, video_id = ?, video_url = ?,
-                            processed_advertisers = ?, success_advertisers = ?, failed_advertisers = ?, updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            file_status,
-                            file_message,
-                            str((first_asset or {}).get("material_id") or ""),
-                            str((first_asset or {}).get("video_id") or ""),
-                            str((first_asset or {}).get("video_url") or ""),
-                            success_advertisers + failed_advertisers,
-                            success_advertisers,
-                            failed_advertisers,
-                            now_text(),
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
                             file_id,
-                        ),
-                    )
-                    self._recompute_material_upload_job_locked(conn, int(job_id))
-            finally:
-                if upload_temp_dir is not None:
-                    upload_temp_dir.cleanup()
+                            advertiser_id,
+                            advertiser_name,
+                            "success",
+                            material_id=asset["material_id"],
+                            video_id=asset["video_id"],
+                            video_url=asset["video_url"],
+                            message=upload_success_message,
+                        )
+                except Exception as exc:
+                    failed_advertisers += 1
+                    message = self._append_upload_probe_summary(str(exc), probe_summary)
+                    file_errors.append(f"{advertiser_name or advertiser_id}: {message}")
+                    with self.db() as conn:
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "failed",
+                            message=message,
+                        )
+
+            file_status = "success" if failed_advertisers == 0 and success_advertisers > 0 else "failed"
+            if success_advertisers > 0 and failed_advertisers > 0:
+                file_status = "partial"
+            file_message = upload_success_message if file_status == "success" else "?".join(file_errors[:3]) or "\u4e0a\u4f20\u5931\u8d25\u3002"
+            if probe_summary and (
+                file_status != "success"
+                or not probe_summary.startswith("\u89c6\u9891\u5143\u6570\u636e\u63a2\u6d4b\u5931\u8d25")
+            ):
+                file_message = self._append_upload_probe_summary(file_message, probe_summary)
+            with self.db() as conn:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_files
+                    SET status = ?, message = ?, material_id = ?, video_id = ?, video_url = ?,
+                        processed_advertisers = ?, success_advertisers = ?, failed_advertisers = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        file_status,
+                        file_message,
+                        str((first_asset or {}).get("material_id") or ""),
+                        str((first_asset or {}).get("video_id") or ""),
+                        str((first_asset or {}).get("video_url") or ""),
+                        success_advertisers + failed_advertisers,
+                        success_advertisers,
+                        failed_advertisers,
+                        now_text(),
+                        file_id,
+                    ),
+                )
+                self._recompute_material_upload_job_locked(conn, int(job_id))
 
         for target in target_rows:
             target_id = int(target["id"])

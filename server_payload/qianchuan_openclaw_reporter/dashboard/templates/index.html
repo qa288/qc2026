@@ -52,6 +52,7 @@
               <button type="button" class="view-tab" data-view="accounts">账户</button>
               <button type="button" class="view-tab" data-view="plans">计划</button>
               <button type="button" class="view-tab" data-view="materials">素材</button>
+              <button type="button" class="view-tab hidden" data-view="team-materials">团队素材</button>
               <button type="button" class="view-tab" data-view="breakdown">运营排名</button>
               <button type="button" class="view-tab" data-view="uploads">批量上传</button>
               <button type="button" class="view-tab" data-view="access">账号权限</button>
@@ -252,6 +253,44 @@
             <table id="materialTable" class="data-table"></table>
           </div>
           <div id="materialTablePager" class="table-pager hidden"></div>
+        </section>
+      </section>
+
+      <section class="view-section" data-view="team-materials">
+        <section class="panel decision-panel">
+          <div class="panel-head panel-head-compact">
+            <div>
+              <h2 id="teamMaterialsPanelTitle">团队素材</h2>
+            </div>
+            <div class="head-control-stack">
+              <div class="toolbar toolbar-inline toolbar-inline-primary toolbar-inline-material">
+                <div class="range-filter-group">
+                  <div class="range-switch" id="teamMaterialRangeSwitch">
+                    <button type="button" class="range-button" data-range="day">日</button>
+                    <button type="button" class="range-button" data-range="yesterday">昨日</button>
+                    <button type="button" class="range-button" data-range="week">近7天</button>
+                    <button type="button" class="range-button" data-range="month">近30天</button>
+                  </div>
+                  <div class="date-range-inline custom-date-inline">
+                    <div class="custom-date-fields">
+                      <input id="teamMaterialDateStart" class="date-input" type="date" />
+                      <span class="date-range-sep">至</span>
+                      <input id="teamMaterialDateEnd" class="date-input" type="date" />
+                      <button id="teamMaterialDateApply" class="date-apply-button" type="button">查询</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="toolbar-search-actions">
+                  <input id="teamMaterialSearch" class="search-input" type="search" placeholder="搜索归属账户 / 计划 / 达人" />
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="section-range-meta" id="teamMaterialSyncMeta">团队素材加载中</div>
+          <div class="table-shell tall">
+            <table id="teamMaterialTable" class="data-table"></table>
+          </div>
+          <div id="teamMaterialTablePager" class="table-pager hidden"></div>
         </section>
       </section>
 

@@ -70,6 +70,8 @@ const state = {
   planAssetCache: {},
   materialPayloads: {},
   materialPayloadFetchedAt: {},
+  teamMaterialPayloads: {},
+  teamMaterialPayloadFetchedAt: {},
   commentPayloads: {},
   commentPayloadFetchedAt: {},
   materialPreviewCurveCache: {},
@@ -88,6 +90,7 @@ const state = {
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
   employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
   materialSort: loadSort("material-sort", { key: "stat_cost", dir: "desc" }),
+  teamMaterialSort: loadSort("team-material-sort", { key: "stat_cost", dir: "desc" }),
   commentSort: loadSort("comment-sort", { key: "create_time", dir: "desc" }),
   activeView: loadPreference("active-view", "overview"),
   ruleTargetOptions: [],
@@ -96,10 +99,12 @@ const state = {
     plan: loadRangeFilter("plan-range-filter", "day"),
     breakdown: loadRangeFilter("breakdown-range-filter", "day"),
     material: loadRangeFilter("material-range-filter", "day"),
+    teamMaterial: loadRangeFilter("team-material-range-filter", "day"),
     comment: loadRangeFilter("comment-range-filter", "day"),
   },
   rangeEditorOpen: {},
   materialPage: 1,
+  teamMaterialPage: 1,
   commentPage: 1,
   selectedPlanId: null,
   selectedMaterialKey: null,
@@ -118,6 +123,8 @@ const employeeTable = document.getElementById("employeeTable");
 const ruleTable = document.getElementById("ruleTable");
 const materialTable = document.getElementById("materialTable");
 const materialTablePager = document.getElementById("materialTablePager");
+const teamMaterialTable = document.getElementById("teamMaterialTable");
+const teamMaterialTablePager = document.getElementById("teamMaterialTablePager");
 const commentTable = document.getElementById("commentTable");
 const commentTablePager = document.getElementById("commentTablePager");
 const alertSummary = document.getElementById("alertSummary");
@@ -128,6 +135,7 @@ const productSearch = document.getElementById("productSearch");
 const breakdownTitle = document.getElementById("breakdownTitle");
 const teamPanelTitle = document.getElementById("teamPanelTitle");
 const materialSearch = document.getElementById("materialSearch");
+const teamMaterialSearch = document.getElementById("teamMaterialSearch");
 const commentSearch = document.getElementById("commentSearch");
 const productTable = document.getElementById("productTable");
 const employeeDetail = document.getElementById("employeeDetail");
@@ -188,6 +196,12 @@ const materialDateEnd = document.getElementById("materialDateEnd");
 const materialDateApply = document.getElementById("materialDateApply");
 const materialSyncMeta = document.getElementById("materialSyncMeta");
 const materialsPanelTitle = document.getElementById("materialsPanelTitle");
+const teamMaterialRangeSwitch = document.getElementById("teamMaterialRangeSwitch");
+const teamMaterialDateStart = document.getElementById("teamMaterialDateStart");
+const teamMaterialDateEnd = document.getElementById("teamMaterialDateEnd");
+const teamMaterialDateApply = document.getElementById("teamMaterialDateApply");
+const teamMaterialSyncMeta = document.getElementById("teamMaterialSyncMeta");
+const teamMaterialsPanelTitle = document.getElementById("teamMaterialsPanelTitle");
 const commentsPanelTitle = document.getElementById("commentsPanelTitle");
 const commentRangeSwitch = document.getElementById("commentRangeSwitch");
 const commentDateStart = document.getElementById("commentDateStart");
@@ -276,6 +290,14 @@ const PERFORMANCE_SECTION_CONFIG = {
     startEl: materialDateStart,
     endEl: materialDateEnd,
     applyEl: materialDateApply,
+  },
+  teamMaterial: {
+    storageKey: "team-material-range-filter",
+    switchEl: teamMaterialRangeSwitch,
+    metaEl: teamMaterialSyncMeta,
+    startEl: teamMaterialDateStart,
+    endEl: teamMaterialDateEnd,
+    applyEl: teamMaterialDateApply,
   },
   comment: {
     storageKey: "comment-range-filter",
@@ -1214,6 +1236,10 @@ function materialRangePayload(filter) {
   return state.materialPayloads[performanceFilterKey(filter)] || null;
 }
 
+function teamMaterialRangePayload(filter) {
+  return state.teamMaterialPayloads[performanceFilterKey(filter)] || null;
+}
+
 function commentRequestAdvertiserId() {
   return Number(commentAccountFilter?.value || 0) || 0;
 }
@@ -1232,6 +1258,10 @@ function latestMaterialSnapshotToken() {
 
 function materialRowsForCurrentFilter() {
   return (materialRangePayload(sectionFilter("material"))?.items || []).map((row) => enrichMaterialRow(row));
+}
+
+function teamMaterialRowsForCurrentFilter() {
+  return (teamMaterialRangePayload(sectionFilter("teamMaterial"))?.items || []).map((row) => enrichMaterialRow(row));
 }
 
 function commentRowsForCurrentFilter() {
@@ -2677,6 +2707,108 @@ function renderMaterialTable(rows) {
   renderMaterialInteractions(enrichedRows);
 }
 
+function renderTeamMaterialPager(totalRows, currentPage, totalPages, startIndex, endIndex) {
+  if (!teamMaterialTablePager) return;
+  if (totalRows <= MATERIAL_PAGE_SIZE) {
+    teamMaterialTablePager.innerHTML = "";
+    teamMaterialTablePager.classList.add("hidden");
+    return;
+  }
+  const pages = materialPagerPages(totalPages, currentPage);
+  teamMaterialTablePager.classList.remove("hidden");
+  teamMaterialTablePager.innerHTML = `
+    <div class="table-pager-summary">显示 ${formatNumber(startIndex)}-${formatNumber(endIndex)} / ${formatNumber(totalRows)}，按页渲染以减少卡顿。</div>
+    <div class="table-pager-actions">
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage - 1}"
+        ${currentPage <= 1 ? "disabled" : ""}
+      >上一页</button>
+      ${pages.map((page, index) => `
+        ${index > 0 && page - pages[index - 1] > 1 ? '<span class="table-pager-ellipsis">...</span>' : ""}
+        <button
+          type="button"
+          class="button ghost compact table-page-button ${page === currentPage ? "is-active" : ""}"
+          data-page="${page}"
+          ${page === currentPage ? 'aria-current="page"' : ""}
+        >${formatNumber(page)}</button>
+      `).join("")}
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage + 1}"
+        ${currentPage >= totalPages ? "disabled" : ""}
+      >下一页</button>
+    </div>
+  `;
+  teamMaterialTablePager.querySelectorAll("button[data-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextPage = Number(button.dataset.page || 0);
+      if (!nextPage || nextPage === state.teamMaterialPage) return;
+      state.teamMaterialPage = nextPage;
+      renderTeamMaterialTable(teamMaterialRowsForCurrentFilter());
+    });
+  });
+}
+
+function renderTeamMaterialTable(rows) {
+  if (!teamMaterialTable) return;
+  const enrichedRows = rows.map((row) => enrichMaterialRow(row));
+  if (!["stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.teamMaterialSort.key || ""))) {
+    state.teamMaterialSort = { key: "stat_cost", dir: "desc" };
+    saveSort("team-material-sort", state.teamMaterialSort);
+  }
+  const query = teamMaterialSearch?.value.trim().toLowerCase() || "";
+  const visibleRows = enrichedRows.filter((row) => {
+    const haystack = [row.top_account_name, row.top_plan_name, row.top_anchor_name].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+  const columns = [
+    { key: "stat_cost", label: "消耗", sortable: true },
+    { key: "top_account_name", label: "归属账户", sortable: true },
+    { key: "top_plan_name", label: "归属计划", sortable: true },
+    { key: "top_anchor_name", label: "达人", sortable: true },
+  ];
+  const sorted = sortRows(visibleRows, state.teamMaterialSort);
+  const totalRows = sorted.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / MATERIAL_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(Number(state.teamMaterialPage) || 1, 1), totalPages);
+  const pageStart = totalRows ? (currentPage - 1) * MATERIAL_PAGE_SIZE : 0;
+  const pageRows = sorted.slice(pageStart, pageStart + MATERIAL_PAGE_SIZE);
+  state.teamMaterialPage = currentPage;
+  teamMaterialTable.innerHTML = `
+    ${makeHeader(columns, state.teamMaterialSort, "team-material-sort")}
+    <tbody>
+      ${pageRows.map((row) => `
+        <tr>
+          <td class="mono">${formatMoney(row.stat_cost)}</td>
+          <td>${escapeHtml(row.top_account_name || "--")}</td>
+          <td>${escapeHtml(row.top_plan_name || "--")}</td>
+          <td>${escapeHtml(row.top_anchor_name || "--")}</td>
+        </tr>
+      `).join("")}
+    </tbody>
+  `;
+  teamMaterialTable.querySelectorAll("th[data-key]").forEach((header) => {
+    header.addEventListener("click", () => {
+      const key = header.dataset.key;
+      const column = columns.find((item) => item.key === key);
+      if (!column || !column.sortable) return;
+      state.teamMaterialSort = toggleSort(state.teamMaterialSort, key);
+      saveSort("team-material-sort", state.teamMaterialSort);
+      renderTeamMaterialTable(enrichedRows);
+    });
+  });
+  renderTeamMaterialPager(
+    totalRows,
+    currentPage,
+    totalPages,
+    totalRows ? pageStart + 1 : 0,
+    pageStart + pageRows.length,
+  );
+}
+
 function fillCommentAccountFilter(accounts) {
   if (!commentAccountFilter) return;
   const current = String(commentAccountFilter.value || "");
@@ -3023,6 +3155,40 @@ async function fetchMaterialRankings(force = false) {
   const payload = await response.json();
   state.materialPayloads[cacheKey] = payload;
   state.materialPayloadFetchedAt[cacheKey] = Date.now();
+  return payload;
+}
+
+async function fetchTeamMaterialRankings(force = false) {
+  const filter = sectionFilter("teamMaterial");
+  const cacheKey = performanceFilterKey(filter);
+  const cachedPayload = state.teamMaterialPayloads[cacheKey];
+  if (!force && cachedPayload) {
+    const expectedSnapshot = latestMaterialSnapshotToken();
+    const cachedSnapshot = String(cachedPayload.snapshot_time || "").trim();
+    const cachedAt = Number(state.teamMaterialPayloadFetchedAt[cacheKey] || 0);
+    const freshBySnapshot = Boolean(expectedSnapshot) && cachedSnapshot === expectedSnapshot;
+    const freshByAge = !expectedSnapshot && cachedAt > 0 && Date.now() - cachedAt < MATERIAL_CACHE_TTL_MS;
+    if (freshBySnapshot || freshByAge) {
+      return cachedPayload;
+    }
+  }
+  const params = new URLSearchParams();
+  params.set("range", filter.mode);
+  if (filter.mode === "custom") {
+    params.set("start_date", filter.start);
+    params.set("end_date", filter.end);
+  }
+  const response = await fetch(`/api/team-material-rankings?${params.toString()}`).catch(() => null);
+  if (!response || !response.ok) {
+    const errorPayload = response ? await response.json().catch(() => ({})) : {};
+    if (cachedPayload) {
+      return cachedPayload;
+    }
+    throw new Error(errorPayload.detail || "team material rankings fetch failed");
+  }
+  const payload = await response.json();
+  state.teamMaterialPayloads[cacheKey] = payload;
+  state.teamMaterialPayloadFetchedAt[cacheKey] = Date.now();
   return payload;
 }
 
@@ -4196,6 +4362,7 @@ function applyRoleViewPolicy() {
   const planTab = viewTabs?.querySelector('[data-view="plans"]');
   const breakdownTab = viewTabs?.querySelector('[data-view="breakdown"]');
   const materialsTab = viewTabs?.querySelector('[data-view="materials"]');
+  const teamMaterialsTab = viewTabs?.querySelector('[data-view="team-materials"]');
   const commentsTab = viewTabs?.querySelector('[data-view="comments"]');
   const uploadsTab = viewTabs?.querySelector('[data-view="uploads"]');
   const tabOrder = admin
@@ -4204,7 +4371,7 @@ function applyRoleViewPolicy() {
       ? (canUseUploadModule()
         ? ["overview", "accounts", "plans", "materials", "comments", "breakdown", "uploads"]
         : ["overview", "accounts", "plans", "materials", "comments", "breakdown"])
-      : ["overview", "materials", "comments", "breakdown"];
+      : ["overview", "materials", "team-materials", "breakdown"];
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
     accessTab.textContent = "账号权限";
@@ -4225,8 +4392,12 @@ function applyRoleViewPolicy() {
   if (materialsTab) {
     materialsTab.textContent = operator ? "我的素材" : "素材";
   }
+  if (teamMaterialsTab) {
+    teamMaterialsTab.classList.toggle("hidden", !operator);
+    teamMaterialsTab.textContent = "团队素材";
+  }
   if (commentsTab) {
-    commentsTab.classList.remove("hidden");
+    commentsTab.classList.toggle("hidden", operator);
     commentsTab.textContent = "评论";
   }
   if (uploadsTab) {
@@ -4260,24 +4431,30 @@ function applyRoleViewPolicy() {
   if (materialsPanelTitle) {
     materialsPanelTitle.textContent = operator ? "我的素材" : "素材排行";
   }
+  if (teamMaterialsPanelTitle) {
+    teamMaterialsPanelTitle.textContent = "团队素材";
+  }
   if (commentsPanelTitle) {
     commentsPanelTitle.textContent = "评论";
   }
   if (materialSearch) {
     materialSearch.placeholder = operator ? "搜索素材名称" : "搜索素材";
   }
+  if (teamMaterialSearch) {
+    teamMaterialSearch.placeholder = "搜索归属账户 / 计划 / 达人";
+  }
   if (heroCopy) {
     heroCopy.textContent = admin
       ? "账户、计划、素材、运营。"
       : supervisor
         ? "范围内账户、计划、素材。"
-        : "我的素材、团队排名。";
+        : "我的素材、团队素材、团队排名。";
   }
   const allowedViews = admin
     ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "comments", "uploads", "access", "signals"])
     : supervisor
       ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "comments", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials", "comments"])
-      : new Set(["overview", "breakdown", "materials", "comments"]);
+      : new Set(["overview", "breakdown", "materials", "team-materials"]);
   if (viewTabs) {
     tabOrder.forEach((view) => {
       const tab = viewTabs.querySelector(`[data-view="${view}"]`);
@@ -4676,6 +4853,21 @@ async function refreshMaterialSection(force = false) {
   materialSyncMeta.textContent = syncText;
 }
 
+async function refreshTeamMaterialSection(force = false) {
+  syncSectionRangeControls("teamMaterial");
+  const payload = await fetchTeamMaterialRankings(force);
+  renderTeamMaterialTable(payload?.items || []);
+  const meta = payload?.meta || {};
+  const rangeText = formatDateWindowMeta(payload);
+  const materialCount = Array.isArray(payload?.items) ? payload.items.length : Number(meta.material_row_count || 0);
+  const syncText = payload?.snapshot_time
+    ? `${rangeText} · 汇总 ${formatNumber(payload?.snapshot_count || 0)} 个日快照 · 最近明细同步 ${payload.snapshot_time} · 素材 ${formatNumber(materialCount)} 条 · 错误 ${formatNumber(meta.error_count || 0)}`
+    : `${rangeText} · 当前时间范围内暂无团队素材`;
+  if (teamMaterialSyncMeta) {
+    teamMaterialSyncMeta.textContent = syncText;
+  }
+}
+
 async function refreshCommentSection(force = false) {
   syncSectionRangeControls("comment");
   const payload = await fetchComments(force);
@@ -4699,6 +4891,11 @@ async function applyQuickRange(sectionKey, mode) {
     if (sectionKey === "material") {
       state.materialPage = 1;
       await refreshMaterialSection(false);
+      return;
+    }
+    if (sectionKey === "teamMaterial") {
+      state.teamMaterialPage = 1;
+      await refreshTeamMaterialSection(false);
       return;
     }
     if (sectionKey === "comment") {
@@ -4731,6 +4928,11 @@ async function applyCustomRange(sectionKey) {
     if (sectionKey === "material") {
       state.materialPage = 1;
       await refreshMaterialSection(false);
+      return;
+    }
+    if (sectionKey === "teamMaterial") {
+      state.teamMaterialPage = 1;
+      await refreshTeamMaterialSection(false);
       return;
     }
     if (sectionKey === "comment") {
@@ -4784,6 +4986,10 @@ function bindInputs() {
     state.materialPage = 1;
     renderMaterialTable(materialRowsForCurrentFilter());
   }, MATERIAL_SEARCH_DEBOUNCE_MS);
+  const debouncedTeamMaterialSearch = debounce(() => {
+    state.teamMaterialPage = 1;
+    renderTeamMaterialTable(teamMaterialRowsForCurrentFilter());
+  }, MATERIAL_SEARCH_DEBOUNCE_MS);
   const debouncedCommentSearch = debounce(() => {
     state.commentPage = 1;
     renderCommentTable(commentRowsForCurrentFilter());
@@ -4816,6 +5022,9 @@ function bindInputs() {
         if (view === "materials") {
           await refreshMaterialSection(false);
         }
+        if (view === "team-materials") {
+          await refreshTeamMaterialSection(false);
+        }
         if (view === "comments") {
           await refreshCommentSection(false);
         }
@@ -4835,6 +5044,7 @@ function bindInputs() {
   employeeSearch?.addEventListener("input", () => renderEmployeeTable(breakdownRows(rangePayload(sectionFilter("breakdown")))));
   productSearch?.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
   materialSearch?.addEventListener("input", debouncedMaterialSearch);
+  teamMaterialSearch?.addEventListener("input", debouncedTeamMaterialSearch);
   commentSearch?.addEventListener("input", debouncedCommentSearch);
   operatorMaterialSearch?.addEventListener("input", () => renderUserMatchedMaterialTable());
   toggleOperatorMaterialsButton?.addEventListener("click", async () => {
@@ -4938,6 +5148,7 @@ function bindInputs() {
   bindRangeFilterControls("plan");
   bindRangeFilterControls("breakdown");
   bindRangeFilterControls("material");
+  bindRangeFilterControls("teamMaterial");
   bindRangeFilterControls("comment");
 
 
@@ -5351,6 +5562,13 @@ async function render(payload) {
       await refreshMaterialSection(false);
     } catch (error) {
       console.error("refreshMaterialSection failed", error);
+    }
+  }
+  if (state.activeView === "team-materials") {
+    try {
+      await refreshTeamMaterialSection(false);
+    } catch (error) {
+      console.error("refreshTeamMaterialSection failed", error);
     }
   }
   if (state.activeView === "comments") {
