@@ -25,6 +25,26 @@ class UploadAccess:
         self._normalize_match_text = normalize_match_text
         self._sanitize_material_title = sanitize_material_title
 
+    @staticmethod
+    def _column_exists_locked(conn: Any, table_name: str, column_name: str) -> bool:
+        table = str(table_name or "").strip()
+        column = str(column_name or "").strip()
+        if not table or not column:
+            return False
+        if getattr(conn, "backend", "") == "postgres":
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+                LIMIT 1
+                """,
+                (table, column),
+            ).fetchone()
+            return bool(row)
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(str(row["name"]) == column for row in rows)
+
     def visible_upload_targets(self, user: dict[str, Any], scope: str, query: str) -> dict[str, Any]:
         allowed = self._allowed_advertiser_ids_for_user(user)
         payload = self._latest_snapshot(allowed)
@@ -184,10 +204,13 @@ class UploadAccess:
             return {}
         placeholders = ",".join("?" for _ in normalized_ids)
         with self._db() as conn:
+            raw_json_select = "p.raw_json"
+            if not self._column_exists_locked(conn, "plan_snapshots", "raw_json"):
+                raw_json_select = "'{}' AS raw_json"
             rows = conn.execute(
                 f"""
                 SELECT p.ad_id, p.advertiser_id, p.advertiser_name, p.ad_name, p.product_id, p.product_name, p.anchor_name,
-                       p.marketing_goal, p.plan_source, p.status, p.opt_status, p.snapshot_time, p.raw_json
+                       p.marketing_goal, p.plan_source, p.status, p.opt_status, p.snapshot_time, {raw_json_select}
                 FROM plan_snapshots p
                 JOIN (
                     SELECT ad_id, MAX(snapshot_time) AS latest_snapshot_time
