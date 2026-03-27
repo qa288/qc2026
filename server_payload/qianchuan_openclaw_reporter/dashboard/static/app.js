@@ -2677,7 +2677,7 @@ function renderMaterialTable(rows) {
 function fillCommentAccountFilter(accounts) {
   if (!commentAccountFilter) return;
   const current = String(commentAccountFilter.value || "");
-  const options = ['<option value="">鍏ㄩ儴璐︽埛</option>']
+  const options = ['<option value="">全部账户</option>']
     .concat((accounts || []).map((item) => (
       `<option value="${escapeHtml(item.advertiser_id)}">${escapeHtml(item.advertiser_name || item.advertiser_id)}</option>`
     )));

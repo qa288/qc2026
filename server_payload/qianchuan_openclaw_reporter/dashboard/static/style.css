@@ -941,12 +941,12 @@ body {
 }
 
 .toolbar-inline-comment {
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 540px);
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(560px, 760px);
+  align-items: center;
 }
 
 .toolbar-inline-comment .range-filter-group {
-  align-self: start;
+  align-self: center;
 }
 
 .toolbar-secondary {
@@ -1149,25 +1149,25 @@ body {
 
 .toolbar-inline-comment .toolbar-search-actions {
   justify-self: stretch;
-  align-self: start;
-  max-width: 540px;
-  flex-wrap: wrap;
-  row-gap: 6px;
-  align-content: start;
+  align-self: center;
+  max-width: 760px;
+  flex-wrap: nowrap;
+  row-gap: 0;
+  align-content: center;
 }
 
 .toolbar-inline-comment .toolbar-search-actions > .search-input {
-  flex: 1 1 100%;
-  min-width: 0;
+  flex: 1 1 auto;
+  min-width: 240px;
 }
 
 .toolbar-inline-comment .toolbar-search-actions > .select-input {
-  flex: 1 1 168px;
-  min-width: 0;
+  flex: 0 0 220px;
+  min-width: 220px;
 }
 
 .toolbar-inline-comment .toolbar-search-actions > .button {
-  margin-left: auto;
+  margin-left: 0;
   white-space: nowrap;
 }
 
