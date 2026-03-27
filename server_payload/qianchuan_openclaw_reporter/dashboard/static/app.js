@@ -2856,6 +2856,7 @@ async function hideComment(row) {
   await refreshCommentSection(true);
 }
 
+/*
 function renderCommentTable(rows) {
   if (!commentTable) return;
   const query = String(commentSearch?.value || "").trim().toLowerCase();
@@ -2984,6 +2985,156 @@ function renderCommentTable(rows) {
       const commentId = String(button.dataset.commentId || "");
       const advertiserId = Number(button.dataset.advertiserId || 0);
       const row = visibleRows.find((item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId);
+      if (!row) return;
+      try {
+        await hideComment(row);
+      } catch (error) {
+        window.alert(error.message || "隐藏评论失败");
+      }
+    });
+  });
+  renderCommentPager(
+    totalRows,
+    currentPage,
+    totalPages,
+    totalRows ? pageStart + 1 : 0,
+    pageStart + pageRows.length,
+  );
+}
+*/
+
+function renderCommentTable(rows) {
+  if (!commentTable) return;
+  const query = String(commentSearch?.value || "").trim().toLowerCase();
+  const visibleRows = rows.filter((row) => {
+    const haystack = [
+      row.text,
+      row.comment_user_name,
+      row.comment_user_id,
+      row.item_title,
+      row.promotion_display_name,
+      row.material_display_name,
+      row.advertiser_name,
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+  const columns = [
+    { key: "text", label: "评论内容", sortable: true },
+    { key: "actions", label: "操作", sortable: false },
+    { key: "reply_status_text", label: "回复状态", sortable: true },
+    { key: "hide_status_text", label: "隐藏状态", sortable: true },
+    { key: "level_type_text", label: "评论层级", sortable: true },
+    { key: "comment_user_name", label: "评论用户", sortable: true },
+    { key: "create_time", label: "评论时间", sortable: true },
+    { key: "reply_count", label: "相关回复数", sortable: true },
+    { key: "like_count", label: "点赞数", sortable: true },
+    { key: "item_title", label: "视频标题", sortable: true },
+    { key: "video_owner_aweme_id", label: "视频所属抖音号", sortable: true },
+    { key: "comment_type_text", label: "评论类型", sortable: true },
+    { key: "promotion_display_name", label: "评论来源计划", sortable: true },
+    { key: "material_display_name", label: "关联视频素材", sortable: true },
+  ];
+  const sortedRows = sortRows(visibleRows, state.commentSort);
+  const totalRows = sortedRows.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / COMMENT_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(Number(state.commentPage) || 1, 1), totalPages);
+  const pageStart = totalRows ? (currentPage - 1) * COMMENT_PAGE_SIZE : 0;
+  const pageRows = sortedRows.slice(pageStart, pageStart + COMMENT_PAGE_SIZE);
+  state.commentPage = currentPage;
+  commentTable.innerHTML = `
+    ${makeHeader(columns, state.commentSort, "comment-sort")}
+    <tbody>
+      ${pageRows.map((row) => `
+        <tr data-comment-id="${escapeHtml(row.comment_id)}" data-advertiser-id="${escapeHtml(row.advertiser_id)}">
+          <td>
+            <div class="cell-primary comment-cell-copy">${escapeHtml(row.text || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">CID ${escapeHtml(truncateMiddle(row.comment_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td>
+            <div class="comment-action-buttons">
+              <button
+                type="button"
+                class="button ghost compact"
+                data-action="reply-comment"
+                data-comment-id="${escapeHtml(row.comment_id)}"
+                data-advertiser-id="${escapeHtml(row.advertiser_id)}"
+              >回复评论</button>
+              <button
+                type="button"
+                class="button ghost compact"
+                data-action="hide-comment"
+                data-comment-id="${escapeHtml(row.comment_id)}"
+                data-advertiser-id="${escapeHtml(row.advertiser_id)}"
+                ${String(row.hide_status || "").trim().toUpperCase() === "HIDE" ? "disabled" : ""}
+              >${String(row.hide_status || "").trim().toUpperCase() === "HIDE" ? "已隐藏" : "隐藏评论"}</button>
+            </div>
+          </td>
+          <td>${escapeHtml(row.reply_status_text || "-")}</td>
+          <td>${escapeHtml(row.hide_status_text || "-")}</td>
+          <td>${escapeHtml(row.level_type_text || "-")}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.comment_user_name || "未知用户")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">${escapeHtml(row.comment_user_id || "-")}</span>
+            </div>
+          </td>
+          <td class="mono">${escapeHtml(row.create_time || "-")}</td>
+          <td class="mono">${formatNumber(row.reply_count || 0)}</td>
+          <td class="mono">${formatNumber(row.like_count || 0)}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.item_title || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">VID ${escapeHtml(truncateMiddle(row.item_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td class="mono">${escapeHtml(row.video_owner_aweme_id || "-")}</td>
+          <td>${escapeHtml(row.comment_type_text || "-")}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.promotion_display_name || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">PID ${escapeHtml(truncateMiddle(row.promotion_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.material_display_name || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+        </tr>
+      `).join("")}
+    </tbody>
+  `;
+  commentTable.querySelectorAll("th[data-key]").forEach((header) => {
+    header.addEventListener("click", () => {
+      const key = header.dataset.key;
+      const column = columns.find((item) => item.key === key);
+      if (!column || !column.sortable) return;
+      state.commentSort = toggleSort(state.commentSort, key);
+      saveSort("comment-sort", state.commentSort);
+      renderCommentTable(rows);
+    });
+  });
+  commentTable.querySelectorAll('[data-action="reply-comment"]').forEach((button) => {
+    button.addEventListener("click", () => {
+      const commentId = String(button.dataset.commentId || "");
+      const advertiserId = Number(button.dataset.advertiserId || 0);
+      const row = visibleRows.find(
+        (item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId,
+      );
+      if (!row) return;
+      openCommentReplyModal(row);
+    });
+  });
+  commentTable.querySelectorAll('[data-action="hide-comment"]').forEach((button) => {
+    button.addEventListener("click", async () => {
+      const commentId = String(button.dataset.commentId || "");
+      const advertiserId = Number(button.dataset.advertiserId || 0);
+      const row = visibleRows.find(
+        (item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId,
+      );
       if (!row) return;
       try {
         await hideComment(row);
