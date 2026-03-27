@@ -2120,8 +2120,6 @@ function renderEmployeeTable(rows) {
         ${sorted.map((row) => {
           const entityName = breakdownEntityName(row);
           const subline = [
-            row.operator_username ? `账号 ${row.operator_username}` : "",
-            row.top_account_name ? `代表账户 ${row.top_account_name}` : "",
             row.top_material_name ? `代表素材 ${row.top_material_name}` : "",
           ].filter(Boolean);
           const refundRateText = row.refund_rate_1h_available ? formatPercent(row.refund_rate_1h) : "-";
@@ -2201,8 +2199,6 @@ function renderEmployeeTable(rows) {
           const entityName = breakdownEntityName(row);
           const materialCount = Number(row.material_count ?? row.plan_count ?? 0);
           const subline = [
-            row.operator_username ? `账号 ${row.operator_username}` : "",
-            row.top_account_name ? `代表账户 ${row.top_account_name}` : "",
             row.top_material_name ? `代表素材 ${row.top_material_name}` : "",
           ].filter(Boolean);
           return `
