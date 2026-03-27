@@ -3132,14 +3132,14 @@ class DashboardService:
         client: OceanEngineClient,
         advertiser_id: int,
         advertiser_name: str,
-        start_time: str,
-        end_time: str,
+        start_date: str,
+        end_date: str,
     ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         try:
             rows = client.list_comments(
                 advertiser_id=advertiser_id,
-                start_time=start_time,
-                end_time=end_time,
+                start_time=start_date,
+                end_time=end_date,
                 page_size=100,
             )
         except Exception as exc:  # noqa: BLE001
@@ -3314,6 +3314,8 @@ class DashboardService:
             self._comment_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
             return payload
 
+        comment_start_date = start_dt.strftime("%Y-%m-%d")
+        comment_end_date = end_dt.strftime("%Y-%m-%d")
         window_start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         window_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
         max_workers = max(1, min(int(config.get("comment_max_workers", 4) or 4), len(accounts)))
@@ -3326,8 +3328,8 @@ class DashboardService:
                     client,
                     int(account["advertiser_id"]),
                     str(account["advertiser_name"]),
-                    window_start,
-                    window_end,
+                    comment_start_date,
+                    comment_end_date,
                 ): account
                 for account in accounts
             }
