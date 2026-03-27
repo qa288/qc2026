@@ -781,43 +781,6 @@ function renderMarketingGoalBadge(row) {
   return `<span class="pill marketing-goal-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
 }
 
-function deprecatedPlanSourceTone(sourceText) {
-  if (sourceText === "鍩虹鎶曟斁") return "standard";
-  if (sourceText === "鍏ㄥ煙鎶曟斁") return "uni";
-  return "neutral";
-}
-
-function deprecatedRenderPlanSourceBadge(row) {
-  const text = row.plan_source_text || (String(row.plan_source || "").trim().toUpperCase() === "STANDARD" ? "鍩虹鎶曟斁" : "鍏ㄥ煙鎶曟斁");
-  const tone = planSourceTone(text);
-  const title = row.plan_source || text;
-  return `<span class="pill plan-source-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
-}
-
-function deprecatedEnrichPlanRow(row) {
-  const statCost = Number(row?.stat_cost || 0);
-  const totalPayAmount = Number(row?.total_pay_amount || 0);
-  const settledPayAmount = Number(row?.settled_pay_amount || 0);
-  const orderCount = Number(row?.order_count || 0);
-  const settledOrderCount = Number(row?.settled_order_count || 0);
-  const refundAmount1h = Number(row?.refund_amount_1h || 0);
-  return {
-    ...row,
-    plan_source_text: row?.plan_source_text || (String(row?.plan_source || "").trim().toUpperCase() === "STANDARD" ? "鍩虹鎶曟斁" : "鍏ㄥ煙鎶曟斁"),
-    marketing_goal_text: row?.marketing_goal_text || row?.marketing_goal_label || row?.marketing_goal || "-",
-    status_text: row?.status_text || `${row?.status || ""}/${row?.opt_status || ""}`,
-    settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
-    settled_order_count: settledOrderCount,
-    pay_order_cost: orderCount > 0 ? Number((statCost / orderCount).toFixed(2)) : Number(row?.pay_order_cost || 0),
-    settled_amount_rate: totalPayAmount > 0
-      ? Number((settledPayAmount / totalPayAmount * 100).toFixed(2))
-      : Number(row?.settled_amount_rate || 0),
-    refund_rate_1h: totalPayAmount > 0
-      ? Number((refundAmount1h / totalPayAmount * 100).toFixed(2))
-      : Number(row?.refund_rate_1h || 0),
-  };
-}
-
 function planSourceTone(source) {
   if (source === "STANDARD") return "standard";
   if (source === "UNI_PROMOTION") return "uni";
@@ -2856,152 +2819,6 @@ async function hideComment(row) {
   await refreshCommentSection(true);
 }
 
-/*
-function renderCommentTable(rows) {
-  if (!commentTable) return;
-  const query = String(commentSearch?.value || "").trim().toLowerCase();
-  const visibleRows = rows.filter((row) => {
-    const haystack = [
-      row.text,
-      row.comment_user_name,
-      row.comment_user_id,
-      row.item_title,
-      row.promotion_display_name,
-      row.material_display_name,
-      row.advertiser_name,
-    ].join(" ").toLowerCase();
-    return haystack.includes(query);
-  });
-  const columns = [
-    { key: "text", label: "璇勮鍐呭", sortable: true },
-    { key: "actions", label: "鎿嶄綔", sortable: false },
-    { key: "reply_status_text", label: "鍥炲鐘舵€?", sortable: true },
-    { key: "hide_status_text", label: "闅愯棌鐘舵€?", sortable: true },
-    { key: "level_type_text", label: "璇勮灞傜骇", sortable: true },
-    { key: "comment_user_name", label: "璇勮鐢ㄦ埛", sortable: true },
-    { key: "create_time", label: "璇勮鏃堕棿", sortable: true },
-    { key: "reply_count", label: "鐩稿叧鍥炲鏁?", sortable: true },
-    { key: "like_count", label: "鐐硅禐鏁?", sortable: true },
-    { key: "item_title", label: "瑙嗛鏍囬", sortable: true },
-    { key: "video_owner_aweme_id", label: "瑙嗛鎵€灞炴姈闊冲彿", sortable: true },
-    { key: "comment_type_text", label: "璇勮绫诲瀷", sortable: true },
-    { key: "promotion_display_name", label: "璇勮鏉ユ簮璁″垝", sortable: true },
-    { key: "material_display_name", label: "鍏宠仈瑙嗛绱犳潗", sortable: true },
-  ];
-  const sortedRows = sortRows(visibleRows, state.commentSort);
-  const totalRows = sortedRows.length;
-  const totalPages = Math.max(1, Math.ceil(totalRows / COMMENT_PAGE_SIZE));
-  const currentPage = Math.min(Math.max(Number(state.commentPage) || 1, 1), totalPages);
-  const pageStart = totalRows ? (currentPage - 1) * COMMENT_PAGE_SIZE : 0;
-  const pageRows = sortedRows.slice(pageStart, pageStart + COMMENT_PAGE_SIZE);
-  state.commentPage = currentPage;
-  commentTable.innerHTML = `
-    ${makeHeader(columns, state.commentSort, "comment-sort")}
-    <tbody>
-      ${pageRows.map((row) => `
-        <tr data-comment-id="${escapeHtml(row.comment_id)}" data-advertiser-id="${escapeHtml(row.advertiser_id)}">
-          <td>
-            <div class="cell-primary comment-cell-copy">${escapeHtml(row.text || "-")}</div>
-            <div class="cell-subline mono">
-              <span class="cell-subitem">CID ${escapeHtml(truncateMiddle(row.comment_id || "-", 8, 6))}</span>
-            </div>
-          </td>
-          <td>
-            <div class="comment-action-buttons">
-              <button
-                type="button"
-                class="button ghost compact"
-                data-action="reply-comment"
-                data-comment-id="${escapeHtml(row.comment_id)}"
-                data-advertiser-id="${escapeHtml(row.advertiser_id)}"
-              >鍥炲璇勮</button>
-              <button
-                type="button"
-                class="button ghost compact"
-                data-action="hide-comment"
-                data-comment-id="${escapeHtml(row.comment_id)}"
-                data-advertiser-id="${escapeHtml(row.advertiser_id)}"
-                ${String(row.hide_status || "").trim().toUpperCase() === "HIDE" ? "disabled" : ""}
-              >${String(row.hide_status || "").trim().toUpperCase() === "HIDE" ? "宸查殣钘? : "闅愯棌璇勮"}</button>
-            </div>
-          </td>
-          <td>${escapeHtml(row.reply_status_text || "-")}</td>
-          <td>${escapeHtml(row.hide_status_text || "-")}</td>
-          <td>${escapeHtml(row.level_type_text || "-")}</td>
-          <td>
-            <div class="cell-primary">${escapeHtml(row.comment_user_name || "鏈煡鐢ㄦ埛")}</div>
-            <div class="cell-subline mono">
-              <span class="cell-subitem">${escapeHtml(row.comment_user_id || "-")}</span>
-            </div>
-          </td>
-          <td class="mono">${escapeHtml(row.create_time || "-")}</td>
-          <td class="mono">${formatNumber(row.reply_count || 0)}</td>
-          <td class="mono">${formatNumber(row.like_count || 0)}</td>
-          <td>
-            <div class="cell-primary">${escapeHtml(row.item_title || "-")}</div>
-            <div class="cell-subline mono">
-              <span class="cell-subitem">VID ${escapeHtml(truncateMiddle(row.item_id || "-", 8, 6))}</span>
-            </div>
-          </td>
-          <td class="mono">${escapeHtml(row.video_owner_aweme_id || "-")}</td>
-          <td>${escapeHtml(row.comment_type_text || "-")}</td>
-          <td>
-            <div class="cell-primary">${escapeHtml(row.promotion_display_name || "-")}</div>
-            <div class="cell-subline mono">
-              <span class="cell-subitem">PID ${escapeHtml(truncateMiddle(row.promotion_id || "-", 8, 6))}</span>
-            </div>
-          </td>
-          <td>
-            <div class="cell-primary">${escapeHtml(row.material_display_name || "-")}</div>
-            <div class="cell-subline mono">
-              <span class="cell-subitem">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
-            </div>
-          </td>
-        </tr>
-      `).join("")}
-    </tbody>
-  `;
-  commentTable.querySelectorAll("th[data-key]").forEach((header) => {
-    header.addEventListener("click", () => {
-      const key = header.dataset.key;
-      const column = columns.find((item) => item.key === key);
-      if (!column || !column.sortable) return;
-      state.commentSort = toggleSort(state.commentSort, key);
-      saveSort("comment-sort", state.commentSort);
-      renderCommentTable(rows);
-    });
-  });
-  commentTable.querySelectorAll('[data-action="reply-comment"]').forEach((button) => {
-    button.addEventListener("click", () => {
-      const commentId = String(button.dataset.commentId || "");
-      const advertiserId = Number(button.dataset.advertiserId || 0);
-      const row = visibleRows.find((item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId);
-      if (!row) return;
-      openCommentReplyModal(row);
-    });
-  });
-  commentTable.querySelectorAll('[data-action="hide-comment"]').forEach((button) => {
-    button.addEventListener("click", async () => {
-      const commentId = String(button.dataset.commentId || "");
-      const advertiserId = Number(button.dataset.advertiserId || 0);
-      const row = visibleRows.find((item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId);
-      if (!row) return;
-      try {
-        await hideComment(row);
-      } catch (error) {
-        window.alert(error.message || "隐藏评论失败");
-      }
-    });
-  });
-  renderCommentPager(
-    totalRows,
-    currentPage,
-    totalPages,
-    totalRows ? pageStart + 1 : 0,
-    pageStart + pageRows.length,
-  );
-}
-*/
 
 function renderCommentTable(rows) {
   if (!commentTable) return;
@@ -4866,8 +4683,8 @@ async function refreshCommentSection(force = false) {
   const commentCount = Array.isArray(payload?.items) ? payload.items.length : Number(meta.comment_count || 0);
   const accountCount = Array.isArray(payload?.accounts) ? payload.accounts.length : Number(meta.account_count || 0);
   const visibleCount = Number(meta.visible_count || 0);
-  const visibleSuffix = visibleCount > 0 && visibleCount !== commentCount ? ` 路 鍙 ${formatNumber(visibleCount)} 鏉?` : "";
-  commentSyncMeta.textContent = `${rangeText} 路 璇勮 ${formatNumber(commentCount)} 鏉?路 璐︽埛 ${formatNumber(accountCount)} 涓?路 閿欒 ${formatNumber(meta.error_count || 0)}${visibleSuffix}`;
+  const visibleSuffix = visibleCount > 0 && visibleCount !== commentCount ? ` · 可见 ${formatNumber(visibleCount)} 条` : "";
+  commentSyncMeta.textContent = `${rangeText} · 评论 ${formatNumber(commentCount)} 条 · 账户 ${formatNumber(accountCount)} 个 · 错误 ${formatNumber(meta.error_count || 0)}${visibleSuffix}`;
 }
 
 async function applyQuickRange(sectionKey, mode) {

@@ -942,6 +942,11 @@ body {
 
 .toolbar-inline-comment {
   grid-template-columns: minmax(0, 1fr) minmax(360px, 540px);
+  align-items: start;
+}
+
+.toolbar-inline-comment .range-filter-group {
+  align-self: start;
 }
 
 .toolbar-secondary {
@@ -1144,6 +1149,7 @@ body {
 
 .toolbar-inline-comment .toolbar-search-actions {
   justify-self: stretch;
+  align-self: start;
   max-width: 540px;
   flex-wrap: wrap;
   row-gap: 6px;
