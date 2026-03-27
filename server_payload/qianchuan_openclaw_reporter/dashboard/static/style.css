@@ -941,7 +941,7 @@ body {
 }
 
 .toolbar-inline-comment {
-  grid-template-columns: minmax(0, 1fr) minmax(520px, 760px);
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 540px);
 }
 
 .toolbar-secondary {
@@ -1144,16 +1144,25 @@ body {
 
 .toolbar-inline-comment .toolbar-search-actions {
   justify-self: stretch;
-  max-width: 760px;
+  max-width: 540px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  align-content: start;
 }
 
 .toolbar-inline-comment .toolbar-search-actions > .search-input {
+  flex: 1 1 100%;
   min-width: 0;
 }
 
 .toolbar-inline-comment .toolbar-search-actions > .select-input {
-  flex: 0 0 176px;
-  min-width: 176px;
+  flex: 1 1 168px;
+  min-width: 0;
+}
+
+.toolbar-inline-comment .toolbar-search-actions > .button {
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .toolbar-inline-triple > .select-input,
