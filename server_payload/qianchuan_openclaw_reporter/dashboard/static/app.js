@@ -1263,7 +1263,10 @@ function uploadScopeLabel(scope) {
 function normalizeUploadJobNote(note) {
   const text = String(note || "").trim();
   if (!text) return "--";
-  if (text.includes("/local/file/video/upload/ permission")) {
+  if (
+    text.includes("permission") &&
+    (text.includes("/local/file/video/upload/") || text.includes("/file/video/ad/"))
+  ) {
     return "当前应用还没有该广告主的视频上传权限，请先补齐应用授权或接口权限。";
   }
   return text;

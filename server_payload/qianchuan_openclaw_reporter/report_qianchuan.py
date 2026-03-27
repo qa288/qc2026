@@ -44,7 +44,7 @@ PLAN_MATERIAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_pro
 PLAN_MATERIAL_ADD_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/material/add/"
 VIDEO_USER_LOSE_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/video_user_lose/get/"
 VIDEO_ORIGINAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/file/video/original/get/"
-LOCAL_VIDEO_UPLOAD_URL = "https://api.oceanengine.com/open_api/v3.0/local/file/video/upload/"
+VIDEO_AD_UPLOAD_URL = "https://api.oceanengine.com/open_api/2/file/video/ad/"
 COMMENT_LIST_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/get/"
 COMMENT_REPLY_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/reply/"
 COMMENT_HIDE_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/hide/"
@@ -1109,8 +1109,9 @@ class OceanEngineClient:
         signature = str(video_signature or hashlib.md5(raw).hexdigest())
         detected_type = mime_type or mimetypes.guess_type(file_path.name)[0] or "video/mp4"
         fields = {
+            "advertiser_id": int(advertiser_id),
             "filename": sanitize_material_title(material_name, max_length=255),
-            "local_account_id": int(advertiser_id),
+            "upload_type": "UPLOAD_BY_FILE",
             "video_signature": signature,
         }
         files = [
@@ -1122,7 +1123,7 @@ class OceanEngineClient:
             )
         ]
         response = post_api_multipart_with_retries(
-            LOCAL_VIDEO_UPLOAD_URL,
+            VIDEO_AD_UPLOAD_URL,
             access_token,
             fields,
             files,
@@ -1130,6 +1131,26 @@ class OceanEngineClient:
         )
         if response.get("code") != 0:
             raise ApiError(f"upload local video failed: {response}")
+        data = response.get("data")
+        normalized_data = dict(data) if isinstance(data, dict) else {}
+        material_id = normalized_data.get("material_id")
+        if material_id is None:
+            material_id = normalized_data.get("materialId")
+        if material_id not in (None, ""):
+            normalized_data["material_id"] = str(material_id)
+        video_id = normalized_data.get("video_id")
+        if video_id is None:
+            video_id = normalized_data.get("videoId")
+        if video_id not in (None, ""):
+            normalized_data["video_id"] = str(video_id)
+        video_url = normalized_data.get("video_url")
+        if video_url is None:
+            video_url = normalized_data.get("videoUrl")
+        if video_url not in (None, ""):
+            normalized_data["video_url"] = str(video_url)
+        if normalized_data:
+            response = dict(response)
+            response["data"] = normalized_data
         return response
 
     def add_plan_material(
