@@ -72,6 +72,12 @@ from dashboard.upload_access import UploadAccess  # noqa: E402
 from dashboard.user_access import UserAccess  # noqa: E402
 from dashboard.user_routes import register_user_routes  # noqa: E402
 from dashboard.user_schemas import AppUserPayload, UserKeywordPayload, UserScopePayload  # noqa: E402
+from dashboard.video_probe import (  # noqa: E402
+    VideoProbeError,
+    format_video_probe_summary,
+    probe_video_file,
+    validate_video_probe_for_upload,
+)
 
 
 APP_NAME = settings.app_name
@@ -1711,6 +1717,98 @@ class DashboardService:
                 chosen.get("material_url"),
             ),
         }
+
+    @classmethod
+    def _normalize_image_material_payload(cls, payload: Any) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        if isinstance(payload, dict):
+            candidates = [payload]
+        elif isinstance(payload, list):
+            candidates = [item for item in payload if isinstance(item, dict)]
+        normalized: list[dict[str, Any]] = []
+        for item in candidates:
+            image_ids: list[str] = []
+            raw_image_ids = item.get("image_ids")
+            if isinstance(raw_image_ids, list):
+                for value in raw_image_ids:
+                    text = str(value or "").strip()
+                    if text and text not in image_ids:
+                        image_ids.append(text)
+            single_image_id = cls._first_text(item.get("image_id"), item.get("imageId"))
+            if single_image_id and single_image_id not in image_ids:
+                image_ids.append(single_image_id)
+            if not image_ids:
+                nested_image = cls._json_object(item.get("image_material"))
+                nested_image_id = cls._first_text(nested_image.get("image_id"), nested_image.get("imageId"))
+                if nested_image_id:
+                    image_ids.append(nested_image_id)
+            if not image_ids:
+                continue
+            normalized_item: dict[str, Any] = {"image_ids": image_ids}
+            image_mode = cls._first_text(item.get("image_mode"), item.get("imageMode"))
+            if image_mode:
+                normalized_item["image_mode"] = image_mode
+            normalized.append(normalized_item)
+        return normalized
+
+    @classmethod
+    def _extract_plan_image_material(cls, plan_context: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_payload = cls._json_object(plan_context.get("raw_json"))
+        if not raw_payload:
+            return []
+        product_id = cls._first_text(plan_context.get("product_id"))
+        creative_list = raw_payload.get("multi_product_creative_list")
+        if isinstance(creative_list, list):
+            entries = [item for item in creative_list if isinstance(item, dict)]
+            if product_id:
+                matched_entries = [
+                    item for item in entries
+                    if cls._first_text(item.get("product_id")) == product_id
+                ]
+                if matched_entries:
+                    entries = matched_entries
+            for item in entries:
+                normalized = cls._normalize_image_material_payload(item.get("image_material"))
+                if normalized:
+                    return normalized
+        programmatic = cls._json_object(raw_payload.get("programmatic_creative_media_list"))
+        if programmatic:
+            return cls._normalize_image_material_payload(programmatic.get("image_material"))
+        return []
+
+    @staticmethod
+    def _append_upload_probe_summary(message: str, probe_summary: str) -> str:
+        base = str(message or "").strip()
+        summary = str(probe_summary or "").strip()
+        if not summary:
+            return base
+        if summary in base:
+            return base
+        if not base:
+            return summary
+        return f"{base}; {summary}"
+
+    @classmethod
+    def _probe_upload_video(cls, file_row: dict[str, Any], file_path: Path) -> tuple[str, str]:
+        material_name = str(file_row.get("original_name") or file_row.get("stored_name") or file_path.name)
+        try:
+            probe_result = probe_video_file(file_path)
+        except VideoProbeError as exc:
+            summary = f"\u89c6\u9891\u5143\u6570\u636e\u63a2\u6d4b\u5931\u8d25: {exc}"
+            print(f"[upload-video-probe] {material_name} | {summary}", file=sys.stderr)
+            return summary, ""
+        summary = format_video_probe_summary(probe_result)
+        print(f"[upload-video-probe] {material_name} | {summary}", file=sys.stderr)
+        problems = validate_video_probe_for_upload(probe_result)
+        if not problems:
+            return summary, ""
+        failure_message = (
+            "\u89c6\u9891\u5143\u6570\u636e\u9884\u68c0\u5931\u8d25: "
+            + "; ".join(problems)
+            + ". "
+            + summary
+        )
+        return summary, failure_message
 
     @classmethod
     def _normalize_material_row(
@@ -3613,6 +3711,7 @@ class DashboardService:
                     self._recompute_material_upload_job_locked(conn, int(job_id))
                 continue
 
+            probe_summary, preflight_failure_message = self._probe_upload_video(file_row, file_path)
             success_advertisers = 0
             failed_advertisers = 0
             first_asset: dict[str, str] | None = None
@@ -3649,6 +3748,21 @@ class DashboardService:
                             video_id=asset["video_id"],
                             video_url=asset["video_url"],
                             message=reuse_message,
+                        )
+                    continue
+                if preflight_failure_message:
+                    failed_advertisers += 1
+                    message = preflight_failure_message
+                    file_errors.append(f"{advertiser_name or advertiser_id}: {message}")
+                    with self.db() as conn:
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "failed",
+                            message=message,
                         )
                     continue
                 try:
@@ -3694,7 +3808,7 @@ class DashboardService:
                         )
                 except Exception as exc:
                     failed_advertisers += 1
-                    message = str(exc)
+                    message = self._append_upload_probe_summary(str(exc), probe_summary)
                     file_errors.append(f"{advertiser_name or advertiser_id}: {message}")
                     with self.db() as conn:
                         self._upsert_material_upload_file_asset_locked(
@@ -3711,6 +3825,11 @@ class DashboardService:
             if success_advertisers > 0 and failed_advertisers > 0:
                 file_status = "partial"
             file_message = upload_success_message if file_status == "success" else "?".join(file_errors[:3]) or "\u4e0a\u4f20\u5931\u8d25\u3002"
+            if probe_summary and (
+                file_status != "success"
+                or not probe_summary.startswith("\u89c6\u9891\u5143\u6570\u636e\u63a2\u6d4b\u5931\u8d25")
+            ):
+                file_message = self._append_upload_probe_summary(file_message, probe_summary)
             with self.db() as conn:
                 conn.execute(
                     """
@@ -3782,6 +3901,7 @@ class DashboardService:
             success_count = 0
             failed_count = 0
             bind_errors: list[str] = []
+            reused_image_material = self._extract_plan_image_material(context)
             for file_row in candidate_file_rows:
                 file_id = int(file_row["id"])
                 asset = file_assets.get((file_id, advertiser_id))
@@ -3806,6 +3926,7 @@ class DashboardService:
                         video_id=str(asset.get("video_id") or ""),
                         marketing_goal=str(context.get("marketing_goal") or ""),
                         product_id=str(context.get("product_id") or ""),
+                        image_material=reused_image_material,
                     )
                     success_count += 1
                     with self.db() as conn:

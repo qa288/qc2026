@@ -187,7 +187,7 @@ class UploadAccess:
             rows = conn.execute(
                 f"""
                 SELECT p.ad_id, p.advertiser_id, p.advertiser_name, p.ad_name, p.product_id, p.product_name, p.anchor_name,
-                       p.marketing_goal, p.plan_source, p.status, p.opt_status, p.snapshot_time
+                       p.marketing_goal, p.plan_source, p.status, p.opt_status, p.snapshot_time, p.raw_json
                 FROM plan_snapshots p
                 JOIN (
                     SELECT ad_id, MAX(snapshot_time) AS latest_snapshot_time

@@ -1161,24 +1161,31 @@ class OceanEngineClient:
         video_id: str,
         marketing_goal: str = "",
         product_id: str = "",
+        image_material: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         access_token = self.get_access_token()
         title = sanitize_material_title(material_title)
         video_material = [{"video_id": str(video_id)}]
         title_material = [{"title": title}]
+        normalized_image_material = [
+            dict(item)
+            for item in (image_material or [])
+            if isinstance(item, dict)
+        ]
         payload: dict[str, Any] = {
             "advertiser_id": int(advertiser_id),
             "ad_id": int(ad_id),
         }
         product_text = str(product_id or "").strip()
         if str(marketing_goal or "").strip() == "VIDEO_PROM_GOODS" and product_text.isdigit():
-            payload["multi_product_creative_list"] = [
-                {
-                    "product_id": int(product_text),
-                    "title_material": title_material,
-                    "video_material": video_material,
-                }
-            ]
+            creative_payload: dict[str, Any] = {
+                "product_id": int(product_text),
+                "title_material": title_material,
+                "video_material": video_material,
+            }
+            if normalized_image_material:
+                creative_payload["image_material"] = normalized_image_material
+            payload["multi_product_creative_list"] = [creative_payload]
         else:
             payload["programmatic_creative_media_list"] = {
                 "title_material": title_material,
