@@ -225,7 +225,33 @@ class UploadAccess:
                 """,
                 normalized_ids,
             ).fetchall()
-        return {int(row["ad_id"]): dict(row) for row in rows}
+            context_map = {int(row["ad_id"]): dict(row) for row in rows}
+            if context_map and self._column_exists_locked(conn, "plan_detail_snapshots", "raw_json"):
+                detail_rows = conn.execute(
+                    f"""
+                    SELECT d.ad_id, d.raw_json
+                    FROM plan_detail_snapshots d
+                    JOIN (
+                        SELECT ad_id, MAX(snapshot_time) AS latest_snapshot_time
+                        FROM plan_detail_snapshots
+                        WHERE ad_id IN ({placeholders})
+                        GROUP BY ad_id
+                    ) latest
+                      ON latest.ad_id = d.ad_id
+                     AND latest.latest_snapshot_time = d.snapshot_time
+                    """,
+                    normalized_ids,
+                ).fetchall()
+                for row in detail_rows:
+                    ad_id = int(row["ad_id"])
+                    if ad_id not in context_map:
+                        continue
+                    detail_raw_json = str(row["raw_json"] or "").strip()
+                    if detail_raw_json:
+                        context_map[ad_id]["raw_json"] = detail_raw_json
+            for item in context_map.values():
+                item["raw_json"] = str(item.get("raw_json") or "{}")
+        return context_map
 
     def find_advertiser_material_asset_locked(self, conn: Any, advertiser_id: int, file_sha256: str) -> dict[str, Any] | None:
         row = conn.execute(

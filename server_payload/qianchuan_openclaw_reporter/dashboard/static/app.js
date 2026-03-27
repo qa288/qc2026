@@ -2755,16 +2755,25 @@ function renderTeamMaterialPager(totalRows, currentPage, totalPages, startIndex,
 function renderTeamMaterialTable(rows) {
   if (!teamMaterialTable) return;
   const enrichedRows = rows.map((row) => enrichMaterialRow(row));
-  if (!["stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.teamMaterialSort.key || ""))) {
+  if (!["material_name", "stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.teamMaterialSort.key || ""))) {
     state.teamMaterialSort = { key: "stat_cost", dir: "desc" };
     saveSort("team-material-sort", state.teamMaterialSort);
   }
   const query = teamMaterialSearch?.value.trim().toLowerCase() || "";
   const visibleRows = enrichedRows.filter((row) => {
-    const haystack = [row.top_account_name, row.top_plan_name, row.top_anchor_name].join(" ").toLowerCase();
+    const haystack = [
+      row.material_name,
+      row.material_id,
+      row.video_id,
+      row.top_account_name,
+      row.top_plan_name,
+      row.top_anchor_name,
+    ].join(" ").toLowerCase();
     return haystack.includes(query);
   });
   const columns = [
+    { key: "material_name", label: "素材", sortable: true },
+    { key: "preview", label: "预览", sortable: false },
     { key: "stat_cost", label: "消耗", sortable: true },
     { key: "top_account_name", label: "归属账户", sortable: true },
     { key: "top_plan_name", label: "归属计划", sortable: true },
@@ -2782,6 +2791,23 @@ function renderTeamMaterialTable(rows) {
     <tbody>
       ${pageRows.map((row) => `
         <tr>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.material_name || "未命名素材")}</div>
+            <div class="cell-subline">
+              <span class="cell-subitem">MID ${escapeHtml(row.material_id || "--")}</span>
+              <span class="cell-subitem">VID ${escapeHtml(row.video_id || "--")}</span>
+            </div>
+          </td>
+          <td>
+            ${canPreviewMaterial(row)
+              ? `<button
+                  type="button"
+                  class="button ghost compact"
+                  data-action="open-material-preview"
+                  data-material-key="${escapeHtml(row.material_key)}"
+                >查看预览</button>`
+              : '<span class="material-preview-placeholder">暂无</span>'}
+          </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td>${escapeHtml(row.top_account_name || "--")}</td>
           <td>${escapeHtml(row.top_plan_name || "--")}</td>
@@ -2800,6 +2826,7 @@ function renderTeamMaterialTable(rows) {
       renderTeamMaterialTable(enrichedRows);
     });
   });
+  renderTeamMaterialInteractions(pageRows);
   renderTeamMaterialPager(
     totalRows,
     currentPage,
@@ -2807,6 +2834,38 @@ function renderTeamMaterialTable(rows) {
     totalRows ? pageStart + 1 : 0,
     pageStart + pageRows.length,
   );
+}
+
+function renderTeamMaterialInteractions(rows) {
+  if (!teamMaterialTable) return;
+  teamMaterialTable.querySelectorAll('[data-action="open-material-preview"]').forEach((button) => {
+    const materialKey = String(button.dataset.materialKey || "");
+    const row = rows.find((item) => item.material_key === materialKey);
+    if (!row) return;
+    const replacement = materialPreviewTriggerMarkup(row);
+    if (replacement.startsWith("<span")) {
+      button.outerHTML = replacement;
+      return;
+    }
+    if (String(row.cover_url || "").trim()) {
+      button.outerHTML = replacement;
+    }
+  });
+  teamMaterialTable.querySelectorAll('[data-action="open-material-preview"]').forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const materialKey = String(button.dataset.materialKey || "");
+      if (!materialKey) return;
+      openMaterialPreview(materialKey);
+    });
+  });
+  teamMaterialTable.querySelectorAll(".material-preview-thumb").forEach((thumb) => {
+    thumb.addEventListener("error", () => {
+      const trigger = thumb.closest(".material-preview-trigger");
+      if (!trigger) return;
+      downgradeMaterialPreviewTrigger(trigger);
+    }, { once: true });
+  });
 }
 
 function fillCommentAccountFilter(accounts) {
@@ -3820,8 +3879,16 @@ function currentMaterialRows() {
   return (materialRangePayload(sectionFilter("material"))?.items || []).map((row) => enrichMaterialRow(row));
 }
 
+function currentTeamMaterialRows() {
+  return (teamMaterialRangePayload(sectionFilter("teamMaterial"))?.items || []).map((row) => enrichMaterialRow(row));
+}
+
 function selectedMaterialRow(materialKey) {
-  return currentMaterialRows().find((item) => item.material_key === materialKey) || null;
+  const key = String(materialKey || "").trim();
+  if (!key) return null;
+  return currentMaterialRows().find((item) => item.material_key === key)
+    || currentTeamMaterialRows().find((item) => item.material_key === key)
+    || null;
 }
 
 function canPreviewMaterial(row) {
@@ -4441,7 +4508,7 @@ function applyRoleViewPolicy() {
     materialSearch.placeholder = operator ? "搜索素材名称" : "搜索素材";
   }
   if (teamMaterialSearch) {
-    teamMaterialSearch.placeholder = "搜索归属账户 / 计划 / 达人";
+    teamMaterialSearch.placeholder = "搜索素材 / 归属账户 / 计划 / 达人";
   }
   if (heroCopy) {
     heroCopy.textContent = admin

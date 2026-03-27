@@ -1777,6 +1777,76 @@ class DashboardService:
             return cls._normalize_image_material_payload(programmatic.get("image_material"))
         return []
 
+    @classmethod
+    def _extract_plan_video_material_defaults(cls, plan_context: dict[str, Any]) -> dict[str, str]:
+        raw_payload = cls._json_object(plan_context.get("raw_json"))
+        if not raw_payload:
+            return {}
+        product_id = cls._first_text(plan_context.get("product_id"))
+        candidate_entries: list[dict[str, Any]] = []
+        creative_list = raw_payload.get("multi_product_creative_list")
+        if isinstance(creative_list, list):
+            entries = [item for item in creative_list if isinstance(item, dict)]
+            if product_id:
+                matched_entries = [
+                    item for item in entries
+                    if cls._first_text(item.get("product_id")) == product_id
+                ]
+                if matched_entries:
+                    entries = matched_entries
+            candidate_entries.extend(entries)
+        programmatic = cls._json_object(raw_payload.get("programmatic_creative_media_list"))
+        if programmatic:
+            candidate_entries.append(programmatic)
+        for item in candidate_entries:
+            video_material = item.get("video_material")
+            if not isinstance(video_material, list):
+                continue
+            for video_item in video_material:
+                if not isinstance(video_item, dict):
+                    continue
+                image_mode = cls._first_text(video_item.get("image_mode"), video_item.get("imageMode"))
+                if image_mode:
+                    return {"image_mode": image_mode}
+        return {}
+
+    def _build_cover_image_material(
+        self,
+        client: OceanEngineClient,
+        advertiser_id: int,
+        asset: dict[str, Any],
+        plan_context: dict[str, Any],
+        material_title: str,
+        cache: dict[tuple[int, str], list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        video_id = str(asset.get("video_id") or "").strip()
+        if not video_id:
+            return []
+        cache_key = (int(advertiser_id), video_id)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return [dict(item) for item in cached]
+        video_info = client.get_uploaded_video(advertiser_id, video_id)
+        poster_url = self._first_text(video_info.get("poster_url"), video_info.get("posterUrl"))
+        if not poster_url:
+            return []
+        image_upload = client.upload_image_by_url(
+            advertiser_id=advertiser_id,
+            material_name=f"{material_title}-cover",
+            image_url=poster_url,
+        )
+        data = image_upload.get("data") or {}
+        image_id = self._first_text(data.get("image_id"), data.get("id"))
+        if not image_id:
+            return []
+        image_material: list[dict[str, Any]] = [{"image_ids": [image_id]}]
+        defaults = self._extract_plan_video_material_defaults(plan_context)
+        image_mode = str(defaults.get("image_mode") or "").strip()
+        if image_mode:
+            image_material[0]["image_mode"] = image_mode
+        cache[cache_key] = [dict(item) for item in image_material]
+        return image_material
+
     @staticmethod
     def _append_upload_probe_summary(message: str, probe_summary: str) -> str:
         base = str(message or "").strip()
@@ -3677,6 +3747,7 @@ class DashboardService:
                 file_advertiser_id_map[int(file_row["id"])] = set(all_advertiser_ids)
 
         file_assets: dict[tuple[int, int], dict[str, str]] = {}
+        generated_image_material_cache: dict[tuple[int, str], list[dict[str, Any]]] = {}
         for file_row in file_rows:
             file_id = int(file_row["id"])
             file_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
@@ -3920,14 +3991,29 @@ class DashboardService:
                         )
                     continue
                 try:
+                    material_title = self._material_title_from_filename(str(file_row.get("original_name") or ""))
+                    bind_image_material = [dict(item) for item in reused_image_material]
+                    if not bind_image_material and str(context.get("marketing_goal") or "").strip() == "VIDEO_PROM_GOODS":
+                        bind_image_material = self._build_cover_image_material(
+                            client,
+                            advertiser_id,
+                            asset,
+                            context,
+                            material_title,
+                            generated_image_material_cache,
+                        )
+                        if not bind_image_material:
+                            raise RuntimeError(
+                                "VIDEO_PROM_GOODS 计划缺少可用图片素材，且无法从上传视频生成封面图片。"
+                            )
                     client.add_plan_material(
                         advertiser_id=advertiser_id,
                         ad_id=ad_id,
-                        material_title=self._material_title_from_filename(str(file_row.get("original_name") or "")),
+                        material_title=material_title,
                         video_id=str(asset.get("video_id") or ""),
                         marketing_goal=str(context.get("marketing_goal") or ""),
                         product_id=str(context.get("product_id") or ""),
-                        image_material=reused_image_material,
+                        image_material=bind_image_material,
                     )
                     success_count += 1
                     with self.db() as conn:

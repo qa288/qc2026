@@ -45,6 +45,8 @@ PLAN_MATERIAL_ADD_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni
 VIDEO_USER_LOSE_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/video_user_lose/get/"
 VIDEO_ORIGINAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/file/video/original/get/"
 VIDEO_AD_UPLOAD_URL = "https://api.oceanengine.com/open_api/2/file/video/ad/"
+VIDEO_AD_GET_URL = "https://api.oceanengine.com/open_api/2/file/video/ad/get/"
+IMAGE_AD_UPLOAD_URL = "https://api.oceanengine.com/open_api/2/file/image/ad/"
 COMMENT_LIST_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/get/"
 COMMENT_REPLY_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/reply/"
 COMMENT_HIDE_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/hide/"
@@ -1148,6 +1150,100 @@ class OceanEngineClient:
             video_url = normalized_data.get("videoUrl")
         if video_url not in (None, ""):
             normalized_data["video_url"] = str(video_url)
+        if normalized_data:
+            response = dict(response)
+            response["data"] = normalized_data
+        return response
+
+    def get_uploaded_videos(self, advertiser_id: int, video_ids: list[str]) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        normalized_ids = [str(item).strip() for item in video_ids if str(item).strip()]
+        if not normalized_ids:
+            raise ValueError("video_ids is required")
+        params = {
+            "advertiser_id": int(advertiser_id),
+            "video_ids": CsvParam(normalized_ids),
+        }
+        response = get_json_with_retries(VIDEO_AD_GET_URL, access_token, params)
+        if response.get("code") != 0:
+            raise ApiError(f"get uploaded videos failed: {response}")
+        return response
+
+    def get_uploaded_video(
+        self,
+        advertiser_id: int,
+        video_id: str,
+        attempts: int = 4,
+        base_delay: float = 1.0,
+    ) -> dict[str, Any]:
+        normalized_video_id = str(video_id or "").strip()
+        if not normalized_video_id:
+            raise ValueError("video_id is required")
+        for attempt in range(1, attempts + 1):
+            response = self.get_uploaded_videos(advertiser_id, [normalized_video_id])
+            data = response.get("data") or {}
+            rows = data.get("list") or []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                normalized_row = dict(row)
+                resolved_video_id = normalized_row.get("id")
+                if resolved_video_id not in (None, ""):
+                    normalized_row["video_id"] = str(resolved_video_id)
+                poster_url = normalized_row.get("poster_url")
+                if poster_url is None:
+                    poster_url = normalized_row.get("posterUrl")
+                if poster_url not in (None, ""):
+                    normalized_row["poster_url"] = str(poster_url)
+                if str(normalized_row.get("video_id") or "").strip() == normalized_video_id:
+                    return normalized_row
+            if attempt < attempts:
+                time.sleep(base_delay * (2 ** (attempt - 1)))
+        raise ApiError(f"get uploaded video failed: not found for video_id={normalized_video_id}")
+
+    def upload_image_by_url(
+        self,
+        advertiser_id: int,
+        material_name: str,
+        image_url: str,
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        image_url_text = str(image_url or "").strip()
+        if not image_url_text:
+            raise ValueError("image_url is required")
+        fields = {
+            "advertiser_id": int(advertiser_id),
+            "filename": sanitize_material_title(material_name, max_length=55),
+            "upload_type": "UPLOAD_BY_URL",
+            "image_url": image_url_text,
+        }
+        response = post_api_multipart_with_retries(
+            IMAGE_AD_UPLOAD_URL,
+            access_token,
+            fields,
+            [],
+            timeout=60,
+        )
+        if response.get("code") != 0:
+            raise ApiError(f"upload image by url failed: {response}")
+        data = response.get("data")
+        normalized_data = dict(data) if isinstance(data, dict) else {}
+        image_id = normalized_data.get("id")
+        if image_id is None:
+            image_id = normalized_data.get("image_id")
+        if image_id not in (None, ""):
+            normalized_data["image_id"] = str(image_id)
+            normalized_data["id"] = str(image_id)
+        material_id = normalized_data.get("material_id")
+        if material_id is None:
+            material_id = normalized_data.get("materialId")
+        if material_id not in (None, ""):
+            normalized_data["material_id"] = str(material_id)
+        image_asset_url = normalized_data.get("url")
+        if image_asset_url is None:
+            image_asset_url = normalized_data.get("image_url")
+        if image_asset_url not in (None, ""):
+            normalized_data["url"] = str(image_asset_url)
         if normalized_data:
             response = dict(response)
             response["data"] = normalized_data
