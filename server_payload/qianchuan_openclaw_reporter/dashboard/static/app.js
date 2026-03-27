@@ -3005,6 +3005,7 @@ function renderCommentTable(rows) {
 
 function renderCommentTable(rows) {
   if (!commentTable) return;
+  commentTable.classList.add("comment-table");
   const query = String(commentSearch?.value || "").trim().toLowerCase();
   const visibleRows = rows.filter((row) => {
     const haystack = [
@@ -3034,6 +3035,22 @@ function renderCommentTable(rows) {
     { key: "promotion_display_name", label: "评论来源计划", sortable: true },
     { key: "material_display_name", label: "关联视频素材", sortable: true },
   ];
+  const columnWidths = [
+    "240px",
+    "112px",
+    "84px",
+    "84px",
+    "84px",
+    "160px",
+    "150px",
+    "76px",
+    "76px",
+    "300px",
+    "112px",
+    "96px",
+    "160px",
+    "240px",
+  ];
   const sortedRows = sortRows(visibleRows, state.commentSort);
   const totalRows = sortedRows.length;
   const totalPages = Math.max(1, Math.ceil(totalRows / COMMENT_PAGE_SIZE));
@@ -3042,6 +3059,9 @@ function renderCommentTable(rows) {
   const pageRows = sortedRows.slice(pageStart, pageStart + COMMENT_PAGE_SIZE);
   state.commentPage = currentPage;
   commentTable.innerHTML = `
+    <colgroup>
+      ${columnWidths.map((width) => `<col style="width: ${width};">`).join("")}
+    </colgroup>
     ${makeHeader(columns, state.commentSort, "comment-sort")}
     <tbody>
       ${pageRows.map((row) => `
