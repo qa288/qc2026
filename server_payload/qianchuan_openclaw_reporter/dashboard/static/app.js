@@ -881,6 +881,86 @@ function enrichOperatorRow(row) {
   };
 }
 
+function buildAccountMetricsFromPlans(plans) {
+  const metrics = new Map();
+  plans.map((row) => enrichPlanRow(row)).forEach((row) => {
+    const advertiserId = Number(row?.advertiser_id || 0);
+    if (!advertiserId) return;
+    const group = metrics.get(advertiserId) || {
+      advertiser_id: advertiserId,
+      stat_cost: 0,
+      pay_amount: 0,
+      total_pay_amount: 0,
+      settled_pay_amount: 0,
+      order_count: 0,
+      settled_order_count: 0,
+      refund_amount_1h: 0,
+      plan_count: 0,
+      top_plan_name: "",
+      top_plan_orders: -1,
+      top_plan_pay_amount: -1,
+    };
+    const statCost = Number(row?.stat_cost || 0);
+    const payAmount = Number(row?.pay_amount || 0);
+    const totalPayAmount = Number(row?.total_pay_amount || 0);
+    const settledPayAmount = Number(row?.settled_pay_amount || 0);
+    const orderCount = Number(row?.order_count || 0);
+    const settledOrderCount = Number(row?.settled_order_count || 0);
+    const refundAmount1h = Number(row?.refund_amount_1h || 0);
+    group.stat_cost = Number((group.stat_cost + statCost).toFixed(2));
+    group.pay_amount = Number((group.pay_amount + payAmount).toFixed(2));
+    group.total_pay_amount = Number((group.total_pay_amount + totalPayAmount).toFixed(2));
+    group.settled_pay_amount = Number((group.settled_pay_amount + settledPayAmount).toFixed(2));
+    group.order_count += orderCount;
+    group.settled_order_count += settledOrderCount;
+    group.refund_amount_1h = Number((group.refund_amount_1h + refundAmount1h).toFixed(2));
+    group.plan_count += 1;
+    if (
+      orderCount > group.top_plan_orders
+      || (orderCount === group.top_plan_orders && payAmount > group.top_plan_pay_amount)
+    ) {
+      group.top_plan_name = String(row?.ad_name || "").trim();
+      group.top_plan_orders = orderCount;
+      group.top_plan_pay_amount = payAmount;
+    }
+    metrics.set(advertiserId, group);
+  });
+  return metrics;
+}
+
+function enrichAccountRow(row, accountMetrics) {
+  const advertiserId = Number(row?.advertiser_id || 0);
+  const metrics = accountMetrics.get(advertiserId) || {};
+  const statCost = Number(metrics.stat_cost ?? row?.stat_cost || 0);
+  const payAmount = Number(metrics.pay_amount ?? row?.pay_amount || 0);
+  const totalPayAmount = Number(metrics.total_pay_amount || 0);
+  const settledPayAmount = Number(metrics.settled_pay_amount || 0);
+  const orderCount = Number(metrics.order_count ?? row?.order_count || 0);
+  const settledOrderCount = Number(metrics.settled_order_count || 0);
+  const refundAmount1h = Number(metrics.refund_amount_1h || 0);
+  return {
+    ...row,
+    stat_cost: statCost,
+    pay_amount: payAmount,
+    total_pay_amount: totalPayAmount,
+    settled_pay_amount: settledPayAmount,
+    order_count: orderCount,
+    settled_order_count: settledOrderCount,
+    refund_amount_1h: refundAmount1h,
+    plan_count: Number(metrics.plan_count || 0),
+    top_plan_name: String(metrics.top_plan_name || "").trim(),
+    roi: statCost > 0 ? Number((payAmount / statCost).toFixed(2)) : Number(row?.roi || 0),
+    settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
+    pay_order_cost: orderCount > 0 ? Number((statCost / orderCount).toFixed(2)) : Number(row?.pay_order_cost || 0),
+    settled_amount_rate: totalPayAmount > 0
+      ? Number((settledPayAmount / totalPayAmount * 100).toFixed(2))
+      : Number(row?.settled_amount_rate || 0),
+    refund_rate_1h: totalPayAmount > 0
+      ? Number((refundAmount1h / totalPayAmount * 100).toFixed(2))
+      : Number(row?.refund_rate_1h || 0),
+  };
+}
+
 function formatMaterialTotalPayAmount(row) {
   return materialSupportsTotalPayMetrics(row) ? formatMoney(row.total_pay_amount) : "-";
 }
@@ -1715,32 +1795,50 @@ function toggleSort(current, key, fallbackDir = "desc") {
 }
 
 function renderAccountTable(accounts) {
+  const accountPayload = rangePayload(sectionFilter("account"));
+  const accountMetrics = buildAccountMetricsFromPlans(accountPayload?.plans || []);
   const query = accountSearch.value.trim().toLowerCase();
   const columns = [
     { key: "advertiser_name", label: "账户", sortable: true },
     { key: "stat_cost", label: "消耗", sortable: true },
     { key: "pay_amount", label: "支付", sortable: true },
-    { key: "order_count", label: "订单", sortable: true },
-    { key: "roi", label: "ROI", sortable: true },
+    { key: "total_pay_amount", label: "整体成交", sortable: true },
+    { key: "settled_pay_amount", label: "净成交", sortable: true },
+    { key: "roi", label: "支付ROI", sortable: true },
+    { key: "settled_roi", label: "净ROI", sortable: true },
+    { key: "order_count", label: "整体订单", sortable: true },
+    { key: "settled_order_count", label: "净订单", sortable: true },
+    { key: "pay_order_cost", label: "订单成本", sortable: true },
+    { key: "settled_amount_rate", label: "结算率", sortable: true },
+    { key: "refund_rate_1h", label: "1h退款率", sortable: true },
+    { key: "plan_count", label: "计划数", sortable: true },
     { key: "status_text", label: "状态", sortable: false },
   ];
   const enrichedRows = accounts.map((row) => ({
-    ...row,
+    ...enrichAccountRow(row, accountMetrics),
     status_text: !row.ok ? "查询失败" : String(row.error || "").startsWith("fallback:") ? "计划聚合" : "正常",
   }));
   const rows = enrichedRows.filter((row) => {
     const haystack = [
       row.advertiser_name,
       row.advertiser_id,
+      row.top_plan_name,
       row.status_text,
       row.error,
-    ].join(" ").toLowerCase();
+    ].join(" " ).toLowerCase();
     return haystack.includes(query);
   });
-  const sorted = sortRows(rows, state.accountSort);
+  const activeSort = columns.some((column) => column.key === state.accountSort.key)
+    ? state.accountSort
+    : { key: "stat_cost", dir: "desc" };
+  if (activeSort.key !== state.accountSort.key || activeSort.dir !== state.accountSort.dir) {
+    state.accountSort = activeSort;
+    saveSort("account-sort", state.accountSort);
+  }
+  const sorted = sortRows(rows, activeSort);
 
   accountTable.innerHTML = `
-    ${makeHeader(columns, state.accountSort, "account-sort")}
+    ${makeHeader(columns, activeSort, "account-sort")}
     <tbody>
       ${sorted.map((row) => `
         <tr>
@@ -1748,12 +1846,21 @@ function renderAccountTable(accounts) {
             <div class="cell-primary">${escapeHtml(row.advertiser_name)}</div>
             <div class="cell-subline mono">
               <span class="cell-subitem">AID ${escapeHtml(String(row.advertiser_id || "-"))}</span>
+              ${row.top_plan_name ? `<span class="cell-subitem">代表计划 ${escapeHtml(row.top_plan_name)}</span>` : ""}
             </div>
           </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
-          <td class="mono">${formatNumber(row.order_count)}</td>
+          <td class="mono">${formatMoney(row.total_pay_amount)}</td>
+          <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
+          <td class="mono">${formatRate(row.settled_roi)}</td>
+          <td class="mono">${formatNumber(row.order_count)}</td>
+          <td class="mono">${formatNumber(row.settled_order_count)}</td>
+          <td class="mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</td>
+          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</td>
+          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}</td>
+          <td class="mono">${formatNumber(row.plan_count)}</td>
           <td><span class="pill">${escapeHtml(row.status_text)}</span></td>
         </tr>
       `).join("")}
@@ -1765,7 +1872,7 @@ function renderAccountTable(accounts) {
       const key = header.dataset.key;
       const column = columns.find((item) => item.key === key);
       if (!column || !column.sortable) return;
-      state.accountSort = toggleSort(state.accountSort, key);
+      state.accountSort = toggleSort(activeSort, key);
       saveSort("account-sort", state.accountSort);
       renderAccountTable(accounts);
     });
