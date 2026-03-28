@@ -14,6 +14,7 @@ class UploadAccess:
         role_admin: str,
         allowed_advertiser_ids_for_user: Callable[[dict[str, Any] | None], set[int] | None],
         latest_snapshot: Callable[[set[int] | None], dict[str, Any] | None],
+        current_customer_center_id: Callable[[], str],
         normalize_match_text: Callable[..., str],
         sanitize_material_title: Callable[[str], str],
     ) -> None:
@@ -22,6 +23,7 @@ class UploadAccess:
         self._role_admin = role_admin
         self._allowed_advertiser_ids_for_user = allowed_advertiser_ids_for_user
         self._latest_snapshot = latest_snapshot
+        self._current_customer_center_id = current_customer_center_id
         self._normalize_match_text = normalize_match_text
         self._sanitize_material_title = sanitize_material_title
 
@@ -203,6 +205,7 @@ class UploadAccess:
         if not normalized_ids:
             return {}
         placeholders = ",".join("?" for _ in normalized_ids)
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         with self._db() as conn:
             raw_json_select = "p.raw_json"
             if not self._column_exists_locked(conn, "plan_snapshots", "raw_json"):
@@ -216,14 +219,16 @@ class UploadAccess:
                     SELECT ad_id, MAX(snapshot_time) AS latest_snapshot_time
                     FROM plan_snapshots
                     WHERE ad_id IN ({placeholders})
+                      AND customer_center_id = ?
                       AND COALESCE(plan_source, 'UNI_PROMOTION') = 'UNI_PROMOTION'
                     GROUP BY ad_id
                 ) latest
                   ON latest.ad_id = p.ad_id
                  AND latest.latest_snapshot_time = p.snapshot_time
                 WHERE COALESCE(p.plan_source, 'UNI_PROMOTION') = 'UNI_PROMOTION'
+                  AND p.customer_center_id = ?
                 """,
-                normalized_ids,
+                [*normalized_ids, customer_center_id, customer_center_id],
             ).fetchall()
             context_map = {int(row["ad_id"]): dict(row) for row in rows}
             if context_map and self._column_exists_locked(conn, "plan_detail_snapshots", "raw_json"):
@@ -235,12 +240,14 @@ class UploadAccess:
                         SELECT ad_id, MAX(snapshot_time) AS latest_snapshot_time
                         FROM plan_detail_snapshots
                         WHERE ad_id IN ({placeholders})
+                          AND customer_center_id = ?
                         GROUP BY ad_id
                     ) latest
                       ON latest.ad_id = d.ad_id
                      AND latest.latest_snapshot_time = d.snapshot_time
+                    WHERE d.customer_center_id = ?
                     """,
-                    normalized_ids,
+                    [*normalized_ids, customer_center_id, customer_center_id],
                 ).fetchall()
                 for row in detail_rows:
                     ad_id = int(row["ad_id"])

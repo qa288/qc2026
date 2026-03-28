@@ -103,10 +103,12 @@ def register_query_routes(
                 "latest": latest,
                 "extendedSync": service.latest_extended_sync(),
                 "tokenInfo": service.latest_token_payload(masked=True) if is_admin else None,
+                "oceanEngineConfig": service.ocean_engine_runtime_config() if is_admin else None,
                 "summaryHistory": service.summary_history(),
                 "notificationSettings": service.get_notification_settings() if is_admin else {},
                 "alertRules": service.list_alert_rules() if is_admin else [],
                 "alertEvents": service.alert_events() if is_admin else [],
+                "customerCenterId": service.read_config()["customer_center_id"],
                 "timezone": timezone,
             }
         )

@@ -9,16 +9,19 @@ class CatalogAccess:
         db_factory: Callable[[], Any],
         latest_summary_meta: Callable[[Any], Any],
         latest_extended_sync_run: Callable[[Any], Any],
+        current_customer_center_id: Callable[[], str],
         normalize_match_text: Callable[..., str],
         allowed_scopes: set[str],
     ) -> None:
         self._db = db_factory
         self._latest_summary_meta = latest_summary_meta
         self._latest_extended_sync_run = latest_extended_sync_run
+        self._current_customer_center_id = current_customer_center_id
         self._normalize_match_text = normalize_match_text
         self._allowed_scopes = set(allowed_scopes)
 
     def reference_catalog(self) -> dict[str, Any]:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         with self._db() as conn:
             latest_summary = self._latest_summary_meta(conn)
             latest_extended = self._latest_extended_sync_run(conn)
@@ -35,9 +38,10 @@ class CatalogAccess:
                         SELECT advertiser_id, advertiser_name
                         FROM account_snapshots
                         WHERE snapshot_time = ?
+                          AND customer_center_id = ?
                         ORDER BY advertiser_name ASC, advertiser_id ASC
                         """,
-                        (snapshot_time,),
+                        (snapshot_time, customer_center_id),
                     ).fetchall()
                 ]
                 plans = [
@@ -47,9 +51,10 @@ class CatalogAccess:
                         SELECT advertiser_id, advertiser_name, ad_id, ad_name, product_id, product_name
                         FROM plan_snapshots
                         WHERE snapshot_time = ?
+                          AND customer_center_id = ?
                         ORDER BY ad_name ASC, ad_id ASC
                         """,
-                        (snapshot_time,),
+                        (snapshot_time, customer_center_id),
                     ).fetchall()
                 ]
             if latest_extended:
@@ -61,9 +66,10 @@ class CatalogAccess:
                         SELECT advertiser_id, advertiser_name, ad_id, ad_name, product_key, product_id, product_name
                         FROM product_snapshots
                         WHERE snapshot_time = ?
+                          AND customer_center_id = ?
                         ORDER BY product_name ASC, product_id ASC, product_key ASC
                         """,
-                        (extended_snapshot,),
+                        (extended_snapshot, customer_center_id),
                     ).fetchall()
                 ]
                 materials = [
@@ -73,9 +79,10 @@ class CatalogAccess:
                         SELECT advertiser_id, advertiser_name, ad_id, ad_name, material_key, material_id, material_name, video_id, material_type
                         FROM material_snapshots
                         WHERE snapshot_time = ?
+                          AND customer_center_id = ?
                         ORDER BY material_name ASC, material_id ASC, material_key ASC
                         """,
-                        (extended_snapshot,),
+                        (extended_snapshot, customer_center_id),
                     ).fetchall()
                 ]
         return {

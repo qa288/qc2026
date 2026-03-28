@@ -23,6 +23,23 @@ MIGRATIONS: tuple[Migration, ...] = (
         name="material_create_time",
         sql="SELECT 1;",
     ),
+    Migration(
+        version=3,
+        name="runtime_config_overrides",
+        sql="""
+        CREATE TABLE IF NOT EXISTS runtime_config_overrides (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            refresh_token TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+        """,
+    ),
+    Migration(
+        version=4,
+        name="customer_center_scoped_snapshots",
+        sql="SELECT 1;",
+    ),
 )
 
 

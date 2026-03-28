@@ -15,6 +15,7 @@ class PerformanceAccess:
         scoped_summary: Callable[[list[dict[str, Any]], list[dict[str, Any]]], dict[str, Any]],
         decorate_plan_item: Callable[[Any], dict[str, Any]],
         apply_employee_attribution: Callable[[list[dict[str, Any]], list[dict[str, Any]]], list[dict[str, Any]]],
+        current_customer_center_id: Callable[[], str],
         snapshot_account_balances: Callable[[Any, str], list[dict[str, Any]]],
         snapshot_shared_wallets: Callable[[Any, str], list[dict[str, Any]]],
         snapshot_wallet_relations: Callable[[Any, str], list[dict[str, Any]]],
@@ -24,6 +25,7 @@ class PerformanceAccess:
         self._scoped_summary = scoped_summary
         self._decorate_plan_item = decorate_plan_item
         self._apply_employee_attribution = apply_employee_attribution
+        self._current_customer_center_id = current_customer_center_id
         self._snapshot_account_balances = snapshot_account_balances
         self._snapshot_shared_wallets = snapshot_shared_wallets
         self._snapshot_wallet_relations = snapshot_wallet_relations
@@ -81,15 +83,18 @@ class PerformanceAccess:
         start_dt: datetime,
         end_dt: datetime,
     ) -> list[dict[str, Any]]:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         rows = conn.execute(
             """
             SELECT snapshot_time, window_start, window_end
             FROM summary_snapshots
-            WHERE snapshot_time >= ?
+            WHERE customer_center_id = ?
+              AND snapshot_time >= ?
               AND snapshot_time <= ?
             ORDER BY snapshot_time DESC
             """,
             (
+                customer_center_id,
                 start_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 end_dt.strftime("%Y-%m-%d %H:%M:%S"),
             ),
@@ -109,14 +114,17 @@ class PerformanceAccess:
     def missing_summary_days(self, conn: Any, start_dt: datetime, end_dt: datetime) -> list[datetime]:
         start_day = start_dt.date()
         end_day = end_dt.date()
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         rows = conn.execute(
             """
             SELECT DISTINCT substr(snapshot_time, 1, 10) AS day_key
             FROM summary_snapshots
-            WHERE snapshot_time >= ?
+            WHERE customer_center_id = ?
+              AND snapshot_time >= ?
               AND snapshot_time <= ?
             """,
             (
+                customer_center_id,
                 start_dt.strftime("%Y-%m-%d 00:00:00"),
                 end_dt.strftime("%Y-%m-%d 23:59:59"),
             ),
@@ -287,6 +295,7 @@ class PerformanceAccess:
         }
 
     def performance_snapshot_from_db(self, start_dt: datetime, end_dt: datetime) -> dict[str, Any]:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         with self._db() as conn:
             snapshots = self.latest_summary_snapshots_for_window(conn, start_dt, end_dt)
             if not snapshots:
@@ -298,19 +307,21 @@ class PerformanceAccess:
                 f"""
                 SELECT *
                 FROM account_snapshots
-                WHERE snapshot_time IN ({placeholders})
+                WHERE customer_center_id = ?
+                  AND snapshot_time IN ({placeholders})
                 ORDER BY snapshot_time DESC, stat_cost DESC, advertiser_id ASC
                 """,
-                snapshot_times,
+                [customer_center_id, *snapshot_times],
             ).fetchall()
             plan_rows = conn.execute(
                 f"""
                 SELECT *
                 FROM plan_snapshots
-                WHERE snapshot_time IN ({placeholders})
+                WHERE customer_center_id = ?
+                  AND snapshot_time IN ({placeholders})
                 ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
                 """,
-                snapshot_times,
+                [customer_center_id, *snapshot_times],
             ).fetchall()
 
             latest_snapshot_time = snapshot_times[-1]
@@ -369,32 +380,42 @@ class PerformanceAccess:
         }
 
     def latest_snapshot(self, allowed_advertiser_ids: set[int] | None = None) -> dict[str, Any] | None:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         with self._db() as conn:
             latest = conn.execute(
-                "SELECT snapshot_time FROM summary_snapshots ORDER BY snapshot_time DESC LIMIT 1"
+                """
+                SELECT snapshot_time
+                FROM summary_snapshots
+                WHERE customer_center_id = ?
+                ORDER BY snapshot_time DESC
+                LIMIT 1
+                """,
+                (customer_center_id,),
             ).fetchone()
             if not latest:
                 return None
             snapshot_time = latest["snapshot_time"]
             summary = conn.execute(
-                "SELECT * FROM summary_snapshots WHERE snapshot_time = ?",
-                (snapshot_time,),
+                "SELECT * FROM summary_snapshots WHERE snapshot_time = ? AND customer_center_id = ?",
+                (snapshot_time, customer_center_id),
             ).fetchone()
             accounts = conn.execute(
                 """
                 SELECT * FROM account_snapshots
                 WHERE snapshot_time = ?
+                  AND customer_center_id = ?
                 ORDER BY stat_cost DESC, advertiser_id ASC
                 """,
-                (snapshot_time,),
+                (snapshot_time, customer_center_id),
             ).fetchall()
             plans = conn.execute(
                 """
                 SELECT * FROM plan_snapshots
                 WHERE snapshot_time = ?
+                  AND customer_center_id = ?
                 ORDER BY order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
                 """,
-                (snapshot_time,),
+                (snapshot_time, customer_center_id),
             ).fetchall()
             account_items = [dict(row) for row in accounts]
             plan_items = self._apply_employee_attribution(
@@ -412,8 +433,8 @@ class PerformanceAccess:
             summary_payload["wallet_count"] = len(shared_wallet_items)
             summary_payload["account_balance_count"] = len(account_balance_items)
             extended_run = conn.execute(
-                "SELECT * FROM extended_sync_runs WHERE snapshot_time = ?",
-                (snapshot_time,),
+                "SELECT * FROM extended_sync_runs WHERE snapshot_time = ? AND customer_center_id = ?",
+                (snapshot_time, customer_center_id),
             ).fetchone()
             payload = {
                 "snapshot_time": snapshot_time,

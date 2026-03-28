@@ -14,7 +14,33 @@
           <div class="top-brand-block">
             <div class="hero-chip-row">
               <span class="hero-chip strong">实时看板</span>
-              <span class="hero-chip">CC {{ customer_center_id }}</span>
+              <div class="customer-center-shell">
+                <button type="button" class="hero-chip hero-chip-button" id="customerCenterChip" aria-haspopup="dialog" aria-expanded="false">CC {{ customer_center_id }}</button>
+                <section id="oceanEngineConfigCard" class="customer-center-popover hidden">
+                  <div class="customer-center-popover-head">
+                    <div>
+                      <p class="section-kicker">OceanEngine</p>
+                      <h3>Runtime CC Switch</h3>
+                    </div>
+                    <div id="oceanEngineConfigStatus" class="section-range-meta compact-inline inline-feedback">Enter a CC ID here. The system will use the saved token for that account and queue a main snapshot sync.</div>
+                  </div>
+                  <form id="oceanEngineConfigForm" class="customer-center-form">
+                    <label>
+                      <span>Current CC</span>
+                      <input name="current_customer_center_id" type="text" readonly />
+                    </label>
+                    <label>
+                      <span>Target CC</span>
+                      <input name="customer_center_id" type="text" inputmode="numeric" placeholder="Enter a new customer_center_id" required />
+                    </label>
+                    <div class="customer-center-actions">
+                      <div id="oceanEngineConfigMeta" class="section-range-meta compact-inline">Using the server configuration.</div>
+                      <button type="submit" class="button primary compact">Save And Switch</button>
+                    </div>
+                  </form>
+                  <div id="oceanEngineConfigPreview" class="runtime-config-preview hidden"></div>
+                </section>
+              </div>
               <span class="hero-chip">1 分钟刷新</span>
             </div>
             <div class="top-title-row top-title-inline">
@@ -427,13 +453,73 @@
           </div>
           <div id="accessOverview" class="access-overview-grid"></div>
           <div class="access-layout">
+            <section class="ownership-card access-config-card">
+              <div class="subpanel-head access-card-head">
+                <div>
+                  <p class="section-kicker">Account Setup</p>
+                  <h3>账号配置</h3>
+                </div>
+                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">新建账号时可同时填写关键词。</div>
+              </div>
+              <form id="userForm" class="ownership-form-grid access-form-grid">
+                <div class="access-form-main-grid">
+                  <label>
+                    <span>用户名</span>
+                    <input name="username" type="text" placeholder="operator_a / supervisor_a" required />
+                  </label>
+                  <label>
+                    <span>显示名称</span>
+                    <input name="display_name" type="text" placeholder="运营A / 老板" />
+                  </label>
+                  <label>
+                    <span>角色</span>
+                    <select name="role">
+                      <option value="supervisor">主管</option>
+                      <option value="operator">运营</option>
+                      <option value="admin">管理员</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>密码</span>
+                    <input name="password" type="password" placeholder="新建必填；编辑时留空表示不改" />
+                  </label>
+                </div>
+                <label class="access-form-keyword-field hidden" id="operatorKeywordSeedField">
+                  <span>运营关键词</span>
+                  <textarea name="keyword_seed" rows="3" placeholder="支持逗号、顿号、分号或换行分隔多个关键词"></textarea>
+                </label>
+                <div class="access-form-rail">
+                  <div class="access-option-list">
+                    <label class="toggle-chip access-toggle-card">
+                      <input name="enabled" type="checkbox" checked />
+                      <span class="access-toggle-copy">
+                        <span class="access-toggle-title">启用账号</span>
+                        <span class="access-toggle-note">停用后不可登录，也不会参与权限配置。</span>
+                      </span>
+                    </label>
+                    <label class="toggle-chip access-toggle-card" id="uploadPermissionField">
+                      <input name="upload_materials_enabled" type="checkbox" />
+                      <span class="access-toggle-copy">
+                        <span class="access-toggle-title">允许上传素材</span>
+                        <span class="access-toggle-note">管理员默认开启，主管可按需开放上传能力。</span>
+                      </span>
+                    </label>
+                  </div>
+                  <div class="ownership-form-actions access-button-stack">
+                    <button type="submit" class="button primary compact access-action-button">保存账号</button>
+                    <button type="button" id="userFormReset" class="button ghost compact access-action-button">新建账号</button>
+                  </div>
+                </div>
+              </form>
+            </section>
+
             <section class="access-list-card">
               <div class="subpanel-head access-card-head">
                 <div>
                   <p class="section-kicker">Member Roster</p>
                   <h3>后台账号</h3>
                 </div>
-                <div class="section-range-meta compact-inline">左侧选账号，右侧编辑角色能力、可见范围和关键词规则。</div>
+                <div class="section-range-meta compact-inline">选择账号后，下方继续编辑可见范围、关键词规则和权限状态。</div>
               </div>
               <div class="table-shell tall access-user-table-shell">
                 <table id="userTable" class="data-table compact"></table>
@@ -441,58 +527,6 @@
             </section>
 
             <section class="access-editor-card">
-              <div id="accessSpotlight" class="access-spotlight"></div>
-
-              <section class="ownership-card access-config-card">
-                <div class="subpanel-head access-card-head">
-                  <div>
-                    <p class="section-kicker">Account Setup</p>
-                    <h3>账号配置</h3>
-                  </div>
-                  <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">新建账号时可同时填写关键词。</div>
-                </div>
-                <form id="userForm" class="ownership-form-grid access-form-grid">
-                <label>
-                  <span>用户名</span>
-                  <input name="username" type="text" placeholder="operator_a / supervisor_a" required />
-                </label>
-                <label>
-                  <span>显示名称</span>
-                  <input name="display_name" type="text" placeholder="运营A / 老板" />
-                </label>
-                <label>
-                  <span>角色</span>
-                  <select name="role">
-                    <option value="supervisor">主管</option>
-                    <option value="operator">运营</option>
-                    <option value="admin">管理员</option>
-                  </select>
-                </label>
-                <label>
-                  <span>密码</span>
-                  <input name="password" type="password" placeholder="新建必填；编辑时留空表示不改" />
-                </label>
-                <label class="wide-field hidden" id="operatorKeywordSeedField">
-                  <span>运营关键词</span>
-                  <textarea name="keyword_seed" rows="3" placeholder="支持逗号、顿号、分号或换行分隔多个关键词"></textarea>
-                </label>
-                <div class="access-toggle-row wide-field">
-                  <label class="toggle-chip">
-                    <input name="enabled" type="checkbox" checked />
-                    <span>启用账号</span>
-                  </label>
-                  <label class="toggle-chip" id="uploadPermissionField">
-                    <input name="upload_materials_enabled" type="checkbox" />
-                    <span>允许上传素材</span>
-                  </label>
-                </div>
-                <div class="ownership-form-actions access-form-actions wide-field">
-                  <button type="submit" class="button primary compact">保存账号</button>
-                  <button type="button" id="userFormReset" class="button ghost compact">新建账号</button>
-                </div>
-                </form>
-              </section>
-
               <section class="ownership-card">
                 <div class="subpanel-head access-card-head">
                   <div>
@@ -505,15 +539,15 @@
                   <div class="scope-toolbar">
                     <input id="scopeSearchInput" class="search-input" type="search" placeholder="搜索账户名称 / ID" />
                     <div class="scope-toolbar-actions">
-                      <button type="button" id="scopeSelectVisibleButton" class="button ghost compact">全选当前结果</button>
-                      <button type="button" id="scopeClearSelectedButton" class="button ghost compact">清空已选</button>
+                      <button type="button" id="scopeSelectVisibleButton" class="button ghost compact access-action-button">全选当前结果</button>
+                      <button type="button" id="scopeClearSelectedButton" class="button ghost compact access-action-button">清空已选</button>
                     </div>
                   </div>
                   <div id="scopeSelectionSummary" class="scope-selection-summary">已选 0 个账户</div>
                 </div>
                 <div id="scopeAccountList" class="scope-checklist"></div>
                 <div class="ownership-form-actions ownership-actions-end">
-                  <button type="button" id="saveUserScopesButton" class="button primary compact">保存账户范围</button>
+                  <button type="button" id="saveUserScopesButton" class="button primary compact access-action-button">保存账户范围</button>
                 </div>
               </section>
 
@@ -525,13 +559,16 @@
                   </div>
                 </div>
                 <div id="operatorKeywordStatus" class="section-range-meta compact-inline inline-feedback">新建运营时可直接填关键词，也可后续追加。</div>
-                <form id="operatorKeywordForm" class="ownership-inline-form">
+                <form id="operatorKeywordForm" class="ownership-inline-form access-keyword-form">
                   <input name="keyword" type="text" placeholder="例如：小宇 / 小宇剪辑 / XY" />
-                  <label class="toggle-chip">
+                  <label class="toggle-chip access-toggle-card access-toggle-card-compact">
                     <input name="enabled" type="checkbox" checked />
-                    <span>启用</span>
+                    <span class="access-toggle-copy">
+                      <span class="access-toggle-title">启用</span>
+                      <span class="access-toggle-note">关闭后不参与关键词匹配。</span>
+                    </span>
                   </label>
-                  <button type="submit" class="button primary compact">添加关键词</button>
+                  <button type="submit" class="button primary compact access-action-button">添加关键词</button>
                 </form>
                 <div class="table-shell">
                   <table id="operatorKeywordTable" class="data-table compact"></table>
@@ -545,12 +582,12 @@
                     <h3>命中素材</h3>
                   </div>
                   <div class="ownership-inline-actions">
-                    <button type="button" id="toggleOperatorMaterialsButton" class="button ghost compact">显示列表</button>
+                    <button type="button" id="toggleOperatorMaterialsButton" class="button ghost compact access-action-button">显示列表</button>
                   </div>
                 </div>
                 <div id="operatorMaterialStatus" class="section-range-meta compact-inline inline-feedback">只按素材名称关键词命中，默认收起。</div>
                 <div id="operatorMaterialContent" class="hidden">
-                  <div class="ownership-inline-form simple-inline-form">
+                  <div class="ownership-inline-form simple-inline-form access-material-search-form">
                     <input id="operatorMaterialSearch" type="search" placeholder="搜索素材名称" />
                   </div>
                   <div class="table-shell">

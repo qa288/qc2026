@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 
 class HistoryAccess:
+    def __init__(self, current_customer_center_id: Callable[[], str]) -> None:
+        self._current_customer_center_id = current_customer_center_id
+
     def latest_extended_sync_run(self, conn: Any) -> Any:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         return conn.execute(
             """
             SELECT *
             FROM extended_sync_runs
+            WHERE customer_center_id = ?
             ORDER BY snapshot_time DESC
             LIMIT 1
-            """
+            """,
+            (customer_center_id,),
         ).fetchone()
 
     def latest_extended_sync_runs_for_window(
@@ -21,16 +27,19 @@ class HistoryAccess:
         start_dt: datetime,
         end_dt: datetime,
     ) -> list[dict[str, Any]]:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         rows = conn.execute(
             """
             SELECT *
             FROM extended_sync_runs
             WHERE status IN ('ok', 'partial')
+              AND customer_center_id = ?
               AND snapshot_time >= ?
               AND snapshot_time <= ?
             ORDER BY snapshot_time DESC
             """,
             (
+                customer_center_id,
                 start_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 end_dt.strftime("%Y-%m-%d %H:%M:%S"),
             ),
@@ -48,16 +57,19 @@ class HistoryAccess:
         return selected
 
     def summary_meta_for_day(self, conn: Any, target_day: datetime) -> dict[str, Any] | None:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         row = conn.execute(
             """
             SELECT snapshot_time, window_start, window_end
             FROM summary_snapshots
-            WHERE snapshot_time >= ?
+            WHERE customer_center_id = ?
+              AND snapshot_time >= ?
               AND snapshot_time <= ?
             ORDER BY snapshot_time DESC
             LIMIT 1
             """,
             (
+                customer_center_id,
                 target_day.strftime("%Y-%m-%d 00:00:00"),
                 target_day.strftime("%Y-%m-%d 23:59:59"),
             ),
@@ -67,15 +79,18 @@ class HistoryAccess:
     def missing_extended_days(self, conn: Any, start_dt: datetime, end_dt: datetime) -> list[datetime]:
         start_day = start_dt.date()
         end_day = end_dt.date()
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         rows = conn.execute(
             """
             SELECT DISTINCT substr(snapshot_time, 1, 10) AS day_key
             FROM extended_sync_runs
             WHERE status IN ('ok', 'partial')
+              AND customer_center_id = ?
               AND snapshot_time >= ?
               AND snapshot_time <= ?
             """,
             (
+                customer_center_id,
                 start_dt.strftime("%Y-%m-%d 00:00:00"),
                 end_dt.strftime("%Y-%m-%d 23:59:59"),
             ),

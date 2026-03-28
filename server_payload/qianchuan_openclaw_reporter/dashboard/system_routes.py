@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse
 
-from dashboard.system_schemas import AuthCodeExchangePayload
+from dashboard.system_schemas import AuthCodeExchangePayload, OceanEngineRuntimeConfigPayload
 
 
 def register_system_routes(app: Any, service: Any, require_admin: Any) -> None:
@@ -88,3 +88,14 @@ def register_system_routes(app: Any, service: Any, require_admin: Any) -> None:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"ok": True, "token": token_payload})
+
+    @app.put("/api/system/integrations/ocean-engine/runtime-config")
+    async def update_runtime_config(
+        payload: OceanEngineRuntimeConfigPayload,
+        _user: dict[str, Any] = Depends(require_admin),
+    ) -> JSONResponse:
+        try:
+            result = await asyncio.to_thread(service.update_ocean_engine_runtime_config, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"ok": True, **result})

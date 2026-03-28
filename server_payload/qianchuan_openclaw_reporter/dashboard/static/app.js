@@ -66,6 +66,9 @@ const MATERIAL_SETTLED_TYPES = new Set(["VIDEO", "IMAGE"]);
 const state = {
   payload: null,
   session: null,
+  oceanEngineConfig: null,
+  oceanEnginePreview: null,
+  oceanEnginePopoverOpen: false,
   rangePayloads: {},
   planAssetCache: {},
   materialPayloads: {},
@@ -85,6 +88,7 @@ const state = {
   uploadSelectedPlanIds: [],
   uploadFiles: [],
   uploadRetryingJobId: null,
+  uploadDeletingJobId: null,
   unassignedScope: "all",
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
@@ -161,6 +165,7 @@ const ruleTargetMeta = document.getElementById("ruleTargetMeta");
 const ruleMinSpendField = document.getElementById("ruleMinSpendField");
 const syncButton = document.getElementById("syncButton");
 const syncExtendedButton = document.getElementById("syncExtendedButton");
+const customerCenterChip = document.getElementById("customerCenterChip");
 const heroStatusText = document.getElementById("heroStatusText");
 const heroStatusHint = document.getElementById("heroStatusHint");
 const heroCopy = document.getElementById("heroCopy");
@@ -214,7 +219,11 @@ const userTable = document.getElementById("userTable");
 const userForm = document.getElementById("userForm");
 const userFormReset = document.getElementById("userFormReset");
 const accessOverview = document.getElementById("accessOverview");
-const accessSpotlight = document.getElementById("accessSpotlight");
+const oceanEngineConfigCard = document.getElementById("oceanEngineConfigCard");
+const oceanEngineConfigForm = document.getElementById("oceanEngineConfigForm");
+const oceanEngineConfigStatus = document.getElementById("oceanEngineConfigStatus");
+const oceanEngineConfigMeta = document.getElementById("oceanEngineConfigMeta");
+const oceanEngineConfigPreview = document.getElementById("oceanEngineConfigPreview");
 const userEditorStatus = document.getElementById("userEditorStatus");
 const uploadPermissionField = document.getElementById("uploadPermissionField");
 const operatorKeywordSeedField = document.getElementById("operatorKeywordSeedField");
@@ -1344,6 +1353,17 @@ function uploadRetryButtonLabel(item) {
   return Number(state.uploadRetryingJobId || 0) === Number(item?.id || 0) ? "重试中..." : "重试失败项";
 }
 
+function canDeleteUploadJob(item) {
+  const status = String(item?.status || "").trim().toLowerCase();
+  return status !== "queued" && status !== "running";
+}
+
+function uploadDeleteButtonLabel(item) {
+  return Number(state.uploadDeletingJobId || 0) === Number(item?.id || 0)
+    ? "\u5220\u9664\u4e2d..."
+    : "\u5220\u9664\u8bb0\u5f55";
+}
+
 function uploadFailureStageLabel(stage) {
   return String(stage || "").trim().toLowerCase() === "bind" ? "????" : "????";
 }
@@ -1491,9 +1511,20 @@ function renderUploadJobTable() {
           <td>${escapeHtml(item.created_at || "--")}</td>
           <td>${renderUploadJobNote(item)}</td>
           <td>
-            ${canRetryUploadJob(item)
-              ? `<button type="button" class="button ghost compact" data-action="retry-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadRetryButtonLabel(item))}</button>`
-              : '<span class="cell-subitem">--</span>'}
+            ${(() => {
+              const actions = [];
+              if (canRetryUploadJob(item)) {
+                actions.push(
+                  `<button type="button" class="button ghost compact" data-action="retry-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) || Number(state.uploadDeletingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadRetryButtonLabel(item))}</button>`,
+                );
+              }
+              if (canDeleteUploadJob(item)) {
+                actions.push(
+                  `<button type="button" class="button ghost danger compact" data-action="delete-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadDeletingJobId || 0) === Number(item.id || 0) || Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadDeleteButtonLabel(item))}</button>`,
+                );
+              }
+              return actions.length ? `<div class="upload-job-actions">${actions.join("")}</div>` : '<span class="cell-subitem">--</span>';
+            })()}
           </td>
         </tr>
       `).join("")}
@@ -1563,6 +1594,50 @@ async function retryUploadJob(jobId) {
     await fetchUploadJobs();
   } finally {
     state.uploadRetryingJobId = null;
+    renderUploadJobTable();
+  }
+}
+
+async function deleteUploadJob(jobId) {
+  const normalizedJobId = Number(jobId || 0);
+  if (!normalizedJobId || state.uploadDeletingJobId === normalizedJobId) return;
+  const job = (state.uploadJobs || []).find((item) => Number(item?.id || 0) === normalizedJobId);
+  if (!job) return;
+  if (!canDeleteUploadJob(job)) {
+    window.alert("\u5f53\u524d\u4efb\u52a1\u4ecd\u5728\u6267\u884c\u4e2d\uff0c\u5b8c\u6210\u540e\u624d\u80fd\u5220\u9664\u8bb0\u5f55\u3002");
+    return;
+  }
+  if (
+    !window.confirm(
+      `\u786e\u8ba4\u5220\u9664\u4efb\u52a1 #${normalizedJobId} \u7684\u8bb0\u5f55\u5417\uff1f\u8fd9\u4f1a\u540c\u65f6\u79fb\u9664\u8be5\u4efb\u52a1\u7684\u6700\u8fd1\u4efb\u52a1\u660e\u7ec6\u3002`,
+    )
+  ) {
+    return;
+  }
+  state.uploadDeletingJobId = normalizedJobId;
+  renderUploadJobTable();
+  setInlineFeedback(
+    uploadJobStatus,
+    `\u6b63\u5728\u5220\u9664\u4efb\u52a1 #${normalizedJobId} \u7684\u8bb0\u5f55...`,
+    "neutral",
+  );
+  try {
+    const response = await fetch(`/api/upload/jobs/${encodeURIComponent(String(normalizedJobId))}`, { method: "DELETE" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(payload.detail || "\u5220\u9664\u4e0a\u4f20\u4efb\u52a1\u8bb0\u5f55\u5931\u8d25");
+      setInlineFeedback(uploadJobStatus, "\u5220\u9664\u4e0a\u4f20\u4efb\u52a1\u8bb0\u5f55\u5931\u8d25\u3002", "warn");
+      return;
+    }
+    state.uploadJobs = (state.uploadJobs || []).filter((item) => Number(item?.id || 0) !== normalizedJobId);
+    renderUploadJobTable();
+    setInlineFeedback(
+      uploadJobStatus,
+      `\u5df2\u5220\u9664\u4efb\u52a1 #${normalizedJobId} \u7684\u8bb0\u5f55\u3002`,
+      "success",
+    );
+  } finally {
+    state.uploadDeletingJobId = null;
     renderUploadJobTable();
   }
 }
@@ -1792,6 +1867,105 @@ function renderSystemCards(latest, extendedSync, tokenInfo) {
       <div class="system-stat"><span>错误数</span><strong class="mono">${formatNumber(extendedSync?.error_count || 0)}</strong></div>
     </div>
   `;
+}
+
+function clearDashboardDataCaches() {
+  state.rangePayloads = {};
+  state.materialPayloads = {};
+  state.materialPayloadFetchedAt = {};
+  state.teamMaterialPayloads = {};
+  state.teamMaterialPayloadFetchedAt = {};
+  state.commentPayloads = {};
+  state.commentPayloadFetchedAt = {};
+  state.materialPreviewCurveCache = {};
+}
+
+function syncOceanEnginePopoverState() {
+  const admin = isAdmin();
+  const open = admin && Boolean(state.oceanEnginePopoverOpen);
+  if (customerCenterChip) {
+    customerCenterChip.classList.toggle("is-interactive", admin);
+    customerCenterChip.classList.toggle("is-active", open);
+    customerCenterChip.setAttribute("aria-expanded", open ? "true" : "false");
+    customerCenterChip.setAttribute("aria-disabled", admin ? "false" : "true");
+    customerCenterChip.tabIndex = admin ? 0 : -1;
+    customerCenterChip.title = admin ? "Click to switch CC by saved token" : "";
+  }
+  if (oceanEngineConfigCard) {
+    oceanEngineConfigCard.classList.toggle("hidden", !open);
+  }
+}
+
+function setOceanEnginePopoverOpen(nextOpen) {
+  state.oceanEnginePopoverOpen = Boolean(nextOpen) && isAdmin();
+  syncOceanEnginePopoverState();
+}
+
+function renderOceanEngineConfigPreview(preview) {
+  if (!oceanEngineConfigPreview) return;
+  const accountCount = Number(preview?.account_count || 0);
+  const sampleAccounts = Array.isArray(preview?.sample_accounts) ? preview.sample_accounts : [];
+  if (!preview) {
+    oceanEngineConfigPreview.classList.add("hidden");
+    oceanEngineConfigPreview.innerHTML = "";
+    return;
+  }
+  oceanEngineConfigPreview.classList.remove("hidden");
+  oceanEngineConfigPreview.innerHTML = `
+    <div class="runtime-config-preview-meta">Validation passed. The current CC can access ${formatNumber(accountCount)} accounts. Showing the first ${formatNumber(sampleAccounts.length)} samples below.</div>
+    <div class="runtime-config-preview-list">
+      ${sampleAccounts.length
+        ? sampleAccounts.map((item) => `
+          <span class="runtime-config-preview-item">
+            <strong>${escapeHtml(item.advertiser_name || "--")}</strong>
+            <span class="mono">${escapeHtml(String(item.advertiser_id || "--"))}</span>
+          </span>
+        `).join("")
+        : '<span class="runtime-config-preview-item">No visible accounts returned for this CC.</span>'}
+    </div>
+  `;
+}
+
+function renderOceanEngineConfig(config) {
+  if (customerCenterChip) {
+    customerCenterChip.textContent = `CC ${config?.customer_center_id || "--"}`;
+  }
+  if (!oceanEngineConfigCard) return;
+  const admin = isAdmin();
+  if (!admin) {
+    state.oceanEnginePopoverOpen = false;
+  }
+  syncOceanEnginePopoverState();
+  if (!admin || !config || !oceanEngineConfigForm) {
+    renderOceanEngineConfigPreview(null);
+    return;
+  }
+
+  const currentCc = String(config.customer_center_id || "").trim();
+  const baseCc = String(config.base_customer_center_id || "").trim();
+  const overrideCc = String(config.override_customer_center_id || "").trim();
+  const currentInput = oceanEngineConfigForm.querySelector('input[name="current_customer_center_id"]');
+  const targetInput = oceanEngineConfigForm.querySelector('input[name="customer_center_id"]');
+  if (currentInput) currentInput.value = currentCc;
+  if (targetInput && document.activeElement !== targetInput) {
+    targetInput.value = currentCc;
+  }
+
+  const tokenAgeText = config?.token_updated_at ? formatAgoFromEpoch(config.token_updated_at) : "not recorded";
+  const modeText = config?.has_customer_center_override
+    ? `Runtime override is active. Effective CC: ${overrideCc}. Server default CC: ${baseCc}.`
+    : `Using the server default CC ${baseCc}.`;
+  if (oceanEngineConfigMeta) {
+    oceanEngineConfigMeta.textContent = `${modeText} token ${tokenAgeText}${config?.token_source ? ` / ${config.token_source}` : ""}`;
+  }
+  if (!oceanEngineConfigStatus?.textContent) {
+    setInlineFeedback(
+      oceanEngineConfigStatus,
+      "Enter a CC ID here. The system will use the saved token for that account and queue a main snapshot sync.",
+      "neutral",
+    );
+  }
+  renderOceanEngineConfigPreview(state.oceanEnginePreview);
 }
 
 function renderAlerts(events) {
@@ -2150,6 +2324,7 @@ function renderEmployeeTable(rows) {
       return haystack.includes(query);
     });
     const columns = [
+      { key: "rank", label: "序号", sortable: false },
       { key: "operator_name", label: entityLabel, sortable: true },
       { key: "stat_cost", label: "消耗", sortable: true },
       { key: "total_pay_amount", label: "整体成交", sortable: true },
@@ -2177,7 +2352,7 @@ function renderEmployeeTable(rows) {
     employeeTable.innerHTML = `
       ${makeHeader(columns, activeSort, "employee-sort")}
       <tbody>
-        ${sorted.map((row) => {
+        ${sorted.map((row, index) => {
           const entityName = breakdownEntityName(row);
           const subline = [
             row.top_material_name ? `代表素材 ${row.top_material_name}` : "",
@@ -2185,6 +2360,7 @@ function renderEmployeeTable(rows) {
           const refundRateText = row.refund_rate_1h_available ? formatPercent(row.refund_rate_1h) : "-";
           return `
             <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
+              <td class="mono rank-index-cell">${formatNumber(index + 1)}</td>
               <td>
                 <div class="cell-primary">${escapeHtml(entityName)}</div>
                 ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
@@ -2234,6 +2410,7 @@ function renderEmployeeTable(rows) {
       return haystack.includes(query);
     });
     const columns = [
+      { key: "rank", label: "序号", sortable: false },
       { key: "operator_name", label: entityLabel, sortable: true },
       { key: "stat_cost", label: "消耗", sortable: true },
       { key: "pay_amount", label: "支付", sortable: true },
@@ -2255,7 +2432,7 @@ function renderEmployeeTable(rows) {
     employeeTable.innerHTML = `
       ${makeHeader(columns, activeSort, "employee-sort")}
       <tbody>
-        ${sorted.map((row) => {
+        ${sorted.map((row, index) => {
           const entityName = breakdownEntityName(row);
           const materialCount = Number(row.material_count ?? row.plan_count ?? 0);
           const subline = [
@@ -2263,6 +2440,7 @@ function renderEmployeeTable(rows) {
           ].filter(Boolean);
           return `
             <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
+              <td class="mono rank-index-cell">${formatNumber(index + 1)}</td>
               <td>
                 <div class="cell-primary">${escapeHtml(entityName)}</div>
                 ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
@@ -2303,6 +2481,7 @@ function renderEmployeeTable(rows) {
   });
   const columns = operatorMode
     ? [
+        { key: "rank", label: "序号", sortable: false },
         { key: "operator_name", label: entityLabel, sortable: true },
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "pay_amount", label: "支付", sortable: true },
@@ -2313,6 +2492,7 @@ function renderEmployeeTable(rows) {
         { key: "plan_count", label: "计划数", sortable: true },
       ]
     : [
+        { key: "rank", label: "序号", sortable: false },
         { key: "employee_name", label: entityLabel, sortable: true },
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "pay_amount", label: "支付", sortable: true },
@@ -2327,13 +2507,14 @@ function renderEmployeeTable(rows) {
   employeeTable.innerHTML = `
     ${makeHeader(columns, state.employeeSort, "employee-sort")}
     <tbody>
-      ${sorted.map((row) => {
+      ${sorted.map((row, index) => {
         const entityName = breakdownEntityName(row);
         const subline = operatorMode
           ? [row.operator_username ? `账号 ${row.operator_username}` : "", row.top_account_name ? `代表账户 ${row.top_account_name}` : ""].filter(Boolean)
           : [row.top_account_name ? `代表账户 ${row.top_account_name}` : "", row.top_plan_name ? `代表计划 ${row.top_plan_name}` : ""].filter(Boolean);
         return `
           <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
+            <td class="mono rank-index-cell">${formatNumber(index + 1)}</td>
             <td>
               <div class="cell-primary">${escapeHtml(entityName)}</div>
               ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
@@ -3915,7 +4096,6 @@ function uploadPermissionSummary(user) {
 function renderAccessOverview() {
   if (!accessOverview) return;
   const users = Array.isArray(state.users) ? state.users : [];
-  const selected = selectedUserRecord();
   const adminCount = users.filter((item) => item.role === "admin").length;
   const supervisorCount = users.filter((item) => item.role === "supervisor").length;
   const operatorCount = users.filter((item) => item.role === "operator").length;
@@ -3940,12 +4120,6 @@ function renderAccessOverview() {
       detail: "管理员与已开上传的主管",
       tone: uploadEnabledCount ? "accent" : "muted",
     },
-    {
-      label: "当前焦点",
-      value: escapeHtml(selected?.display_name || selected?.username || "未选择账号"),
-      detail: selected ? `${escapeHtml(roleLabel(selected.role))} · ${escapeHtml(userScopeSummary(selected))}` : "从左侧成员列表开始",
-      tone: selected ? "highlight" : "muted",
-    },
   ].map((item) => `
     <article class="access-overview-card ${item.tone ? `is-${item.tone}` : ""}">
       <span class="access-overview-label">${item.label}</span>
@@ -3953,69 +4127,6 @@ function renderAccessOverview() {
       <span class="access-overview-detail">${item.detail}</span>
     </article>
   `).join("");
-}
-
-function renderAccessSpotlight() {
-  if (!accessSpotlight) return;
-  if (!isAdmin()) {
-    accessSpotlight.innerHTML = `
-      <div class="access-spotlight-card is-empty">
-        <span class="access-spotlight-kicker">Access Overview</span>
-        <strong>当前角色为只读视图</strong>
-        <p>只有管理员可以维护后台账号和权限配置。</p>
-      </div>
-    `;
-    return;
-  }
-  const user = selectedUserRecord();
-  if (!user) {
-    accessSpotlight.innerHTML = `
-      <div class="access-spotlight-card is-empty">
-        <span class="access-spotlight-kicker">Access Overview</span>
-        <strong>选择一个账号开始编辑</strong>
-        <p>左侧成员列表支持快速切换，右侧会同步展示角色、范围和关键词配置。</p>
-      </div>
-    `;
-    return;
-  }
-  const updatedAt = String(user.updated_at || user.created_at || "").trim();
-  accessSpotlight.innerHTML = `
-    <div class="access-spotlight-card">
-      <div class="access-spotlight-head">
-        <div class="access-spotlight-identity">
-          <span class="access-user-avatar large role-${escapeHtml(roleTone(user.role))}">${userAvatarText(user)}</span>
-          <div class="access-spotlight-copy">
-            <span class="access-spotlight-kicker">Current Selection</span>
-            <h3>${escapeHtml(user.display_name || user.username)}</h3>
-            <div class="access-spotlight-meta">
-              <span class="pill role-${escapeHtml(roleTone(user.role))}">${escapeHtml(roleLabel(user.role))}</span>
-              <span class="mono">@${escapeHtml(user.username)}</span>
-            </div>
-          </div>
-        </div>
-        <span class="pill ${user.enabled ? "active" : ""}">${user.enabled ? "启用中" : "已停用"}</span>
-      </div>
-      <div class="access-spotlight-grid">
-        <div class="access-spotlight-stat">
-          <span>可见范围</span>
-          <strong>${escapeHtml(userScopeSummary(user))}</strong>
-        </div>
-        <div class="access-spotlight-stat">
-          <span>上传权限</span>
-          <strong>${escapeHtml(uploadPermissionSummary(user))}</strong>
-        </div>
-        <div class="access-spotlight-stat">
-          <span>关键词数</span>
-          <strong>${user.role === "operator" ? formatNumber(user.keyword_count || 0) : "--"}</strong>
-        </div>
-        <div class="access-spotlight-stat">
-          <span>最近更新</span>
-          <strong>${escapeHtml(updatedAt ? updatedAt.slice(0, 16).replace("T", " ") : "--")}</strong>
-        </div>
-      </div>
-      <p class="access-spotlight-note">${escapeHtml(userCapabilitySummary(user))}</p>
-    </div>
-  `;
 }
 
 function syncUserRoleFields() {
@@ -4808,7 +4919,6 @@ function resetUserFormState() {
   renderUserMatchedMaterialTable();
   syncAccessRolePanels();
   renderAccessOverview();
-  renderAccessSpotlight();
   if (isAdmin()) focusFirstInput(userForm, 'input[name="username"]');
 }
 
@@ -4830,7 +4940,6 @@ function fillUserForm(user) {
   );
   syncAccessRolePanels();
   renderAccessOverview();
-  renderAccessSpotlight();
 }
 
 function renderUserTable() {
@@ -4838,7 +4947,6 @@ function renderUserTable() {
   if (!isAdmin()) {
     userTable.innerHTML = '<tbody><tr><td class="empty-cell">当前账号为只读角色，不能配置后台账号。</td></tr></tbody>';
     renderAccessOverview();
-    renderAccessSpotlight();
     return;
   }
   userTable.innerHTML = `
@@ -4891,7 +4999,6 @@ function renderUserTable() {
     });
   });
   renderAccessOverview();
-  renderAccessSpotlight();
 }
 
 function renderScopeChecklist() {
@@ -5285,10 +5392,34 @@ function bindInputs() {
     if (event.key === "Escape" && commentReplyModal && !commentReplyModal.classList.contains("hidden")) {
       closeCommentReplyModal();
     }
+    if (event.key === "Escape" && state.oceanEnginePopoverOpen) {
+      setOceanEnginePopoverOpen(false);
+    }
+  });
+  customerCenterChip?.addEventListener("click", (event) => {
+    if (!isAdmin()) return;
+    event.stopPropagation();
+    const nextOpen = !state.oceanEnginePopoverOpen;
+    setOceanEnginePopoverOpen(nextOpen);
+    if (nextOpen) {
+      window.setTimeout(() => {
+        oceanEngineConfigForm?.querySelector('input[name="customer_center_id"]')?.focus();
+      }, 0);
+    }
+  });
+  oceanEngineConfigCard?.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+  document.addEventListener("click", () => {
+    if (!state.oceanEnginePopoverOpen) return;
+    setOceanEnginePopoverOpen(false);
   });
   if (viewTabs) {
     viewTabs.querySelectorAll(".view-tab").forEach((button) => {
       button.addEventListener("click", async () => {
+        if (state.oceanEnginePopoverOpen) {
+          setOceanEnginePopoverOpen(false);
+        }
         const view = button.dataset.view || "overview";
         setActiveView(view);
         if (view === "materials") {
@@ -5371,11 +5502,17 @@ function bindInputs() {
     renderUploadTargetSummary();
   });
   uploadJobTable?.addEventListener("click", async (event) => {
-    const button = event.target.closest('[data-action="retry-upload-job"]');
+    const retryButton = event.target.closest('[data-action="retry-upload-job"]');
+    const deleteButton = event.target.closest('[data-action="delete-upload-job"]');
+    const button = retryButton || deleteButton;
     if (!button) return;
     const jobId = Number(button.dataset.jobId || 0);
     if (!jobId) return;
-    await retryUploadJob(jobId);
+    if (retryButton) {
+      await retryUploadJob(jobId);
+      return;
+    }
+    await deleteUploadJob(jobId);
   });
   uploadFileInput?.addEventListener("change", () => {
     state.uploadFiles = Array.from(uploadFileInput.files || []);
@@ -5422,6 +5559,63 @@ function bindInputs() {
   bindRangeFilterControls("material");
   bindRangeFilterControls("teamMaterial");
   bindRangeFilterControls("comment");
+
+  oceanEngineConfigForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(oceanEngineConfigForm);
+    const currentCc = String(state.oceanEngineConfig?.customer_center_id || "").trim();
+    const targetCc = String(form.get("customer_center_id") || "").trim();
+    const submitButton = oceanEngineConfigForm.querySelector('button[type="submit"]');
+    if (!/^\d+$/.test(targetCc)) {
+      setInlineFeedback(oceanEngineConfigStatus, "Target CC must be numeric.", "error");
+      oceanEngineConfigForm.querySelector('input[name="customer_center_id"]')?.focus();
+      return;
+    }
+    if (targetCc === currentCc) {
+      setInlineFeedback(oceanEngineConfigStatus, `CC ${targetCc} is already active.`, "neutral");
+      return;
+    }
+    if (submitButton) submitButton.disabled = true;
+    setInlineFeedback(oceanEngineConfigStatus, `Checking the saved token and switching to CC ${targetCc}...`, "neutral");
+    try {
+      const response = await fetch("/api/system/integrations/ocean-engine/runtime-config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customer_center_id: targetCc,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || "Failed to switch the authorized account.");
+      }
+      state.oceanEngineConfig = payload.config || state.oceanEngineConfig;
+      state.oceanEnginePreview = payload.preview || null;
+      clearDashboardDataCaches();
+      renderOceanEngineConfig(state.oceanEngineConfig);
+      setInlineFeedback(oceanEngineConfigStatus, `Switched to CC ${targetCc}. Submitting a main snapshot sync now.`, "success");
+
+      const syncResponse = await fetch("/api/sync", { method: "POST" });
+      const syncPayload = await syncResponse.json().catch(() => ({}));
+      if (!syncResponse.ok) {
+        throw new Error(syncPayload.detail || "CC switched, but submitting the main snapshot sync failed");
+      }
+      setInlineFeedback(
+        oceanEngineConfigStatus,
+        `Switched to CC ${targetCc}. The main snapshot sync is queued. Until the new snapshot finishes, the page may briefly show old data.`,
+        "success",
+      );
+      await fetchDashboard();
+      window.setTimeout(() => {
+        fetchDashboard().catch(() => {});
+      }, 1800);
+    } catch (error) {
+      setInlineFeedback(oceanEngineConfigStatus, error.message || "Failed to switch the authorized account.", "error");
+      window.alert(error.message || "Failed to switch the authorized account.");
+    } finally {
+      if (submitButton) submitButton.disabled = false;
+    }
+  });
 
 
   ruleForm?.querySelector('select[name="entity_type"]')?.addEventListener("change", () => {
@@ -5807,13 +6001,19 @@ async function fetchDashboard() {
   const payload = await response.json();
   state.payload = payload;
   state.session = payload.session || null;
-  if (!payload.latest) return;
+  state.oceanEngineConfig = payload.oceanEngineConfig || null;
+  if (!payload.latest) {
+    applyRoleViewPolicy();
+    renderOceanEngineConfig(payload.oceanEngineConfig || { customer_center_id: payload.customerCenterId || "" });
+    return;
+  }
   await render(payload);
 }
 
 async function render(payload) {
   const latest = payload.latest;
   applyRoleViewPolicy();
+  renderOceanEngineConfig(payload.oceanEngineConfig || { customer_center_id: payload.customerCenterId || "" });
   renderOverviewHero(latest);
   renderKpis(latest);
   renderSystemCards(latest, payload.extendedSync || latest?.extendedSync, payload.tokenInfo || {});

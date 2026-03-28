@@ -3,6 +3,7 @@ PRAGMA synchronous=NORMAL;
 
 CREATE TABLE IF NOT EXISTS summary_snapshots (
     snapshot_time TEXT PRIMARY KEY,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     window_start TEXT NOT NULL,
     window_end TEXT NOT NULL,
     account_count INTEGER NOT NULL,
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS summary_snapshots (
 
 CREATE TABLE IF NOT EXISTS account_snapshots (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     advertiser_id BIGINT NOT NULL,
     advertiser_name TEXT NOT NULL,
     stat_cost REAL NOT NULL,
@@ -32,6 +34,7 @@ CREATE TABLE IF NOT EXISTS account_snapshots (
 
 CREATE TABLE IF NOT EXISTS plan_snapshots (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     advertiser_id BIGINT NOT NULL,
     advertiser_name TEXT NOT NULL,
     ad_id BIGINT NOT NULL,
@@ -61,6 +64,7 @@ CREATE TABLE IF NOT EXISTS plan_snapshots (
 
 CREATE TABLE IF NOT EXISTS plan_detail_snapshots (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     advertiser_id BIGINT NOT NULL,
     advertiser_name TEXT NOT NULL,
     ad_id BIGINT NOT NULL,
@@ -83,6 +87,7 @@ CREATE TABLE IF NOT EXISTS plan_detail_snapshots (
 
 CREATE TABLE IF NOT EXISTS product_snapshots (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     window_start TEXT NOT NULL,
     window_end TEXT NOT NULL,
     advertiser_id BIGINT NOT NULL,
@@ -104,6 +109,7 @@ CREATE TABLE IF NOT EXISTS product_snapshots (
 
 CREATE TABLE IF NOT EXISTS material_snapshots (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     window_start TEXT NOT NULL,
     window_end TEXT NOT NULL,
     advertiser_id BIGINT NOT NULL,
@@ -134,6 +140,7 @@ CREATE TABLE IF NOT EXISTS material_snapshots (
 
 CREATE TABLE IF NOT EXISTS material_rollups (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     window_start TEXT NOT NULL,
     window_end TEXT NOT NULL,
     material_key TEXT NOT NULL,
@@ -164,6 +171,7 @@ CREATE TABLE IF NOT EXISTS material_rollups (
 
 CREATE TABLE IF NOT EXISTS video_origin_flags (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     advertiser_id BIGINT NOT NULL,
     material_id TEXT NOT NULL,
     is_original INTEGER NOT NULL DEFAULT 0,
@@ -173,6 +181,7 @@ CREATE TABLE IF NOT EXISTS video_origin_flags (
 
 CREATE TABLE IF NOT EXISTS extended_sync_runs (
     snapshot_time TEXT PRIMARY KEY,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     window_start TEXT NOT NULL,
     window_end TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -261,6 +270,13 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
     updated_at INTEGER NOT NULL DEFAULT 0,
     source TEXT NOT NULL DEFAULT 'runtime',
     PRIMARY KEY (app_id, customer_center_id)
+);
+
+CREATE TABLE IF NOT EXISTS runtime_config_overrides (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    refresh_token TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS employees (
@@ -433,6 +449,7 @@ CREATE TABLE IF NOT EXISTS material_upload_job_target_assets (
 
 CREATE TABLE IF NOT EXISTS account_balances (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     advertiser_id BIGINT NOT NULL,
     advertiser_name TEXT NOT NULL,
     account_balance REAL NOT NULL DEFAULT 0,
@@ -443,6 +460,7 @@ CREATE TABLE IF NOT EXISTS account_balances (
 
 CREATE TABLE IF NOT EXISTS shared_wallets (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     main_wallet_id TEXT NOT NULL,
     wallet_name TEXT NOT NULL DEFAULT '',
     total_balance REAL NOT NULL DEFAULT 0,
@@ -453,6 +471,7 @@ CREATE TABLE IF NOT EXISTS shared_wallets (
 
 CREATE TABLE IF NOT EXISTS shared_wallet_account_relations (
     snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
     main_wallet_id TEXT NOT NULL,
     advertiser_id BIGINT NOT NULL,
     child_wallet_id TEXT NOT NULL DEFAULT '',
@@ -464,14 +483,29 @@ CREATE TABLE IF NOT EXISTS shared_wallet_account_relations (
 CREATE INDEX IF NOT EXISTS idx_account_snapshots_adv_time
 ON account_snapshots (advertiser_id, snapshot_time);
 
+CREATE INDEX IF NOT EXISTS idx_summary_snapshots_cc_time
+ON summary_snapshots (customer_center_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_account_snapshots_cc_adv_time
+ON account_snapshots (customer_center_id, advertiser_id, snapshot_time);
+
 CREATE INDEX IF NOT EXISTS idx_plan_snapshots_plan_time
 ON plan_snapshots (ad_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_plan_snapshots_cc_plan_time
+ON plan_snapshots (customer_center_id, ad_id, snapshot_time);
 
 CREATE INDEX IF NOT EXISTS idx_plan_detail_snapshots_plan_time
 ON plan_detail_snapshots (ad_id, snapshot_time);
 
+CREATE INDEX IF NOT EXISTS idx_plan_detail_snapshots_cc_plan_time
+ON plan_detail_snapshots (customer_center_id, ad_id, snapshot_time);
+
 CREATE INDEX IF NOT EXISTS idx_product_snapshots_plan_time
 ON product_snapshots (ad_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_product_snapshots_cc_plan_time
+ON product_snapshots (customer_center_id, ad_id, snapshot_time);
 
 CREATE INDEX IF NOT EXISTS idx_product_snapshots_product_time
 ON product_snapshots (product_id, snapshot_time);
@@ -479,14 +513,26 @@ ON product_snapshots (product_id, snapshot_time);
 CREATE INDEX IF NOT EXISTS idx_material_snapshots_plan_time
 ON material_snapshots (ad_id, snapshot_time);
 
+CREATE INDEX IF NOT EXISTS idx_material_snapshots_cc_plan_time
+ON material_snapshots (customer_center_id, ad_id, snapshot_time);
+
 CREATE INDEX IF NOT EXISTS idx_material_snapshots_material_time
 ON material_snapshots (material_id, snapshot_time);
 
 CREATE INDEX IF NOT EXISTS idx_material_rollups_snapshot_time
 ON material_rollups (snapshot_time);
 
+CREATE INDEX IF NOT EXISTS idx_material_rollups_cc_snapshot_time
+ON material_rollups (customer_center_id, snapshot_time);
+
 CREATE INDEX IF NOT EXISTS idx_video_origin_flags_material_time
 ON video_origin_flags (material_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_video_origin_flags_cc_material_time
+ON video_origin_flags (customer_center_id, material_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_extended_sync_runs_cc_time
+ON extended_sync_runs (customer_center_id, snapshot_time);
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_status_created
 ON alert_events (status, created_at);
@@ -539,8 +585,17 @@ ON material_upload_job_target_assets (job_id, target_id, file_id, status);
 CREATE INDEX IF NOT EXISTS idx_account_balances_adv_time
 ON account_balances (advertiser_id, snapshot_time);
 
+CREATE INDEX IF NOT EXISTS idx_account_balances_cc_adv_time
+ON account_balances (customer_center_id, advertiser_id, snapshot_time);
+
 CREATE INDEX IF NOT EXISTS idx_shared_wallets_wallet_time
 ON shared_wallets (main_wallet_id, snapshot_time);
 
+CREATE INDEX IF NOT EXISTS idx_shared_wallets_cc_time
+ON shared_wallets (customer_center_id, snapshot_time);
+
 CREATE INDEX IF NOT EXISTS idx_shared_wallet_account_rel_wallet_adv
 ON shared_wallet_account_relations (main_wallet_id, advertiser_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_shared_wallet_relations_cc_time
+ON shared_wallet_account_relations (customer_center_id, snapshot_time);

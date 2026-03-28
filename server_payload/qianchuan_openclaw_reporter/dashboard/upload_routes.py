@@ -15,7 +15,7 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         service.attach_material_upload_task(int(payload["id"]), str(task.id or ""))
         payload["task_id"] = str(task.id or "")
         payload["queued"] = True
-        payload["note"] = str(note or "上传任务已入队，后台正在执行。")
+        payload["note"] = str(note or "Upload job has been queued and is waiting for the worker.")
         return payload
 
     @app.get("/api/upload/targets")
@@ -41,9 +41,12 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         try:
             plan_ids = [int(item) for item in json.loads(str(target_plan_ids or "[]"))]
         except Exception as exc:
-            raise HTTPException(status_code=400, detail="target_plan_ids 格式错误") from exc
+            raise HTTPException(status_code=400, detail="target_plan_ids format is invalid") from exc
         payload = await service.create_material_upload_job(user, scope, query_text, plan_ids, files)
-        return JSONResponse(queue_upload_job(payload, "上传任务已入队，后台正在执行。"), status_code=202)
+        return JSONResponse(
+            queue_upload_job(payload, "Upload job has been queued and is waiting for the worker."),
+            status_code=202,
+        )
 
     @app.post("/api/upload/jobs/{job_id}/retry")
     async def retry_upload_job(
@@ -51,4 +54,15 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         user: dict[str, Any] = Depends(require_material_uploader),
     ) -> JSONResponse:
         payload = service.retry_material_upload_job(user, int(job_id))
-        return JSONResponse(queue_upload_job(payload, "重试任务已入队，后台正在执行。"), status_code=202)
+        return JSONResponse(
+            queue_upload_job(payload, "Retry job has been queued and is waiting for the worker."),
+            status_code=202,
+        )
+
+    @app.delete("/api/upload/jobs/{job_id}")
+    async def delete_upload_job(
+        job_id: int,
+        user: dict[str, Any] = Depends(require_material_uploader),
+    ) -> JSONResponse:
+        payload = service.delete_material_upload_job(user, int(job_id))
+        return JSONResponse({"ok": True, **payload})
