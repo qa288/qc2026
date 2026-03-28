@@ -1110,7 +1110,10 @@ class DashboardService:
         self, payload: dict[str, Any], allowed_advertiser_ids: set[int] | None
     ) -> dict[str, Any]:
         scoped_payload = self.performance_access.apply_account_scope(payload, allowed_advertiser_ids)
-        return self._apply_material_operator_rankings(scoped_payload, allowed_advertiser_ids=allowed_advertiser_ids)
+        return self._safe_apply_material_operator_rankings(
+            scoped_payload,
+            allowed_advertiser_ids=allowed_advertiser_ids,
+        )
 
     def _missing_summary_days(self, conn: Any, start_dt: datetime, end_dt: datetime) -> list[datetime]:
         return self.performance_access.missing_summary_days(conn, start_dt, end_dt)
@@ -1122,7 +1125,10 @@ class DashboardService:
         payload = self.performance_access.latest_snapshot(allowed_advertiser_ids)
         if not payload:
             return payload
-        return self._apply_material_operator_rankings(payload, allowed_advertiser_ids=allowed_advertiser_ids)
+        return self._safe_apply_material_operator_rankings(
+            payload,
+            allowed_advertiser_ids=allowed_advertiser_ids,
+        )
 
     def _latest_extended_sync_run(self, conn: Any) -> Any:
         return self.history_access.latest_extended_sync_run(conn)
@@ -3811,7 +3817,6 @@ class DashboardService:
                 file_advertiser_id_map[int(file_row["id"])] = set(all_advertiser_ids)
 
         file_assets: dict[tuple[int, int], dict[str, str]] = {}
-        generated_image_material_cache: dict[tuple[int, str], list[dict[str, Any]]] = {}
         for file_row in file_rows:
             file_id = int(file_row["id"])
             file_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
@@ -4037,11 +4042,11 @@ class DashboardService:
             success_count = 0
             failed_count = 0
             bind_errors: list[str] = []
+            marketing_goal = str(context.get("marketing_goal") or "").strip()
             reused_image_material = self._extract_plan_image_material(context)
             video_material_defaults = self._extract_plan_video_material_defaults(context)
             for file_row in candidate_file_rows:
                 file_id = int(file_row["id"])
-                cover_source_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
                 asset = file_assets.get((file_id, advertiser_id))
                 if not asset or not str(asset.get("video_id") or ""):
                     failed_count += 1
@@ -4058,31 +4063,14 @@ class DashboardService:
                     continue
                 try:
                     material_title = self._material_title_from_filename(str(file_row.get("original_name") or ""))
-                    bind_image_material = [dict(item) for item in reused_image_material]
-                    bind_video_cover_id = ""
-                    if not bind_image_material and str(context.get("marketing_goal") or "").strip() == "VIDEO_PROM_GOODS":
-                        bind_image_material = self._build_cover_image_material(
-                            client,
-                            advertiser_id,
-                            cover_source_path,
-                            context,
-                            material_title,
-                            generated_image_material_cache,
-                        )
-                        if not bind_image_material:
-                            raise RuntimeError(
-                                "VIDEO_PROM_GOODS 计划缺少可用图片素材，且无法仅依赖 /open_api/2/file/video/ad/ 自动补图。"
-                            )
-                        bind_video_cover_id = self._first_text(
-                            bind_image_material[0].get("image_ids", [None])[0] if bind_image_material else "",
-                            bind_image_material[0].get("image_id") if bind_image_material else "",
-                        )
+                    bind_image_material = [] if marketing_goal == "VIDEO_PROM_GOODS" else [dict(item) for item in reused_image_material]
+                    bind_video_cover_id = str(video_material_defaults.get("video_cover_id") or "")
                     client.add_plan_material(
                         advertiser_id=advertiser_id,
                         ad_id=ad_id,
                         material_title=material_title,
                         video_id=str(asset.get("video_id") or ""),
-                        marketing_goal=str(context.get("marketing_goal") or ""),
+                        marketing_goal=marketing_goal,
                         product_id=str(context.get("product_id") or ""),
                         image_material=bind_image_material,
                         video_image_mode=str(video_material_defaults.get("image_mode") or ""),
@@ -5869,6 +5857,30 @@ class DashboardService:
         next_payload["summary"] = summary
         return next_payload
 
+    def _safe_apply_material_operator_rankings(
+        self,
+        payload: dict[str, Any],
+        *,
+        allowed_advertiser_ids: set[int] | None = None,
+        range_key: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+    ) -> dict[str, Any]:
+        try:
+            return self._apply_material_operator_rankings(
+                payload,
+                allowed_advertiser_ids=allowed_advertiser_ids,
+                range_key=range_key,
+                start_date=start_date,
+                end_date=end_date,
+                snapshot_time=snapshot_time,
+            )
+        except Exception:  # noqa: BLE001
+            degraded_payload = dict(payload or {})
+            degraded_payload["material_operator_rankings_skipped"] = True
+            return degraded_payload
+
     def get_performance_snapshot(
         self,
         range_key: str,
@@ -5917,7 +5929,7 @@ class DashboardService:
             payload["accounts"],
             payload["plans"],
         )
-        payload = self._apply_material_operator_rankings(
+        payload = self._safe_apply_material_operator_rankings(
             payload,
             range_key=normalized,
             start_date=start_dt.strftime("%Y-%m-%d"),

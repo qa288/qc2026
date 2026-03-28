@@ -338,7 +338,7 @@
 
       <section class="view-section" data-view="uploads">
         <section class="panel upload-panel">
-          <div class="panel-head">
+          <div class="panel-head access-panel-head">
             <div>
               <h2>素材上传</h2>
             </div>
@@ -417,41 +417,47 @@
 
       <section class="view-section" data-view="access">
         <section class="panel access-panel">
-          <div class="panel-head">
+          <div class="panel-head access-panel-head">
             <div>
               <h2>账号与权限</h2>
             </div>
             <div class="meta-block compact single-line">
-              <span>维护账号、范围、关键词和上传权限。</span>
+              <span>维护后台账号、可见范围、关键词归属和素材上传权限。</span>
             </div>
           </div>
-          <div class="access-stack">
+          <div id="accessOverview" class="access-overview-grid"></div>
+          <div class="access-layout">
             <section class="access-list-card">
-              <div class="subpanel-head">
+              <div class="subpanel-head access-card-head">
                 <div>
+                  <p class="section-kicker">Member Roster</p>
                   <h3>后台账号</h3>
                 </div>
-                <div class="section-range-meta compact-inline">主管看账户，运营看关键词。</div>
+                <div class="section-range-meta compact-inline">左侧选账号，右侧编辑角色能力、可见范围和关键词规则。</div>
               </div>
-              <div class="table-shell tall">
+              <div class="table-shell tall access-user-table-shell">
                 <table id="userTable" class="data-table compact"></table>
               </div>
             </section>
 
             <section class="access-editor-card">
-              <div class="subpanel-head">
-                <div>
-                  <h3>账号配置</h3>
+              <div id="accessSpotlight" class="access-spotlight"></div>
+
+              <section class="ownership-card access-config-card">
+                <div class="subpanel-head access-card-head">
+                  <div>
+                    <p class="section-kicker">Account Setup</p>
+                    <h3>账号配置</h3>
+                  </div>
+                  <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">新建账号时可同时填写关键词。</div>
                 </div>
-                <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">新建账号时可同时填写关键词。</div>
-              </div>
-              <form id="userForm" class="ownership-form-grid">
+                <form id="userForm" class="ownership-form-grid access-form-grid">
                 <label>
                   <span>用户名</span>
                   <input name="username" type="text" placeholder="operator_a / supervisor_a" required />
                 </label>
                 <label>
-                  <span>显示名</span>
+                  <span>显示名称</span>
                   <input name="display_name" type="text" placeholder="运营A / 老板" />
                 </label>
                 <label>
@@ -470,23 +476,27 @@
                   <span>运营关键词</span>
                   <textarea name="keyword_seed" rows="3" placeholder="支持逗号、顿号、分号或换行分隔多个关键词"></textarea>
                 </label>
-                <label class="toggle-chip">
-                  <input name="enabled" type="checkbox" checked />
-                  <span>启用</span>
-                </label>
-                <label class="toggle-chip" id="uploadPermissionField">
-                  <input name="upload_materials_enabled" type="checkbox" />
-                  <span>允许上传素材</span>
-                </label>
-                <div class="ownership-form-actions">
-                  <button type="submit" class="button primary compact">保存账号</button>
-                  <button type="button" id="userFormReset" class="button ghost compact">新建</button>
+                <div class="access-toggle-row wide-field">
+                  <label class="toggle-chip">
+                    <input name="enabled" type="checkbox" checked />
+                    <span>启用账号</span>
+                  </label>
+                  <label class="toggle-chip" id="uploadPermissionField">
+                    <input name="upload_materials_enabled" type="checkbox" />
+                    <span>允许上传素材</span>
+                  </label>
                 </div>
-              </form>
+                <div class="ownership-form-actions access-form-actions wide-field">
+                  <button type="submit" class="button primary compact">保存账号</button>
+                  <button type="button" id="userFormReset" class="button ghost compact">新建账号</button>
+                </div>
+                </form>
+              </section>
 
               <section class="ownership-card">
-                <div class="subpanel-head">
+                <div class="subpanel-head access-card-head">
                   <div>
+                    <p class="section-kicker">Scope Mapping</p>
                     <h3>账户范围</h3>
                   </div>
                 </div>
@@ -508,8 +518,9 @@
               </section>
 
               <section class="ownership-card hidden" id="operatorKeywordSection">
-                <div class="subpanel-head">
+                <div class="subpanel-head access-card-head">
                   <div>
+                    <p class="section-kicker">Keyword Rules</p>
                     <h3>运营关键词</h3>
                   </div>
                 </div>
@@ -528,8 +539,9 @@
               </section>
 
               <section class="ownership-card hidden" id="operatorMaterialSection">
-                <div class="subpanel-head">
+                <div class="subpanel-head access-card-head">
                   <div>
+                    <p class="section-kicker">Matched Assets</p>
                     <h3>命中素材</h3>
                   </div>
                   <div class="ownership-inline-actions">

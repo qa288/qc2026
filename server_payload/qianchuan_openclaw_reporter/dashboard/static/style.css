@@ -1506,6 +1506,90 @@ body {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.access-panel-head {
+  margin-bottom: 16px;
+}
+
+.access-layout {
+  display: grid;
+  grid-template-columns: minmax(340px, 0.92fr) minmax(0, 1.08fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.access-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.access-overview-card {
+  display: grid;
+  gap: 8px;
+  min-height: 120px;
+  padding: 16px 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(18, 42, 67, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 250, 255, 0.95)),
+    linear-gradient(135deg, rgba(22, 119, 255, 0.04), rgba(15, 93, 216, 0.02));
+  box-shadow: 0 14px 34px rgba(18, 42, 67, 0.06);
+}
+
+.access-overview-card.is-accent {
+  border-color: rgba(22, 119, 255, 0.18);
+  background:
+    linear-gradient(180deg, rgba(244, 249, 255, 0.98), rgba(255, 255, 255, 0.98)),
+    linear-gradient(135deg, rgba(22, 119, 255, 0.08), rgba(15, 93, 216, 0.03));
+}
+
+.access-overview-card.is-highlight {
+  border-color: rgba(20, 59, 47, 0.14);
+  background:
+    linear-gradient(180deg, rgba(246, 252, 249, 0.98), rgba(255, 255, 255, 0.98)),
+    linear-gradient(135deg, rgba(20, 59, 47, 0.08), rgba(22, 119, 255, 0.02));
+}
+
+.access-overview-card.is-muted {
+  opacity: 0.84;
+}
+
+.access-overview-label,
+.section-kicker,
+.access-spotlight-kicker {
+  color: rgba(48, 72, 98, 0.72);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.access-overview-value {
+  font-size: 28px;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.access-overview-detail {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.access-card-head {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.access-card-head h3 {
+  margin-top: 2px;
+}
+
+.access-user-table-shell {
+  min-height: clamp(560px, calc(100vh - 320px), 760px);
+}
+
 .decision-main,
 .decision-side {
   min-width: 0;
@@ -3159,6 +3243,11 @@ body {
     padding: 16px 16px 32px;
   }
 
+  .access-overview-grid,
+  .access-spotlight-grid {
+    grid-template-columns: 1fr;
+  }
+
   .view-tabs {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3306,7 +3395,6 @@ body {
 }
 
 .ownership-layout,
-.access-layout,
 .upload-layout {
   display: grid;
   grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.72fr);
@@ -3334,9 +3422,116 @@ body {
   gap: 12px;
 }
 
+.access-editor-card {
+  align-content: start;
+}
+
 .access-list-card,
 .access-editor-card {
   max-width: 100%;
+}
+
+.access-spotlight {
+  min-width: 0;
+}
+
+.access-spotlight-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px;
+  border-radius: 22px;
+  border: 1px solid rgba(20, 59, 47, 0.1);
+  background:
+    radial-gradient(circle at top right, rgba(22, 119, 255, 0.12), transparent 28%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(244, 250, 255, 0.94));
+  box-shadow: 0 18px 38px rgba(18, 42, 67, 0.08);
+}
+
+.access-spotlight-card.is-empty {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(247, 250, 254, 0.96));
+  border-style: dashed;
+}
+
+.access-spotlight-card strong {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.access-spotlight-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.access-spotlight-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.access-spotlight-identity {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.access-spotlight-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.access-spotlight-copy h3 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+
+.access-spotlight-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.access-spotlight-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.access-spotlight-stat {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(18, 42, 67, 0.08);
+}
+
+.access-spotlight-stat span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.access-spotlight-stat strong {
+  font-size: 15px;
+}
+
+.access-spotlight-note {
+  margin: 0;
+}
+
+.access-config-card {
+  display: grid;
+  gap: 14px;
 }
 
 .upload-target-toolbar {
@@ -3365,6 +3560,17 @@ body {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
+}
+
+.access-form-grid {
+  gap: 16px;
+}
+
+.access-toggle-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .ownership-form-grid label,
@@ -3411,6 +3617,12 @@ body {
   display: flex;
   align-items: end;
   gap: 10px;
+}
+
+.access-form-actions {
+  justify-content: flex-end;
+  padding-top: 4px;
+  border-top: 1px solid rgba(13, 42, 77, 0.08);
 }
 
 .ownership-actions-end {
@@ -3463,6 +3675,89 @@ body {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.access-user-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.access-user-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.access-user-name {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.access-user-subline {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.access-user-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.access-user-note {
+  color: rgba(31, 41, 55, 0.78);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.access-user-note.strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.access-user-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #12354d;
+  background: rgba(22, 119, 255, 0.12);
+  border: 1px solid rgba(22, 119, 255, 0.12);
+  flex-shrink: 0;
+}
+
+.access-user-avatar.large {
+  width: 48px;
+  height: 48px;
+  border-radius: 16px;
+  font-size: 18px;
+}
+
+.access-user-avatar.role-admin,
+.pill.role-admin {
+  background: rgba(20, 59, 47, 0.12);
+  color: #143b2f;
+}
+
+.access-user-avatar.role-supervisor,
+.pill.role-supervisor {
+  background: rgba(22, 119, 255, 0.12);
+  color: #0f5dd8;
+}
+
+.access-user-avatar.role-operator,
+.pill.role-operator {
+  background: rgba(245, 158, 11, 0.14);
+  color: #9a5b00;
 }
 
 .scope-checklist {
@@ -3937,6 +4232,11 @@ body {
   .scope-check-meta {
     align-items: flex-start;
     justify-content: flex-start;
+  }
+
+  .access-overview-grid,
+  .access-spotlight-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .public-summary-strip {

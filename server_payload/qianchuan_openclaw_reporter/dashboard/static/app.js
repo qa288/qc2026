@@ -213,6 +213,8 @@ const commentRefreshButton = document.getElementById("commentRefreshButton");
 const userTable = document.getElementById("userTable");
 const userForm = document.getElementById("userForm");
 const userFormReset = document.getElementById("userFormReset");
+const accessOverview = document.getElementById("accessOverview");
+const accessSpotlight = document.getElementById("accessSpotlight");
 const userEditorStatus = document.getElementById("userEditorStatus");
 const uploadPermissionField = document.getElementById("uploadPermissionField");
 const operatorKeywordSeedField = document.getElementById("operatorKeywordSeedField");
@@ -3834,12 +3836,149 @@ function roleLabel(role) {
   return role || "--";
 }
 
+function roleTone(role) {
+  if (role === "admin") return "admin";
+  if (role === "supervisor") return "supervisor";
+  if (role === "operator") return "operator";
+  return "neutral";
+}
+
 function userScopeSummary(user) {
   if (!user) return "--";
   if (user.role === "admin") return "全部账户";
   if (user.role === "supervisor") return `${formatNumber(user.scope_count || 0)} 个账户`;
   if (user.role === "operator") return "按关键词";
   return "--";
+}
+
+function userAvatarText(user) {
+  const source = String(user?.display_name || user?.username || "?").trim();
+  return escapeHtml(source.slice(0, 1).toUpperCase() || "?");
+}
+
+function userCapabilitySummary(user) {
+  if (!user) return "--";
+  if (user.role === "admin") return "全量访问，默认允许上传素材";
+  if (user.role === "supervisor") {
+    return user.upload_materials_enabled ? "管理勾选账户并允许上传素材" : "管理勾选账户，上传权限关闭";
+  }
+  if (user.role === "operator") {
+    return `按关键词归属素材，当前 ${formatNumber(user.keyword_count || 0)} 条规则`;
+  }
+  return "--";
+}
+
+function uploadPermissionSummary(user) {
+  if (!user) return "--";
+  if (user.role === "admin") return "默认允许";
+  if (user.role === "supervisor") return user.upload_materials_enabled ? "已开启" : "已关闭";
+  return "不适用";
+}
+
+function renderAccessOverview() {
+  if (!accessOverview) return;
+  const users = Array.isArray(state.users) ? state.users : [];
+  const selected = selectedUserRecord();
+  const adminCount = users.filter((item) => item.role === "admin").length;
+  const supervisorCount = users.filter((item) => item.role === "supervisor").length;
+  const operatorCount = users.filter((item) => item.role === "operator").length;
+  const enabledCount = users.filter((item) => Boolean(item.enabled)).length;
+  const uploadEnabledCount = users.filter((item) => item.role === "admin" || (item.role === "supervisor" && item.upload_materials_enabled)).length;
+  accessOverview.innerHTML = [
+    {
+      label: "已配置账号",
+      value: formatNumber(users.length),
+      detail: users.length ? `启用 ${formatNumber(enabledCount)} 个` : "等待创建账号",
+      tone: users.length ? "" : "muted",
+    },
+    {
+      label: "角色分布",
+      value: `${formatNumber(adminCount)} / ${formatNumber(supervisorCount)} / ${formatNumber(operatorCount)}`,
+      detail: "管理员 / 主管 / 运营",
+      tone: "",
+    },
+    {
+      label: "上传能力",
+      value: formatNumber(uploadEnabledCount),
+      detail: "管理员与已开上传的主管",
+      tone: uploadEnabledCount ? "accent" : "muted",
+    },
+    {
+      label: "当前焦点",
+      value: escapeHtml(selected?.display_name || selected?.username || "未选择账号"),
+      detail: selected ? `${escapeHtml(roleLabel(selected.role))} · ${escapeHtml(userScopeSummary(selected))}` : "从左侧成员列表开始",
+      tone: selected ? "highlight" : "muted",
+    },
+  ].map((item) => `
+    <article class="access-overview-card ${item.tone ? `is-${item.tone}` : ""}">
+      <span class="access-overview-label">${item.label}</span>
+      <strong class="access-overview-value">${item.value}</strong>
+      <span class="access-overview-detail">${item.detail}</span>
+    </article>
+  `).join("");
+}
+
+function renderAccessSpotlight() {
+  if (!accessSpotlight) return;
+  if (!isAdmin()) {
+    accessSpotlight.innerHTML = `
+      <div class="access-spotlight-card is-empty">
+        <span class="access-spotlight-kicker">Access Overview</span>
+        <strong>当前角色为只读视图</strong>
+        <p>只有管理员可以维护后台账号和权限配置。</p>
+      </div>
+    `;
+    return;
+  }
+  const user = selectedUserRecord();
+  if (!user) {
+    accessSpotlight.innerHTML = `
+      <div class="access-spotlight-card is-empty">
+        <span class="access-spotlight-kicker">Access Overview</span>
+        <strong>选择一个账号开始编辑</strong>
+        <p>左侧成员列表支持快速切换，右侧会同步展示角色、范围和关键词配置。</p>
+      </div>
+    `;
+    return;
+  }
+  const updatedAt = String(user.updated_at || user.created_at || "").trim();
+  accessSpotlight.innerHTML = `
+    <div class="access-spotlight-card">
+      <div class="access-spotlight-head">
+        <div class="access-spotlight-identity">
+          <span class="access-user-avatar large role-${escapeHtml(roleTone(user.role))}">${userAvatarText(user)}</span>
+          <div class="access-spotlight-copy">
+            <span class="access-spotlight-kicker">Current Selection</span>
+            <h3>${escapeHtml(user.display_name || user.username)}</h3>
+            <div class="access-spotlight-meta">
+              <span class="pill role-${escapeHtml(roleTone(user.role))}">${escapeHtml(roleLabel(user.role))}</span>
+              <span class="mono">@${escapeHtml(user.username)}</span>
+            </div>
+          </div>
+        </div>
+        <span class="pill ${user.enabled ? "active" : ""}">${user.enabled ? "启用中" : "已停用"}</span>
+      </div>
+      <div class="access-spotlight-grid">
+        <div class="access-spotlight-stat">
+          <span>可见范围</span>
+          <strong>${escapeHtml(userScopeSummary(user))}</strong>
+        </div>
+        <div class="access-spotlight-stat">
+          <span>上传权限</span>
+          <strong>${escapeHtml(uploadPermissionSummary(user))}</strong>
+        </div>
+        <div class="access-spotlight-stat">
+          <span>关键词数</span>
+          <strong>${user.role === "operator" ? formatNumber(user.keyword_count || 0) : "--"}</strong>
+        </div>
+        <div class="access-spotlight-stat">
+          <span>最近更新</span>
+          <strong>${escapeHtml(updatedAt ? updatedAt.slice(0, 16).replace("T", " ") : "--")}</strong>
+        </div>
+      </div>
+      <p class="access-spotlight-note">${escapeHtml(userCapabilitySummary(user))}</p>
+    </div>
+  `;
 }
 
 function syncUserRoleFields() {
@@ -4631,6 +4770,8 @@ function resetUserFormState() {
   renderUserKeywordTable();
   renderUserMatchedMaterialTable();
   syncAccessRolePanels();
+  renderAccessOverview();
+  renderAccessSpotlight();
   if (isAdmin()) focusFirstInput(userForm, 'input[name="username"]');
 }
 
@@ -4651,38 +4792,60 @@ function fillUserForm(user) {
     "neutral",
   );
   syncAccessRolePanels();
+  renderAccessOverview();
+  renderAccessSpotlight();
 }
 
 function renderUserTable() {
   if (!userTable) return;
   if (!isAdmin()) {
     userTable.innerHTML = '<tbody><tr><td class="empty-cell">当前账号为只读角色，不能配置后台账号。</td></tr></tbody>';
+    renderAccessOverview();
+    renderAccessSpotlight();
     return;
   }
   userTable.innerHTML = `
     <thead>
       <tr>
-        <th>用户名</th>
-        <th>显示名</th>
-        <th>角色</th>
-        <th>数据范围</th>
-        <th>关键词</th>
-        <th>上传</th>
+        <th>成员</th>
+        <th>角色与能力</th>
+        <th>可见范围</th>
         <th>状态</th>
       </tr>
     </thead>
     <tbody>
       ${state.users.length ? state.users.map((item) => `
         <tr data-user-id="${item.id}" class="${Number(state.selectedUserId) === Number(item.id) ? "active-row" : ""}">
-          <td>${escapeHtml(item.username)}</td>
-          <td>${escapeHtml(item.display_name || "--")}</td>
-          <td>${escapeHtml(roleLabel(item.role))}</td>
-          <td>${escapeHtml(userScopeSummary(item))}</td>
-          <td class="mono">${item.role === "operator" ? formatNumber(item.keyword_count || 0) : "--"}</td>
-          <td>${item.role === "admin" ? '<span class="pill active">允许</span>' : item.role === "supervisor" ? `<span class="pill ${item.upload_materials_enabled ? "active" : ""}">${item.upload_materials_enabled ? "允许" : "关闭"}</span>` : "--"}</td>
-          <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
+          <td>
+            <div class="access-user-cell">
+              <span class="access-user-avatar role-${escapeHtml(roleTone(item.role))}">${userAvatarText(item)}</span>
+              <div class="access-user-copy">
+                <strong class="access-user-name">${escapeHtml(item.display_name || item.username)}</strong>
+                <span class="access-user-subline mono">@${escapeHtml(item.username)}</span>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div class="access-user-tags">
+              <span class="pill role-${escapeHtml(roleTone(item.role))}">${escapeHtml(roleLabel(item.role))}</span>
+              ${item.role === "admin"
+                ? '<span class="pill active">默认可上传</span>'
+                : item.role === "supervisor"
+                  ? `<span class="pill ${item.upload_materials_enabled ? "active" : ""}">${item.upload_materials_enabled ? "可上传" : "仅查看"}</span>`
+                  : '<span class="pill">关键词归属</span>'}
+            </div>
+            <div class="access-user-note">${escapeHtml(userCapabilitySummary(item))}</div>
+          </td>
+          <td>
+            <div class="access-user-note strong">${escapeHtml(userScopeSummary(item))}</div>
+            <div class="access-user-subline">${item.role === "operator" ? `关键词 ${formatNumber(item.keyword_count || 0)} 条` : item.role === "supervisor" ? `账户 ${formatNumber(item.scope_count || 0)} 个` : "默认覆盖全部账户"}</div>
+          </td>
+          <td>
+            <span class="pill ${item.enabled ? "active" : ""}">${item.enabled ? "启用" : "停用"}</span>
+            <div class="access-user-subline">${escapeHtml(String(item.updated_at || item.created_at || "--").slice(0, 16).replace("T", " "))}</div>
+          </td>
         </tr>
-      `).join("") : '<tr><td colspan="7" class="empty-cell">还没有后台账号。</td></tr>'}
+      `).join("") : '<tr><td colspan="4" class="empty-cell">还没有后台账号。</td></tr>'}
     </tbody>
   `;
   userTable.querySelectorAll("tbody tr[data-user-id]").forEach((row) => {
@@ -4690,6 +4853,8 @@ function renderUserTable() {
       await selectUserManager(Number(row.dataset.userId));
     });
   });
+  renderAccessOverview();
+  renderAccessSpotlight();
 }
 
 function renderScopeChecklist() {
