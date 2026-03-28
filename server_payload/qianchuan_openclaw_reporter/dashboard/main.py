@@ -93,6 +93,7 @@ LATEST_TOKEN_PATH = settings.latest_token_path
 TIMEZONE = settings.timezone
 ALERT_COOLDOWN_DEFAULT = settings.alert_cooldown_default
 RETENTION_DAYS = settings.retention_days
+EXTENDED_RETENTION_DAYS = settings.extended_retention_days
 DASHBOARD_USERNAME = settings.dashboard_username
 DASHBOARD_PASSWORD = settings.dashboard_password
 SESSION_SECRET = settings.session_secret
@@ -107,6 +108,7 @@ RANGE_LABEL_MAP = {
     "custom": "指定日期范围",
 }
 DETAIL_SYNC_INTERVAL_MINUTES = settings.detail_sync_interval_minutes
+EXTENDED_HISTORY_REFRESH_DAYS = settings.extended_history_refresh_days
 ENABLE_IN_PROCESS_SCHEDULER = settings.enable_in_process_scheduler
 ROLE_ADMIN = "admin"
 ROLE_SUPERVISOR = "supervisor"
@@ -449,6 +451,7 @@ class DashboardService:
 
     def _ensure_material_preview_schema_locked(self, conn: Any) -> None:
         for table_name in ("material_snapshots", "material_rollups"):
+            self._ensure_column_locked(conn, table_name, "create_time", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column_locked(conn, table_name, "cover_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column_locked(conn, table_name, "aweme_item_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column_locked(conn, table_name, "video_url", "TEXT NOT NULL DEFAULT ''")
@@ -1506,6 +1509,60 @@ class DashboardService:
         return ""
 
     @staticmethod
+    def _format_unix_time_text(value: Any) -> str:
+        try:
+            epoch = float(value or 0.0)
+        except (TypeError, ValueError):
+            return ""
+        if epoch <= 0:
+            return ""
+        if epoch >= 1_000_000_000_000:
+            epoch = epoch / 1000.0
+        try:
+            return datetime.fromtimestamp(epoch, ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+        except (OverflowError, OSError, ValueError):
+            return ""
+
+    @classmethod
+    def _normalize_datetime_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (int, float)):
+            return cls._format_unix_time_text(value)
+
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.isdigit():
+            unix_text = cls._format_unix_time_text(text)
+            if unix_text:
+                return unix_text
+
+        normalized = text.replace("/", "-")
+        iso_candidate = normalized
+        if iso_candidate.endswith("Z"):
+            iso_candidate = f"{iso_candidate[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(iso_candidate)
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(ZoneInfo(TIMEZONE))
+            return parsed.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(normalized, fmt)
+                if fmt == "%Y-%m-%d":
+                    return parsed.strftime("%Y-%m-%d 00:00:00")
+                if fmt == "%Y-%m-%d %H:%M":
+                    return parsed.strftime("%Y-%m-%d %H:%M:00")
+                return parsed.strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+        return text.replace("T", " ")[:19]
+
+    @staticmethod
     def _detail_material_types(config: dict[str, Any]) -> list[str]:
         values = config.get("detail_material_types") or PLAN_MATERIAL_TYPES
         items: list[str] = []
@@ -1726,6 +1783,79 @@ class DashboardService:
                 chosen.get("material_url"),
             ),
         }
+
+    @classmethod
+    def _extract_material_create_time(cls, material_type: str, row: dict[str, Any]) -> str:
+        material_info = cls._json_object(row.get("material_info"))
+        preferred_keys = {
+            "VIDEO": ["video_material"],
+            "IMAGE": ["image_material"],
+            "TITLE": ["title_material"],
+            "CAROUSEL": ["carousel_material"],
+            "LIVE_ROOM": ["live_room_material", "room_material"],
+        }
+        candidate_sections: list[dict[str, Any]] = []
+        for key in preferred_keys.get(material_type, []):
+            value = material_info.get(key)
+            if isinstance(value, dict):
+                candidate_sections.append(value)
+        for value in material_info.values():
+            if isinstance(value, dict) and value not in candidate_sections:
+                candidate_sections.append(value)
+
+        for item in [row, material_info, *candidate_sections]:
+            if not isinstance(item, dict):
+                continue
+            create_time = cls._normalize_datetime_text(
+                cls._first_text(
+                    item.get("create_time"),
+                    item.get("createTime"),
+                    item.get("created_time"),
+                    item.get("createdTime"),
+                    item.get("created_at"),
+                    item.get("createdAt"),
+                    item.get("material_create_time"),
+                    item.get("materialCreateTime"),
+                )
+            )
+            if create_time:
+                return create_time
+        return ""
+
+    @classmethod
+    def _extract_material_product_names(cls, raw_payload: Any) -> list[str]:
+        payload = cls._json_object(raw_payload)
+        product_info = payload.get("product_info")
+        if isinstance(product_info, dict):
+            items = [product_info]
+        elif isinstance(product_info, list):
+            items = [item for item in product_info if isinstance(item, dict)]
+        else:
+            items = []
+        names: list[str] = []
+        for item in items:
+            product_name = cls._first_text(item.get("product_name"), item.get("name"))
+            if product_name and product_name not in names:
+                names.append(product_name)
+        return names
+
+    @staticmethod
+    def _summarize_material_product_names(names: list[str]) -> str:
+        if not names:
+            return ""
+        if len(names) == 1:
+            return names[0]
+        summary = " / ".join(names[:2])
+        if len(names) > 2:
+            return f"{summary} 等{len(names)}个商品"
+        return summary
+
+    @classmethod
+    def _extract_material_library_image_id(cls, raw_payload: Any) -> str:
+        payload = cls._json_object(raw_payload)
+        material_info = cls._json_object(payload.get("material_info"))
+        image_material = cls._json_object(material_info.get("image_material"))
+        return cls._first_text(image_material.get("image_id"), image_material.get("imageId"))
 
     @classmethod
     def _normalize_image_material_payload(cls, payload: Any) -> list[dict[str, Any]]:
@@ -1964,6 +2094,7 @@ class DashboardService:
         stats_info = row.get("stats_info") or {}
         identity = cls._extract_material_identity(material_type, row)
         preview = cls._extract_material_preview(material_type, row)
+        create_time = cls._extract_material_create_time(material_type, row)
         return (
             snapshot_time,
             window_start,
@@ -1976,6 +2107,7 @@ class DashboardService:
             identity["material_key"],
             identity["material_id"],
             identity["material_name"],
+            create_time,
             identity["video_id"],
             preview["cover_url"],
             preview["aweme_item_id"],
@@ -2768,6 +2900,7 @@ class DashboardService:
                 {
                     "material_key": material_key,
                     "material_id": str(row.get("material_id") or "").strip(),
+                    "create_time": str(row.get("create_time") or "").strip(),
                     "material_name": str(row.get("material_name") or "").strip() or "未命名素材",
                     "material_type": str(row.get("material_type") or "").strip() or "OTHER",
                     "video_id": str(row.get("video_id") or "").strip(),
@@ -2805,6 +2938,12 @@ class DashboardService:
             group["plan_ids"].add(int(row.get("ad_id", 0) or 0))
             group["advertiser_ids"].add(int(row.get("advertiser_id", 0) or 0))
             group["is_original"] = bool(group["is_original"] or row.get("is_original"))
+            row_create_time = str(row.get("create_time") or "").strip()
+            if row_create_time and (
+                not str(group.get("create_time") or "").strip()
+                or row_create_time < str(group.get("create_time") or "").strip()
+            ):
+                group["create_time"] = row_create_time
             if not group["cover_url"]:
                 group["cover_url"] = str(row.get("cover_url") or "").strip()
             if not group["aweme_item_id"]:
@@ -2843,6 +2982,7 @@ class DashboardService:
                     "material_key": group["material_key"],
                     "material_id": group["material_id"],
                     "material_name": group["material_name"],
+                    "create_time": str(group.get("create_time") or ""),
                     "material_type": group["material_type"],
                     "video_id": group["video_id"],
                     "cover_url": group.get("cover_url", ""),
@@ -2866,16 +3006,21 @@ class DashboardService:
                     "settled_roi": settled_roi,
                     "pay_order_cost": pay_order_cost,
                     "settled_amount_rate": settled_amount_rate,
+                    "product_info_text": "",
+                    "overall_show_count": 0,
+                    "overall_click_count": 0,
+                    "overall_ctr": 0.0,
                 }
             )
         material_rows.sort(
             key=lambda item: (
-                -item["order_count"],
-                -item["pay_amount"],
-                -item["roi"],
-                -item["stat_cost"],
-                item["material_name"],
-            )
+                str(item.get("create_time") or ""),
+                int(item["order_count"]),
+                float(item["pay_amount"]),
+                float(item["roi"]),
+                float(item["stat_cost"]),
+            ),
+            reverse=True,
         )
         return material_rows
 
@@ -2910,6 +3055,7 @@ class DashboardService:
                     str(group["material_key"] or ""),
                     str(group["material_id"] or ""),
                     str(group["material_name"] or ""),
+                    str(group.get("create_time") or ""),
                     str(group["material_type"] or ""),
                     str(group["video_id"] or ""),
                     str(group.get("cover_url") or ""),
@@ -3106,6 +3252,12 @@ class DashboardService:
             group["plan_ids"].update(plan_ids)
             group["advertiser_ids"].update(advertiser_ids)
             group["is_original"] = bool(group.get("is_original")) or bool(row.get("is_original"))
+            row_create_time = str(row.get("create_time") or "").strip()
+            if row_create_time and (
+                not str(group.get("create_time") or "").strip()
+                or row_create_time < str(group.get("create_time") or "").strip()
+            ):
+                group["create_time"] = row_create_time
             if (
                 order_count > int(group.get("_top_plan_orders", -1))
                 or (
@@ -3131,6 +3283,7 @@ class DashboardService:
                 {
                     "material_key": str(group.get("material_key") or ""),
                     "material_id": str(group.get("material_id") or ""),
+                    "create_time": str(group.get("create_time") or ""),
                     "material_name": str(group.get("material_name") or "") or "未命名素材",
                     "material_type": str(group.get("material_type") or "") or "OTHER",
                     "video_id": str(group.get("video_id") or ""),
@@ -3155,18 +3308,102 @@ class DashboardService:
                     "settled_roi": round(settled_pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
                     "pay_order_cost": round(stat_cost / order_count, 2) if order_count > 0 else 0.0,
                     "settled_amount_rate": round(settled_pay_amount / total_pay_amount * 100.0, 2) if total_pay_amount > 0 else 0.0,
+                    "product_info_text": "",
+                    "overall_show_count": 0,
+                    "overall_click_count": 0,
+                    "overall_ctr": 0.0,
                 }
             )
         rankings.sort(
             key=lambda item: (
-                -int(item["order_count"]),
-                -float(item["pay_amount"]),
-                -float(item["roi"]),
-                -float(item["stat_cost"]),
-                str(item["material_name"]),
-            )
+                str(item.get("create_time") or ""),
+                int(item["order_count"]),
+                float(item["pay_amount"]),
+                float(item["roi"]),
+                float(item["stat_cost"]),
+            ),
+            reverse=True,
         )
         return rankings
+
+    def _filter_material_rows_by_create_time_window(
+        self,
+        rows: list[dict[str, Any]],
+        start_dt: datetime | None,
+        end_dt: datetime | None,
+        tz_name: str,
+    ) -> list[dict[str, Any]]:
+        if start_dt is None or end_dt is None:
+            return rows
+        tz = ZoneInfo(str(tz_name or TIMEZONE))
+        start_text = start_dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+        end_text = end_dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+        filtered_rows: list[dict[str, Any]] = []
+        for raw_row in rows:
+            row = dict(raw_row)
+            create_time = self._normalize_datetime_text(row.get("create_time"))
+            if not create_time:
+                continue
+            row["create_time"] = create_time
+            if start_text <= create_time <= end_text:
+                filtered_rows.append(row)
+        return filtered_rows
+
+    def _apply_material_snapshot_context(
+        self,
+        conn: Any,
+        items: list[dict[str, Any]],
+        snapshot_times: list[str],
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not items or not snapshot_times:
+            return items
+        placeholders = ",".join("?" for _ in snapshot_times)
+        clauses = [f"snapshot_time IN ({placeholders})"]
+        params: list[Any] = list(snapshot_times)
+        if allowed_advertiser_ids:
+            allowed = sorted(int(item) for item in allowed_advertiser_ids if int(item or 0))
+            if allowed:
+                clauses.append(f"advertiser_id IN ({','.join('?' for _ in allowed)})")
+                params.extend(allowed)
+        rows = conn.execute(
+            f"""
+            SELECT material_key, product_show_count, product_click_count, raw_json
+            FROM material_snapshots
+            WHERE {" AND ".join(clauses)}
+            """,
+            params,
+        ).fetchall()
+        context_by_key: dict[str, dict[str, Any]] = {}
+        for raw_row in rows:
+            row = dict(raw_row)
+            material_key = str(row.get("material_key") or "").strip()
+            if not material_key:
+                continue
+            group = context_by_key.setdefault(
+                material_key,
+                {
+                    "product_show_count": 0,
+                    "product_click_count": 0,
+                    "product_names": [],
+                },
+            )
+            group["product_show_count"] += int(row.get("product_show_count", 0) or 0)
+            group["product_click_count"] += int(row.get("product_click_count", 0) or 0)
+            for name in self._extract_material_product_names(row.get("raw_json")):
+                if name not in group["product_names"]:
+                    group["product_names"].append(name)
+        for item in items:
+            context = context_by_key.get(str(item.get("material_key") or "").strip())
+            if not context:
+                continue
+            show_count = int(context.get("product_show_count", 0) or 0)
+            click_count = int(context.get("product_click_count", 0) or 0)
+            item["product_info_text"] = self._summarize_material_product_names(list(context.get("product_names") or []))
+            item["overall_show_count"] = show_count
+            item["overall_click_count"] = click_count
+            item["overall_ctr"] = round(click_count / show_count * 100.0, 2) if show_count > 0 else 0.0
+        return items
 
     def _rankings_bundle(
         self, summary: dict[str, Any], accounts: list[dict[str, Any]], plans: list[dict[str, Any]]
@@ -4445,7 +4682,7 @@ class DashboardService:
             payload = self._collect_extended_snapshot_for_meta(meta)
             if payload.get("skipped"):
                 continue
-            self.persist_extended_snapshot(payload)
+            self.persist_extended_snapshot(payload, replace_same_day=True)
             backfilled += 1
         if backfilled:
             self._material_cache.clear()
@@ -4484,6 +4721,44 @@ class DashboardService:
             }
         )
         return result
+
+    def refresh_recent_extended_history(self, days: int = EXTENDED_HISTORY_REFRESH_DAYS) -> dict[str, Any]:
+        tz = ZoneInfo(self.read_config()["timezone"])
+        refresh_days = max(int(days or EXTENDED_HISTORY_REFRESH_DAYS), 1)
+        today = datetime.now(tz).date()
+        start_day = today - timedelta(days=max(refresh_days - 1, 0))
+        refreshed = 0
+        skipped_current_day = 0
+        missing_summary_days = 0
+        detail_errors = 0
+        for offset in range(refresh_days):
+            target_day = start_day + timedelta(days=offset)
+            if target_day >= today:
+                skipped_current_day += 1
+                continue
+            day_marker = datetime(target_day.year, target_day.month, target_day.day)
+            with self.db() as conn:
+                meta = self._summary_meta_for_day(conn, day_marker)
+            if not meta:
+                missing_summary_days += 1
+                continue
+            payload = self._collect_extended_snapshot_for_meta(meta)
+            if payload.get("skipped"):
+                continue
+            detail_errors += len(payload.get("errors") or [])
+            self.persist_extended_snapshot(payload, replace_same_day=True)
+            refreshed += 1
+        if refreshed:
+            self._material_cache.clear()
+        return {
+            "refresh_days": refresh_days,
+            "refreshed_days": refreshed,
+            "skipped_current_day": skipped_current_day,
+            "missing_summary_days": missing_summary_days,
+            "error_count": detail_errors,
+            "range_start": start_day.strftime("%Y-%m-%d"),
+            "range_end": today.strftime("%Y-%m-%d"),
+        }
 
     def persist_snapshot(self, payload: dict[str, Any]) -> None:
         with self.db() as conn:
@@ -4758,6 +5033,171 @@ class DashboardService:
         result["video_material_ids"] = sorted(set(video_material_ids))
         return result
 
+    def _enrich_material_rows_with_library_create_time(
+        self,
+        client: OceanEngineClient,
+        material_rows: list[tuple[Any, ...]],
+    ) -> tuple[list[tuple[Any, ...]], list[dict[str, Any]]]:
+        if not material_rows:
+            return material_rows, []
+
+        mutable_rows = [list(row) for row in material_rows]
+        errors: list[dict[str, Any]] = []
+        video_ids_by_advertiser: dict[int, dict[str, list[int]]] = {}
+        video_material_ids_by_advertiser: dict[int, dict[str, list[int]]] = {}
+        image_ids_by_advertiser: dict[int, dict[str, list[int]]] = {}
+        image_material_ids_by_advertiser: dict[int, dict[str, list[int]]] = {}
+        carousel_material_ids_by_advertiser: dict[int, dict[str, list[int]]] = {}
+
+        for row_index, row in enumerate(mutable_rows):
+            if str(row[11] or "").strip():
+                continue
+            advertiser_id = int(row[3] or 0)
+            if advertiser_id <= 0:
+                continue
+            material_type = str(row[7] or "").strip().upper()
+            material_id = self._numeric_material_id_text(row[9])
+            if material_type == "VIDEO":
+                video_id = str(row[12] or "").strip()
+                if video_id:
+                    video_ids_by_advertiser.setdefault(advertiser_id, {}).setdefault(video_id, []).append(row_index)
+                if material_id:
+                    video_material_ids_by_advertiser.setdefault(advertiser_id, {}).setdefault(material_id, []).append(row_index)
+                continue
+            if material_type == "IMAGE":
+                image_id = self._extract_material_library_image_id(row[22])
+                if image_id:
+                    image_ids_by_advertiser.setdefault(advertiser_id, {}).setdefault(image_id, []).append(row_index)
+                if material_id:
+                    image_material_ids_by_advertiser.setdefault(advertiser_id, {}).setdefault(material_id, []).append(row_index)
+                continue
+            if material_type == "CAROUSEL" and material_id:
+                carousel_material_ids_by_advertiser.setdefault(advertiser_id, {}).setdefault(material_id, []).append(row_index)
+
+        def apply_create_time(indexes: list[int], value: Any) -> None:
+            normalized = self._normalize_datetime_text(value)
+            if not normalized:
+                return
+            for row_index in indexes:
+                current = str(mutable_rows[row_index][11] or "").strip()
+                if not current or normalized < current:
+                    mutable_rows[row_index][11] = normalized
+
+        for advertiser_id, id_map in video_ids_by_advertiser.items():
+            material_id_map = video_material_ids_by_advertiser.get(advertiser_id, {})
+            ids = sorted(id_map)
+            for start in range(0, len(ids), 100):
+                batch = ids[start : start + 100]
+                try:
+                    rows = client.list_qianchuan_videos(
+                        advertiser_id=advertiser_id,
+                        filtering={"video_ids": batch},
+                        page_size=max(20, min(100, len(batch))),
+                    )
+                    for item in rows:
+                        resolved_video_id = str(item.get("id") or "").strip()
+                        resolved_material_id = self._numeric_material_id_text(item.get("material_id"))
+                        create_time = item.get("create_time")
+                        if resolved_video_id:
+                            apply_create_time(id_map.get(resolved_video_id, []), create_time)
+                        if resolved_material_id:
+                            apply_create_time(material_id_map.get(resolved_material_id, []), create_time)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "stage": "material_library_video",
+                            "advertiser_id": advertiser_id,
+                            "video_ids": batch,
+                            "error": str(exc),
+                        }
+                    )
+
+        for advertiser_id, id_map in image_ids_by_advertiser.items():
+            material_id_map = image_material_ids_by_advertiser.get(advertiser_id, {})
+            ids = sorted(id_map)
+            for start in range(0, len(ids), 100):
+                batch = ids[start : start + 100]
+                try:
+                    rows = client.list_qianchuan_images(
+                        advertiser_id=advertiser_id,
+                        filtering={"image_ids": batch},
+                        page_size=max(20, min(100, len(batch))),
+                    )
+                    for item in rows:
+                        resolved_image_id = str(item.get("id") or "").strip()
+                        resolved_material_id = self._numeric_material_id_text(item.get("material_id"))
+                        create_time = item.get("create_time")
+                        if resolved_image_id:
+                            apply_create_time(id_map.get(resolved_image_id, []), create_time)
+                        if resolved_material_id:
+                            apply_create_time(material_id_map.get(resolved_material_id, []), create_time)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "stage": "material_library_image",
+                            "advertiser_id": advertiser_id,
+                            "image_ids": batch,
+                            "error": str(exc),
+                        }
+                    )
+
+            unresolved_material_ids = [
+                material_id
+                for material_id, indexes in material_id_map.items()
+                if any(not str(mutable_rows[row_index][11] or "").strip() for row_index in indexes)
+            ]
+            for start in range(0, len(unresolved_material_ids), 100):
+                batch = unresolved_material_ids[start : start + 100]
+                try:
+                    rows = client.list_qianchuan_images(
+                        advertiser_id=advertiser_id,
+                        filtering={"material_ids": [int(item) for item in batch]},
+                        page_size=max(20, min(100, len(batch))),
+                    )
+                    for item in rows:
+                        resolved_image_id = str(item.get("id") or "").strip()
+                        resolved_material_id = self._numeric_material_id_text(item.get("material_id"))
+                        create_time = item.get("create_time")
+                        if resolved_image_id:
+                            apply_create_time(id_map.get(resolved_image_id, []), create_time)
+                        if resolved_material_id:
+                            apply_create_time(material_id_map.get(resolved_material_id, []), create_time)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "stage": "material_library_image_material_id",
+                            "advertiser_id": advertiser_id,
+                            "material_ids": batch,
+                            "error": str(exc),
+                        }
+                    )
+
+        for advertiser_id, id_map in carousel_material_ids_by_advertiser.items():
+            ids = sorted(id_map)
+            for start in range(0, len(ids), 100):
+                batch = ids[start : start + 100]
+                try:
+                    rows = client.list_qianchuan_carousels(
+                        advertiser_id=advertiser_id,
+                        filtering={"material_ids": [int(item) for item in batch]},
+                        page_size=max(20, min(100, len(batch))),
+                    )
+                    for item in rows:
+                        resolved_material_id = self._numeric_material_id_text(item.get("material_id"))
+                        if resolved_material_id:
+                            apply_create_time(id_map.get(resolved_material_id, []), item.get("create_time"))
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "stage": "material_library_carousel",
+                            "advertiser_id": advertiser_id,
+                            "material_ids": batch,
+                            "error": str(exc),
+                        }
+                    )
+
+        return [tuple(row) for row in mutable_rows], errors
+
     def _collect_extended_snapshot_for_meta(self, meta: dict[str, Any]) -> dict[str, Any]:
         config = self.read_config()
         with self.db() as conn:
@@ -4825,6 +5265,9 @@ class DashboardService:
                 bucket = video_material_ids_by_advertiser.setdefault(advertiser_id, set())
                 bucket.update(payload["video_material_ids"])
 
+        material_rows, library_errors = self._enrich_material_rows_with_library_create_time(client, material_rows)
+        errors.extend(library_errors)
+
         advertiser_ids = {int(row.get("advertiser_id", 0) or 0) for row in plans if int(row.get("advertiser_id", 0) or 0)}
         report_rows, report_errors = self._collect_material_report_metrics_for_advertisers(
             client,
@@ -4888,7 +5331,7 @@ class DashboardService:
             "errors": errors,
         }
 
-    def collect_extended_snapshot(self) -> dict[str, Any]:
+    def collect_extended_snapshot(self, force_refresh: bool = False) -> dict[str, Any]:
         with self.db() as conn:
             meta = self._latest_summary_meta(conn)
             if not meta:
@@ -4901,7 +5344,7 @@ class DashboardService:
                 "SELECT status FROM extended_sync_runs WHERE snapshot_time = ?",
                 (meta["snapshot_time"],),
             ).fetchone()
-            if existing and str(existing["status"]) == "ok":
+            if not force_refresh and existing and str(existing["status"]) == "ok":
                 return {
                     "ok": True,
                     "skipped": True,
@@ -4910,7 +5353,7 @@ class DashboardService:
                 }
         return self._collect_extended_snapshot_for_meta(dict(meta))
 
-    def persist_extended_snapshot(self, payload: dict[str, Any]) -> None:
+    def persist_extended_snapshot(self, payload: dict[str, Any], replace_same_day: bool = False) -> None:
         if payload.get("skipped"):
             return
         original_material_keys: set[tuple[int, str]] = {
@@ -4935,13 +5378,14 @@ class DashboardService:
                     "material_key": row[8],
                     "material_id": material_id,
                     "material_name": row[10],
-                    "video_id": row[11],
-                    "cover_url": row[12],
-                    "aweme_item_id": row[13],
-                    "video_url": row[14],
-                    "stat_cost": row[17],
-                    "pay_amount": row[18],
-                    "order_count": row[19],
+                    "create_time": row[11],
+                    "video_id": row[12],
+                    "cover_url": row[13],
+                    "aweme_item_id": row[14],
+                    "video_url": row[15],
+                    "stat_cost": row[18],
+                    "pay_amount": row[19],
+                    "order_count": row[20],
                     "is_original": (advertiser_id, material_id) in original_material_keys,
                 }
             )
@@ -4957,12 +5401,22 @@ class DashboardService:
             payload["window_end"],
             groups=material_groups,
         )
+        day_key = str(payload["snapshot_time"] or "")[:10]
         with self.db() as conn:
-            conn.execute("DELETE FROM plan_detail_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
-            conn.execute("DELETE FROM product_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
-            conn.execute("DELETE FROM material_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
-            conn.execute("DELETE FROM material_rollups WHERE snapshot_time = ?", (payload["snapshot_time"],))
-            conn.execute("DELETE FROM video_origin_flags WHERE snapshot_time = ?", (payload["snapshot_time"],))
+            if replace_same_day and day_key:
+                conn.execute("DELETE FROM plan_detail_snapshots WHERE substr(snapshot_time, 1, 10) = ?", (day_key,))
+                conn.execute("DELETE FROM product_snapshots WHERE substr(snapshot_time, 1, 10) = ?", (day_key,))
+                conn.execute("DELETE FROM material_snapshots WHERE substr(snapshot_time, 1, 10) = ?", (day_key,))
+                conn.execute("DELETE FROM material_rollups WHERE substr(snapshot_time, 1, 10) = ?", (day_key,))
+                conn.execute("DELETE FROM video_origin_flags WHERE substr(snapshot_time, 1, 10) = ?", (day_key,))
+                conn.execute("DELETE FROM extended_sync_runs WHERE substr(snapshot_time, 1, 10) = ?", (day_key,))
+            else:
+                conn.execute("DELETE FROM plan_detail_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
+                conn.execute("DELETE FROM product_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
+                conn.execute("DELETE FROM material_snapshots WHERE snapshot_time = ?", (payload["snapshot_time"],))
+                conn.execute("DELETE FROM material_rollups WHERE snapshot_time = ?", (payload["snapshot_time"],))
+                conn.execute("DELETE FROM video_origin_flags WHERE snapshot_time = ?", (payload["snapshot_time"],))
+                conn.execute("DELETE FROM extended_sync_runs WHERE snapshot_time = ?", (payload["snapshot_time"],))
             if payload["detail_rows"]:
                 conn.executemany(
                     """
@@ -4992,10 +5446,10 @@ class DashboardService:
                     """
                     INSERT INTO material_snapshots (
                         snapshot_time, window_start, window_end, advertiser_id, advertiser_name,
-                        ad_id, ad_name, material_type, material_key, material_id, material_name,
+                        ad_id, ad_name, material_type, material_key, material_id, material_name, create_time,
                         video_id, cover_url, aweme_item_id, video_url, product_show_count,
                         product_click_count, stat_cost, pay_amount, order_count, roi, raw_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     payload["material_rows"],
                 )
@@ -5004,10 +5458,10 @@ class DashboardService:
                     """
                     INSERT INTO material_rollups (
                         snapshot_time, window_start, window_end, material_key, material_id,
-                        material_name, material_type, video_id, cover_url, aweme_item_id, video_url, stat_cost, pay_amount,
+                        material_name, create_time, material_type, video_id, cover_url, aweme_item_id, video_url, stat_cost, pay_amount,
                         total_pay_amount, settled_pay_amount, order_count, settled_order_count, plan_count, advertiser_count,
                         plan_ids_json, advertiser_ids_json, is_original, top_plan_name, top_account_name, roi
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     material_rollup_rows,
                 )
@@ -5059,20 +5513,23 @@ class DashboardService:
             )
 
     def cleanup_history(self) -> None:
-        cutoff = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+        base_cutoff = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+        extended_cutoff = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=EXTENDED_RETENTION_DAYS)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         with self.db() as conn:
-            conn.execute("DELETE FROM summary_snapshots WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM account_snapshots WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM plan_snapshots WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM account_balances WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM shared_wallets WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM shared_wallet_account_relations WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM plan_detail_snapshots WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM product_snapshots WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM material_snapshots WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM material_rollups WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM video_origin_flags WHERE snapshot_time < ?", (cutoff,))
-            conn.execute("DELETE FROM extended_sync_runs WHERE snapshot_time < ?", (cutoff,))
+            conn.execute("DELETE FROM summary_snapshots WHERE snapshot_time < ?", (base_cutoff,))
+            conn.execute("DELETE FROM account_snapshots WHERE snapshot_time < ?", (base_cutoff,))
+            conn.execute("DELETE FROM plan_snapshots WHERE snapshot_time < ?", (base_cutoff,))
+            conn.execute("DELETE FROM account_balances WHERE snapshot_time < ?", (base_cutoff,))
+            conn.execute("DELETE FROM shared_wallets WHERE snapshot_time < ?", (base_cutoff,))
+            conn.execute("DELETE FROM shared_wallet_account_relations WHERE snapshot_time < ?", (base_cutoff,))
+            conn.execute("DELETE FROM plan_detail_snapshots WHERE snapshot_time < ?", (extended_cutoff,))
+            conn.execute("DELETE FROM product_snapshots WHERE snapshot_time < ?", (extended_cutoff,))
+            conn.execute("DELETE FROM material_snapshots WHERE snapshot_time < ?", (extended_cutoff,))
+            conn.execute("DELETE FROM material_rollups WHERE snapshot_time < ?", (extended_cutoff,))
+            conn.execute("DELETE FROM video_origin_flags WHERE snapshot_time < ?", (extended_cutoff,))
+            conn.execute("DELETE FROM extended_sync_runs WHERE snapshot_time < ?", (extended_cutoff,))
 
     def evaluate_alerts(self, payload: dict[str, Any]) -> None:
         with self.db() as conn:
@@ -5652,8 +6109,8 @@ class DashboardService:
         range_label = ""
         start_dt: datetime | None = None
         end_dt: datetime | None = None
+        config = self.read_config()
         if not target_snapshot:
-            config = self.read_config()
             if normalized not in PERFORMANCE_RANGES:
                 raise ValueError("range must be one of day/yesterday/week/month/custom")
             if normalized == "custom":
@@ -5687,20 +6144,24 @@ class DashboardService:
                     missing_days = len(self._missing_extended_days(conn, start_dt, end_dt))
                 runs = self._latest_extended_sync_runs_for_window(conn, start_dt, end_dt)
                 if not runs:
-                    backfill_queued = self._queue_history_backfill_if_needed("detail", start_dt, end_dt, missing_days)
-                    return {
-                        "snapshot_time": "",
-                        "items": [],
-                        "meta": None,
-                        "range_key": normalized,
-                        "range_label": range_label,
-                        "query_start_date": start_dt.strftime("%Y-%m-%d"),
-                        "query_end_date": end_dt.strftime("%Y-%m-%d"),
-                        "snapshot_count": 0,
-                        "history_backfill_pending": missing_days > 0,
-                        "missing_history_days": missing_days,
-                        "history_backfill_queued": backfill_queued,
-                    }
+                    latest_run = self._latest_extended_sync_run(conn)
+                    if latest_run:
+                        runs = [dict(latest_run)]
+                    else:
+                        backfill_queued = self._queue_history_backfill_if_needed("detail", start_dt, end_dt, missing_days)
+                        return {
+                            "snapshot_time": "",
+                            "items": [],
+                            "meta": None,
+                            "range_key": normalized,
+                            "range_label": range_label,
+                            "query_start_date": start_dt.strftime("%Y-%m-%d"),
+                            "query_end_date": end_dt.strftime("%Y-%m-%d"),
+                            "snapshot_count": 0,
+                            "history_backfill_pending": missing_days > 0,
+                            "missing_history_days": missing_days,
+                            "history_backfill_queued": backfill_queued,
+                        }
                 snapshot_times = [str(item.get("snapshot_time") or "") for item in runs if str(item.get("snapshot_time") or "").strip()]
                 latest_meta = {
                     "snapshot_time": snapshot_times[-1],
@@ -5712,6 +6173,7 @@ class DashboardService:
                     "video_count": sum(int(item.get("video_count") or 0) for item in runs),
                     "error_count": sum(int(item.get("error_count") or 0) for item in runs),
                     "snapshot_dates": [str(item.get("snapshot_time") or "")[:10] for item in runs],
+                    "snapshot_fallback_used": False,
                 }
             else:
                 latest_meta_row = conn.execute(
@@ -5728,70 +6190,98 @@ class DashboardService:
                 normalized = "custom" if snapshot_time else str(range_key or "day").strip().lower()
                 range_label = "指定快照" if snapshot_time else ""
 
-            placeholders = ",".join("?" for _ in snapshot_times)
-            rollup_rows = conn.execute(
-                f"""
-                SELECT
-                    *
-                FROM material_rollups
-                WHERE snapshot_time IN ({placeholders})
-                ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC
-                """,
-                snapshot_times,
-            ).fetchall()
-            fallback_rows: list[Any] = []
-            if len(rollup_rows) == 0:
-                fallback_rows = conn.execute(
+            def load_items_for_snapshot_times(selected_snapshot_times: list[str]) -> list[dict[str, Any]]:
+                placeholders = ",".join("?" for _ in selected_snapshot_times)
+                rollup_rows = conn.execute(
                     f"""
                     SELECT
-                        m.snapshot_time,
-                        m.advertiser_id,
-                        m.advertiser_name,
-                        m.ad_id,
-                        m.ad_name,
-                        m.material_type,
-                        m.material_key,
-                        m.material_id,
-                        m.material_name,
-                        m.video_id,
-                        m.cover_url,
-                        m.aweme_item_id,
-                        m.video_url,
-                        m.stat_cost,
-                        m.pay_amount,
-                        m.total_pay_amount,
-                        m.settled_pay_amount,
-                        m.order_count,
-                        m.settled_order_count,
-                        COALESCE(v.is_original, 0) AS is_original
-                    FROM material_snapshots AS m
-                    LEFT JOIN video_origin_flags AS v
-                      ON v.snapshot_time = m.snapshot_time
-                     AND v.advertiser_id = m.advertiser_id
-                     AND v.material_id = m.material_id
-                    WHERE m.snapshot_time IN ({placeholders})
-                    ORDER BY m.snapshot_time DESC, m.order_count DESC, m.pay_amount DESC, m.roi DESC, m.stat_cost DESC
+                        *
+                    FROM material_rollups
+                    WHERE snapshot_time IN ({placeholders})
+                    ORDER BY snapshot_time DESC, create_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC
                     """,
-                    snapshot_times,
+                    selected_snapshot_times,
                 ).fetchall()
-        if rollup_rows:
-            scoped_rollup_rows = [dict(row) for row in rollup_rows]
-            if allowed_advertiser_ids is not None:
-                allowed = {int(item) for item in allowed_advertiser_ids}
-                scoped_rollup_rows = [
-                    row
-                    for row in scoped_rollup_rows
-                    if any(int(item) in allowed for item in json.loads(str(row.get("advertiser_ids_json") or "[]")))
-                ]
-            items = self._aggregate_material_rollups(scoped_rollup_rows)
-        else:
-            scoped_rows = [dict(row) for row in fallback_rows]
-            if allowed_advertiser_ids is not None:
-                allowed = {int(item) for item in allowed_advertiser_ids}
-                scoped_rows = [row for row in scoped_rows if int(row.get("advertiser_id", 0) or 0) in allowed]
-            items = self._build_material_rankings(scoped_rows)
+                fallback_rows: list[Any] = []
+                if len(rollup_rows) == 0:
+                    fallback_rows = conn.execute(
+                        f"""
+                        SELECT
+                            m.snapshot_time,
+                            m.advertiser_id,
+                            m.advertiser_name,
+                            m.ad_id,
+                            m.ad_name,
+                            m.material_type,
+                            m.material_key,
+                            m.material_id,
+                            m.material_name,
+                            m.create_time,
+                            m.video_id,
+                            m.cover_url,
+                            m.aweme_item_id,
+                            m.video_url,
+                            m.stat_cost,
+                            m.pay_amount,
+                            m.total_pay_amount,
+                            m.settled_pay_amount,
+                            m.order_count,
+                            m.settled_order_count,
+                            COALESCE(v.is_original, 0) AS is_original
+                        FROM material_snapshots AS m
+                        LEFT JOIN video_origin_flags AS v
+                          ON v.snapshot_time = m.snapshot_time
+                         AND v.advertiser_id = m.advertiser_id
+                         AND v.material_id = m.material_id
+                        WHERE m.snapshot_time IN ({placeholders})
+                        ORDER BY m.snapshot_time DESC, m.create_time DESC, m.order_count DESC, m.pay_amount DESC, m.roi DESC, m.stat_cost DESC
+                        """,
+                        selected_snapshot_times,
+                    ).fetchall()
+                if rollup_rows:
+                    scoped_rollup_rows = [dict(row) for row in rollup_rows]
+                    if allowed_advertiser_ids is not None:
+                        allowed = {int(item) for item in allowed_advertiser_ids}
+                        scoped_rollup_rows = [
+                            row
+                            for row in scoped_rollup_rows
+                            if any(int(item) in allowed for item in json.loads(str(row.get("advertiser_ids_json") or "[]")))
+                        ]
+                    if not target_snapshot:
+                        scoped_rollup_rows = self._filter_material_rows_by_create_time_window(
+                            scoped_rollup_rows,
+                            start_dt,
+                            end_dt,
+                            str(config.get("timezone") or TIMEZONE),
+                        )
+                    return self._aggregate_material_rollups(scoped_rollup_rows)
+                scoped_rows = [dict(row) for row in fallback_rows]
+                if allowed_advertiser_ids is not None:
+                    allowed = {int(item) for item in allowed_advertiser_ids}
+                    scoped_rows = [row for row in scoped_rows if int(row.get("advertiser_id", 0) or 0) in allowed]
+                if not target_snapshot:
+                    scoped_rows = self._filter_material_rows_by_create_time_window(
+                        scoped_rows,
+                        start_dt,
+                        end_dt,
+                        str(config.get("timezone") or TIMEZONE),
+                    )
+                return self._build_material_rankings(scoped_rows)
+
+            items = load_items_for_snapshot_times(snapshot_times)
+            if not target_snapshot and not items:
+                latest_run = self._latest_extended_sync_run(conn)
+                latest_snapshot = str(dict(latest_run).get("snapshot_time") or "").strip() if latest_run else ""
+                if latest_snapshot and latest_snapshot not in snapshot_times:
+                    fallback_items = load_items_for_snapshot_times([latest_snapshot])
+                    if fallback_items:
+                        snapshot_times = [latest_snapshot]
+                        items = fallback_items
+                        latest_meta = dict(latest_run)
+                        latest_meta["snapshot_fallback_used"] = True
         if items:
             with self.db() as preview_conn:
+                items = self._apply_material_snapshot_context(preview_conn, items, snapshot_times, allowed_advertiser_ids)
                 items = self._apply_latest_material_previews(preview_conn, items)
                 items = self._apply_material_top_anchor_names(preview_conn, items, snapshot_times)
         payload = {
@@ -6304,9 +6794,9 @@ class DashboardService:
             payload = await asyncio.to_thread(self.collect_and_store)
             return {"ok": True, "manual": manual, "snapshot_time": payload["snapshot_time"]}
 
-    async def run_detail_sync(self, manual: bool = False) -> dict[str, Any]:
+    async def run_detail_sync(self, manual: bool = False, force_refresh: bool = False) -> dict[str, Any]:
         async with self._detail_sync_lock:
-            payload = await asyncio.to_thread(self.collect_extended_and_store)
+            payload = await asyncio.to_thread(self.collect_extended_and_store, force_refresh)
             return {
                 "ok": bool(payload.get("ok", True)),
                 "manual": manual,
@@ -6324,11 +6814,11 @@ class DashboardService:
         self._performance_cache.clear()
         return payload
 
-    def collect_extended_and_store(self) -> dict[str, Any]:
-        payload = self.collect_extended_snapshot()
+    def collect_extended_and_store(self, force_refresh: bool = False) -> dict[str, Any]:
+        payload = self.collect_extended_snapshot(force_refresh=force_refresh)
         if payload.get("skipped"):
             return payload
-        self.persist_extended_snapshot(payload)
+        self.persist_extended_snapshot(payload, replace_same_day=True)
         self.cleanup_history()
         self._material_cache.clear()
         try:

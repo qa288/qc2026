@@ -71,7 +71,7 @@ class SnapshotAccess:
                 SELECT *
                 FROM material_snapshots
                 WHERE snapshot_time = ? AND ad_id = ?
-                ORDER BY order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, material_type ASC, material_key ASC
+                ORDER BY create_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, material_type ASC, material_key ASC
                 """,
                 (target_snapshot, ad_id),
             ).fetchall()

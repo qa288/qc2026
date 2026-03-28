@@ -18,9 +18,9 @@ def sync_dashboard() -> dict:
 
 
 @celery_app.task(name="dashboard.detail_sync")
-def sync_dashboard_detail() -> dict:
+def sync_dashboard_detail(force_refresh: bool = False) -> dict:
     _prepare()
-    payload = service.collect_extended_and_store()
+    payload = service.collect_extended_and_store(force_refresh=bool(force_refresh))
     return {
         "snapshot_time": payload.get("snapshot_time", ""),
         "skipped": bool(payload.get("skipped", False)),
@@ -38,6 +38,12 @@ def backfill_dashboard_performance(days: int = 30) -> dict:
 def backfill_dashboard_detail(days: int = 30) -> dict:
     _prepare()
     return service.backfill_recent_extended_history(int(days or 30))
+
+
+@celery_app.task(name="dashboard.detail_refresh_recent")
+def refresh_dashboard_detail(days: int = 35) -> dict:
+    _prepare()
+    return service.refresh_recent_extended_history(int(days or 35))
 
 
 @celery_app.task(name="dashboard.dispatch_alerts")

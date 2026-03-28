@@ -18,12 +18,21 @@ def register_system_routes(app: Any, service: Any, require_admin: Any) -> None:
         return JSONResponse({"ok": True, "queued": True, "task_id": task.id, "task_name": "dashboard.sync"}, status_code=202)
 
     @app.post("/api/sync/extended")
-    async def manual_extended_sync(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+    async def manual_extended_sync(
+        force_refresh: bool = False,
+        _user: dict[str, Any] = Depends(require_admin),
+    ) -> JSONResponse:
         from dashboard.celery_app import celery_app
 
-        task = celery_app.send_task("dashboard.detail_sync")
+        task = celery_app.send_task("dashboard.detail_sync", args=[bool(force_refresh)])
         return JSONResponse(
-            {"ok": True, "queued": True, "task_id": task.id, "task_name": "dashboard.detail_sync"},
+            {
+                "ok": True,
+                "queued": True,
+                "task_id": task.id,
+                "task_name": "dashboard.detail_sync",
+                "force_refresh": bool(force_refresh),
+            },
             status_code=202,
         )
 

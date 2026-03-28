@@ -16,6 +16,13 @@ class Migration:
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="base_schema", sql=BASE_SCHEMA_SQL),
+    # The actual cross-backend column backfill runs in Service.init_db via _ensure_column_locked.
+    # This migration only advances the recorded schema version for upgraded databases.
+    Migration(
+        version=2,
+        name="material_create_time",
+        sql="SELECT 1;",
+    ),
 )
 
 

@@ -42,6 +42,9 @@ PLAN_DETAIL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promo
 PLAN_PRODUCT_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/product/get/"
 PLAN_MATERIAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/material/get/"
 PLAN_MATERIAL_ADD_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/material/add/"
+QIANCHUAN_VIDEO_GET_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/video/get/"
+QIANCHUAN_IMAGE_GET_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/image/get/"
+QIANCHUAN_CAROUSEL_GET_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/carousel/get/"
 VIDEO_USER_LOSE_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/video_user_lose/get/"
 VIDEO_ORIGINAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/file/video/original/get/"
 VIDEO_AD_UPLOAD_URL = "https://api.oceanengine.com/open_api/2/file/video/ad/"
@@ -967,6 +970,147 @@ class OceanEngineClient:
             page_info = data.get("page_info") or {}
             total_page = int(page_info.get("total_page", 1) or 1)
             if page >= total_page:
+                break
+            page += 1
+        return rows
+
+    def get_qianchuan_videos(
+        self,
+        advertiser_id: int,
+        filtering: dict[str, Any] | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        params: dict[str, Any] = {
+            "advertiser_id": int(advertiser_id),
+            "page": int(page),
+            "page_size": int(page_size),
+        }
+        if filtering:
+            params["filtering"] = dict(filtering)
+        response = get_json_with_retries(QIANCHUAN_VIDEO_GET_URL, access_token, params)
+        if response.get("code") != 0:
+            raise ApiError(f"get qianchuan videos failed: {response}")
+        return response
+
+    def list_qianchuan_videos(
+        self,
+        advertiser_id: int,
+        filtering: dict[str, Any] | None = None,
+        page_size: int = 100,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        page = 1
+        rows: list[dict[str, Any]] = []
+        while True:
+            response = self.get_qianchuan_videos(
+                advertiser_id=advertiser_id,
+                filtering=filtering,
+                page=page,
+                page_size=page_size,
+            )
+            data = response.get("data") or {}
+            rows.extend(data.get("list") or [])
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page or page >= max_pages:
+                break
+            page += 1
+        return rows
+
+    def get_qianchuan_images(
+        self,
+        advertiser_id: int,
+        filtering: dict[str, Any] | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        params: dict[str, Any] = {
+            "advertiser_id": int(advertiser_id),
+            "page": int(page),
+            "page_size": int(page_size),
+        }
+        if filtering:
+            params["filtering"] = dict(filtering)
+        response = get_json_with_retries(QIANCHUAN_IMAGE_GET_URL, access_token, params)
+        if response.get("code") != 0:
+            raise ApiError(f"get qianchuan images failed: {response}")
+        return response
+
+    def list_qianchuan_images(
+        self,
+        advertiser_id: int,
+        filtering: dict[str, Any] | None = None,
+        page_size: int = 100,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        page = 1
+        rows: list[dict[str, Any]] = []
+        while True:
+            response = self.get_qianchuan_images(
+                advertiser_id=advertiser_id,
+                filtering=filtering,
+                page=page,
+                page_size=page_size,
+            )
+            data = response.get("data") or {}
+            rows.extend(data.get("list") or [])
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page or page >= max_pages:
+                break
+            page += 1
+        return rows
+
+    def get_qianchuan_carousels(
+        self,
+        advertiser_id: int,
+        filtering: dict[str, Any] | None = None,
+        page: int = 1,
+        page_size: int = 100,
+        order_field: str | None = None,
+        order_type: str | None = None,
+    ) -> dict[str, Any]:
+        access_token = self.get_access_token()
+        params: dict[str, Any] = {
+            "advertiser_id": int(advertiser_id),
+            "page": int(page),
+            "page_size": int(page_size),
+        }
+        if filtering:
+            params["filtering"] = dict(filtering)
+        if order_field:
+            params["order_field"] = str(order_field)
+        if order_type:
+            params["order_type"] = str(order_type)
+        response = get_json_with_retries(QIANCHUAN_CAROUSEL_GET_URL, access_token, params)
+        if response.get("code") != 0:
+            raise ApiError(f"get qianchuan carousels failed: {response}")
+        return response
+
+    def list_qianchuan_carousels(
+        self,
+        advertiser_id: int,
+        filtering: dict[str, Any] | None = None,
+        page_size: int = 100,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        page = 1
+        rows: list[dict[str, Any]] = []
+        while True:
+            response = self.get_qianchuan_carousels(
+                advertiser_id=advertiser_id,
+                filtering=filtering,
+                page=page,
+                page_size=page_size,
+            )
+            data = response.get("data") or {}
+            rows.extend(data.get("carousels") or [])
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page or page >= max_pages:
                 break
             page += 1
         return rows

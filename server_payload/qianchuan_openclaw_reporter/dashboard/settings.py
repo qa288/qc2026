@@ -41,6 +41,7 @@ class DashboardSettings:
     timezone: str
     alert_cooldown_default: int
     retention_days: int
+    extended_retention_days: int
     dashboard_username: str
     dashboard_password: str
     session_secret: str
@@ -49,6 +50,7 @@ class DashboardSettings:
     detail_sync_interval_minutes: int
     enable_in_process_scheduler: bool
     history_backfill_days: int
+    extended_history_refresh_days: int
     redis_url: str
     celery_broker_url: str
     celery_result_backend: str
@@ -69,6 +71,7 @@ def load_settings() -> DashboardSettings:
         timezone=_env_text("TIMEZONE", "Asia/Shanghai"),
         alert_cooldown_default=_env_int("ALERT_COOLDOWN_DEFAULT", 60),
         retention_days=_env_int("RETENTION_DAYS", 180),
+        extended_retention_days=_env_int("EXTENDED_RETENTION_DAYS", 35),
         dashboard_username=_env_text("DASHBOARD_USERNAME", "admin"),
         dashboard_password=str(os.environ.get("DASHBOARD_PASSWORD", "")).strip(),
         session_secret=_env_text("SESSION_SECRET", "replace-me"),
@@ -77,6 +80,7 @@ def load_settings() -> DashboardSettings:
         detail_sync_interval_minutes=_env_int("DETAIL_SYNC_INTERVAL_MINUTES", 10),
         enable_in_process_scheduler=_env_bool("ENABLE_IN_PROCESS_SCHEDULER", False),
         history_backfill_days=_env_int("HISTORY_BACKFILL_DAYS", 30),
+        extended_history_refresh_days=_env_int("EXTENDED_HISTORY_REFRESH_DAYS", 35),
         redis_url=redis_url,
         celery_broker_url=str(os.environ.get("CELERY_BROKER_URL") or redis_url or "redis://redis:6379/1").strip(),
         celery_result_backend=str(os.environ.get("CELERY_RESULT_BACKEND") or redis_url or "redis://redis:6379/2").strip(),

@@ -89,8 +89,8 @@ const state = {
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
   employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
-  materialSort: loadSort("material-sort", { key: "stat_cost", dir: "desc" }),
-  teamMaterialSort: loadSort("team-material-sort", { key: "stat_cost", dir: "desc" }),
+  materialSort: loadSort("material-sort", { key: "create_time", dir: "desc" }),
+  teamMaterialSort: loadSort("team-material-sort", { key: "create_time", dir: "desc" }),
   commentSort: loadSort("comment-sort", { key: "create_time", dir: "desc" }),
   activeView: loadPreference("active-view", "overview"),
   ruleTargetOptions: [],
@@ -861,9 +861,18 @@ function enrichMaterialRow(row) {
   const settledPayAmount = Number(row?.settled_pay_amount || 0);
   const orderCount = Number(row?.order_count || 0);
   const settledOrderCount = Number(row?.settled_order_count || 0);
+  const overallShowCount = Number(row?.overall_show_count || 0);
+  const overallClickCount = Number(row?.overall_click_count || 0);
   return {
     ...row,
+    create_time: String(row?.create_time || "").trim(),
+    product_info_text: String(row?.product_info_text || "").trim(),
     top_anchor_name: String(row?.top_anchor_name || "").trim(),
+    overall_show_count: overallShowCount,
+    overall_click_count: overallClickCount,
+    overall_ctr: overallShowCount > 0
+      ? Number((overallClickCount / overallShowCount * 100).toFixed(2))
+      : Number(row?.overall_ctr || 0),
     total_pay_amount: totalPayAmount,
     settled_pay_amount: settledPayAmount,
     settled_order_count: settledOrderCount,
@@ -2606,20 +2615,31 @@ function renderMaterialTable(rows) {
   const enrichedRows = rows.map((row) => enrichMaterialRow(row));
   if (
     operatorMode
-    && !["material_name", "stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.materialSort.key || ""))
+    && !["material_name", "create_time", "overall_ctr", "stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.materialSort.key || ""))
   ) {
-    state.materialSort = { key: "stat_cost", dir: "desc" };
+    state.materialSort = { key: "create_time", dir: "desc" };
     saveSort("material-sort", state.materialSort);
   }
   const query = materialSearch.value.trim().toLowerCase();
   const visibleRows = enrichedRows.filter((row) => {
-    const haystack = [row.material_name, row.material_id, row.video_id, row.top_plan_name, row.top_account_name, row.top_anchor_name].join(" ").toLowerCase();
+    const haystack = [
+      row.material_name,
+      row.material_id,
+      row.video_id,
+      row.product_info_text,
+      row.top_plan_name,
+      row.top_account_name,
+      row.top_anchor_name,
+    ].join(" ").toLowerCase();
     return haystack.includes(query);
   });
   const columns = operatorMode
     ? [
         { key: "material_name", label: "素材", sortable: true },
+        { key: "product_info_text", label: "商品信息", sortable: false },
         { key: "preview", label: "预览", sortable: false },
+        { key: "create_time", label: "创建时间", sortable: true },
+        { key: "overall_ctr", label: "整体点击率", sortable: true },
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "top_account_name", label: "归属账户", sortable: true },
         { key: "top_plan_name", label: "归属计划", sortable: true },
@@ -2627,7 +2647,10 @@ function renderMaterialTable(rows) {
       ]
     : [
         { key: "material_name", label: "素材", sortable: true },
+        { key: "product_info_text", label: "商品信息", sortable: false },
         { key: "preview", label: "预览", sortable: false },
+        { key: "create_time", label: "创建时间", sortable: true },
+        { key: "overall_ctr", label: "整体点击率", sortable: true },
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "total_pay_amount", label: "整体成交", sortable: true },
         { key: "settled_pay_amount", label: "净成交", sortable: true },
@@ -2661,6 +2684,9 @@ function renderMaterialTable(rows) {
             </div>
           </td>
           <td>
+            <div class="cell-secondary compact">${escapeHtml(row.product_info_text || "--")}</div>
+          </td>
+          <td>
             <button
               type="button"
               class="button ghost compact"
@@ -2669,6 +2695,8 @@ function renderMaterialTable(rows) {
               ${canPreviewMaterial(row) ? "" : "disabled"}
             >${canPreviewMaterial(row) ? "预览" : "暂无"}</button>
           </td>
+          <td class="mono">${escapeHtml(formatDateTime(row.create_time || ""))}</td>
+          <td class="mono">${formatPercent(row.overall_ctr)}</td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           ${operatorMode
             ? `
@@ -2760,8 +2788,8 @@ function renderTeamMaterialPager(totalRows, currentPage, totalPages, startIndex,
 function renderTeamMaterialTable(rows) {
   if (!teamMaterialTable) return;
   const enrichedRows = rows.map((row) => enrichMaterialRow(row));
-  if (!["material_name", "stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.teamMaterialSort.key || ""))) {
-    state.teamMaterialSort = { key: "stat_cost", dir: "desc" };
+  if (!["material_name", "create_time", "overall_ctr", "stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.teamMaterialSort.key || ""))) {
+    state.teamMaterialSort = { key: "create_time", dir: "desc" };
     saveSort("team-material-sort", state.teamMaterialSort);
   }
   const query = teamMaterialSearch?.value.trim().toLowerCase() || "";
@@ -2770,6 +2798,7 @@ function renderTeamMaterialTable(rows) {
       row.material_name,
       row.material_id,
       row.video_id,
+      row.product_info_text,
       row.top_account_name,
       row.top_plan_name,
       row.top_anchor_name,
@@ -2778,7 +2807,10 @@ function renderTeamMaterialTable(rows) {
   });
   const columns = [
     { key: "material_name", label: "素材", sortable: true },
+    { key: "product_info_text", label: "商品信息", sortable: false },
     { key: "preview", label: "预览", sortable: false },
+    { key: "create_time", label: "创建时间", sortable: true },
+    { key: "overall_ctr", label: "整体点击率", sortable: true },
     { key: "stat_cost", label: "消耗", sortable: true },
     { key: "top_account_name", label: "归属账户", sortable: true },
     { key: "top_plan_name", label: "归属计划", sortable: true },
@@ -2804,6 +2836,9 @@ function renderTeamMaterialTable(rows) {
             </div>
           </td>
           <td>
+            <div class="cell-secondary compact">${escapeHtml(row.product_info_text || "--")}</div>
+          </td>
+          <td>
             ${canPreviewMaterial(row)
               ? `<button
                   type="button"
@@ -2813,6 +2848,8 @@ function renderTeamMaterialTable(rows) {
                 >查看预览</button>`
               : '<span class="material-preview-placeholder">暂无</span>'}
           </td>
+          <td class="mono">${escapeHtml(formatDateTime(row.create_time || ""))}</td>
+          <td class="mono">${formatPercent(row.overall_ctr)}</td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           <td>${escapeHtml(row.top_account_name || "--")}</td>
           <td>${escapeHtml(row.top_plan_name || "--")}</td>
@@ -5526,7 +5563,7 @@ function bindInputs() {
       syncExtendedButton.disabled = true;
       syncExtendedButton.textContent = "同步中...";
       try {
-        const response = await fetch("/api/sync/extended", { method: "POST" });
+        const response = await fetch("/api/sync/extended?force_refresh=1", { method: "POST" });
         if (!response.ok) {
           throw new Error("明细同步任务提交失败");
         }

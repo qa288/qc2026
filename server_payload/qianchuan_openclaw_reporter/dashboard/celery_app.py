@@ -8,6 +8,7 @@ from dashboard.settings import settings
 TIMEZONE = settings.timezone
 DETAIL_SYNC_INTERVAL_MINUTES = settings.detail_sync_interval_minutes
 HISTORY_BACKFILL_DAYS = settings.history_backfill_days
+EXTENDED_HISTORY_REFRESH_DAYS = settings.extended_history_refresh_days
 CELERY_BROKER_URL = settings.celery_broker_url
 CELERY_RESULT_BACKEND = settings.celery_result_backend
 
@@ -44,6 +45,11 @@ celery_app.conf.update(
             "task": "dashboard.detail_backfill",
             "schedule": crontab(hour=2, minute=30),
             "args": (HISTORY_BACKFILL_DAYS,),
+        },
+        "dashboard-detail-history-refresh": {
+            "task": "dashboard.detail_refresh_recent",
+            "schedule": crontab(hour=0, minute=20),
+            "args": (EXTENDED_HISTORY_REFRESH_DAYS,),
         },
     },
 )
