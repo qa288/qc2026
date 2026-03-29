@@ -65,6 +65,7 @@ const MATERIAL_SETTLED_TYPES = new Set(["VIDEO", "IMAGE"]);
 
 const state = {
   payload: null,
+  alertRules: [],
   session: null,
   oceanEngineConfig: null,
   oceanEnginePreview: null,
@@ -157,8 +158,10 @@ const materialDetail = document.getElementById("materialDetail");
 const planAccountFilter = document.getElementById("planAccountFilter");
 const notificationForm = document.getElementById("notificationForm");
 const notificationStatus = document.getElementById("notificationStatus");
+const notificationGuide = document.getElementById("notificationGuide");
 const ruleForm = document.getElementById("ruleForm");
 const ruleFormHint = document.getElementById("ruleFormHint");
+const rulePreviewCard = document.getElementById("rulePreviewCard");
 const ruleFormSubmitButton = document.getElementById("ruleFormSubmitButton");
 const ruleFormCancelButton = document.getElementById("ruleFormCancelButton");
 const ruleTargetInput = document.getElementById("ruleTargetInput");
@@ -167,6 +170,9 @@ const ruleTargetLabel = document.getElementById("ruleTargetLabel");
 const ruleTargetOptions = document.getElementById("ruleTargetOptions");
 const ruleTargetMeta = document.getElementById("ruleTargetMeta");
 const ruleMinSpendField = document.getElementById("ruleMinSpendField");
+const ruleStatusFilter = document.getElementById("ruleStatusFilter");
+const ruleSearchInput = document.getElementById("ruleSearchInput");
+const ruleListMeta = document.getElementById("ruleListMeta");
 const syncButton = document.getElementById("syncButton");
 const syncExtendedButton = document.getElementById("syncExtendedButton");
 const customerCenterChip = document.getElementById("customerCenterChip");
@@ -181,6 +187,7 @@ const signalOverview = document.getElementById("signalOverview");
 const overviewHeroCard = document.getElementById("overviewHeroCard");
 const overviewBoardGrid = document.getElementById("overviewBoardGrid");
 const overviewAlertTitle = document.getElementById("overviewAlertTitle");
+const overviewAlertMeta = document.getElementById("overviewAlertMeta");
 const overviewSystemRail = document.querySelector(".system-rail");
 const viewTabs = document.getElementById("viewTabs");
 const viewSections = Array.from(document.querySelectorAll(".view-section"));
@@ -639,6 +646,7 @@ function resetRuleFormState() {
   if (ruleFormHint) {
     ruleFormHint.dataset.tone = "neutral";
   }
+  renderRulePreview();
 }
 
 function fillRuleForm(rule) {
@@ -661,6 +669,11 @@ function fillRuleForm(rule) {
   if (ruleFormSubmitButton) ruleFormSubmitButton.textContent = "保存规则";
   if (ruleFormCancelButton) ruleFormCancelButton.classList.remove("hidden");
   syncRuleFormFields();
+  if (ruleFormHint) {
+    ruleFormHint.textContent = `正在编辑 ${entityLabel(rule.entity_type)}规则，可直接调整阈值、范围或启停状态。`;
+    ruleFormHint.dataset.tone = "neutral";
+  }
+  renderRulePreview();
 }
 
 function syncRuleFormFields() {
@@ -724,6 +737,7 @@ function syncRuleFormFields() {
       ruleFormHint.dataset.tone = "neutral";
     }
   }
+  renderRulePreview();
 }
 
 function syncRuleTargetSelectionFromSearch() {
@@ -732,8 +746,10 @@ function syncRuleTargetSelectionFromSearch() {
   if (!text) {
     ruleTargetInput.value = "";
     if (ruleTargetMeta) {
+      ruleTargetMeta.textContent = "留空表示全部对象；输入关键词后请从候选项中选择具体对象。";
       ruleTargetMeta.dataset.tone = "neutral";
     }
+    renderRulePreview();
     return;
   }
   const targetMaps = ruleTargetLookupMaps(state.ruleTargetOptions || []);
@@ -744,6 +760,7 @@ function syncRuleTargetSelectionFromSearch() {
       ruleTargetMeta.textContent = `已选中：${text}`;
       ruleTargetMeta.dataset.tone = "success";
     }
+    renderRulePreview();
     return;
   }
   ruleTargetInput.value = "";
@@ -751,6 +768,7 @@ function syncRuleTargetSelectionFromSearch() {
     ruleTargetMeta.textContent = "请输入关键词后，从下拉候选项中选择一个具体对象；留空表示全部。";
     ruleTargetMeta.dataset.tone = "neutral";
   }
+  renderRulePreview();
 }
 
 function keywordScopeLabel(scope) {
@@ -1244,6 +1262,135 @@ function describeNotificationTarget(settings) {
   return { label: "已配置目标", detail: "当前渠道已经设置接收对象。" };
 }
 
+function notificationTargetPlaceholder(channel) {
+  if (channel === "feishu") return "填写群会话 ID、成员 open_id，或机器人目标";
+  if (channel === "dingtalk") return "填写钉钉机器人 webhook 或群目标";
+  if (channel === "wechat") return "填写企业微信机器人或接收对象标识";
+  return "填写接收对象标识";
+}
+
+function renderNotificationGuide(settings) {
+  if (!notificationGuide) return;
+  const channel = String(settings?.channel || "feishu");
+  const target = String(settings?.target || "").trim();
+  const enabled = Boolean(settings?.enabled);
+  const alertEnabled = Boolean(settings?.alert_enabled);
+  const steps = [
+    enabled ? "1. 外发已开启" : "1. 先决定是否开启外发",
+    `2. 当前渠道：${channelLabel(channel)}`,
+    target ? "3. 已配置接收目标" : "3. 还没配置接收目标",
+    alertEnabled ? `4. 阈值告警每批 ${formatNumber(settings?.alert_batch_size || 6)} 条` : "4. 当前只保留页面提醒",
+  ];
+  notificationGuide.innerHTML = `
+    <div class="signal-channel-guide-head">
+      <strong>${enabled ? "通知已进入可外发状态" : "通知仍处于页面内提醒模式"}</strong>
+      <span>${notificationTargetPlaceholder(channel)}</span>
+    </div>
+    <div class="signal-channel-guide-steps">
+      ${steps.map((item) => `<span class="signal-guide-pill">${escapeHtml(item)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function syncNotificationFormFields() {
+  if (!notificationForm) return;
+  const enabledInput = notificationForm.querySelector('input[name="enabled"]');
+  const alertEnabledInput = notificationForm.querySelector('input[name="alert_enabled"]');
+  const channelSelect = notificationForm.querySelector('select[name="channel"]');
+  const targetInput = notificationForm.querySelector('input[name="target"]');
+  const accountInput = notificationForm.querySelector('input[name="account"]');
+  const batchInput = notificationForm.querySelector('input[name="alert_batch_size"]');
+  const channel = String(channelSelect?.value || "feishu");
+  const enabled = Boolean(enabledInput?.checked);
+  const alertEnabled = Boolean(alertEnabledInput?.checked);
+  if (targetInput) {
+    targetInput.placeholder = notificationTargetPlaceholder(channel);
+  }
+  if (batchInput) {
+    batchInput.disabled = !enabled || !alertEnabled;
+  }
+  if (accountInput) {
+    accountInput.placeholder = enabled ? "default" : "通知关闭时可先留空";
+  }
+  renderNotificationGuide({
+    enabled,
+    alert_enabled: alertEnabled,
+    channel,
+    target: targetInput?.value || "",
+    alert_batch_size: Number(batchInput?.value || 6),
+  });
+}
+
+function renderRulePreview() {
+  if (!rulePreviewCard || !ruleForm) return;
+  const form = new FormData(ruleForm);
+  const entityType = String(form.get("entity_type") || "plan");
+  const metric = String(form.get("metric") || "");
+  const operator = String(form.get("operator") || "lt");
+  const threshold = String(form.get("threshold") || "").trim();
+  const cooldownMinutes = String(form.get("cooldown_minutes") || "60").trim() || "60";
+  const minSpend = String(form.get("min_spend") || "0").trim() || "0";
+  const enabled = form.get("enabled") === "on";
+  const targetId = String(form.get("target_id") || "").trim();
+  const targetSearchValue = String(ruleTargetSearchInput?.value || "").trim();
+  const config = ruleEntityConfig(entityType);
+  const targetLabel = targetId
+    ? targetDisplayLabel(entityType, targetId)
+    : targetSearchValue
+      ? `${targetSearchValue}（待确认）`
+      : "全部对象";
+  const thresholdLabel = threshold
+    ? `${metricLabel(metric)} ${operatorLabel(operator)} ${threshold}`
+    : `等待填写${metricLabel(metric)}阈值`;
+  const spendLabel = config.supportsMinSpend ? `最低消耗 ${formatMoney(minSpend)}` : "无需最低消耗门槛";
+  rulePreviewCard.innerHTML = `
+    <div class="signal-rule-preview-head">
+      <div>
+        <span class="signal-rule-preview-label">${state.editingRuleId ? "编辑预览" : "新增预览"}</span>
+        <strong>${escapeHtml(entityLabel(entityType))} · ${escapeHtml(metricLabel(metric))}</strong>
+      </div>
+      <span class="signal-rule-preview-badge ${enabled ? "on" : "off"}">${enabled ? "启用后立即生效" : "保存后保持关闭"}</span>
+    </div>
+    <div class="signal-rule-preview-body">
+      <div class="signal-rule-preview-item">
+        <span>作用对象</span>
+        <strong>${escapeHtml(targetLabel)}</strong>
+      </div>
+      <div class="signal-rule-preview-item">
+        <span>触发条件</span>
+        <strong>${escapeHtml(thresholdLabel)}</strong>
+      </div>
+      <div class="signal-rule-preview-item">
+        <span>冷却周期</span>
+        <strong>${escapeHtml(cooldownMinutes)} 分钟</strong>
+      </div>
+      <div class="signal-rule-preview-item">
+        <span>补充限制</span>
+        <strong>${escapeHtml(spendLabel)}</strong>
+      </div>
+    </div>
+  `;
+}
+
+function filteredAlertRules(rules) {
+  const status = String(ruleStatusFilter?.value || "all");
+  const query = String(ruleSearchInput?.value || "").trim().toLowerCase();
+  return (rules || []).filter((rule) => {
+    const enabled = Boolean(rule?.enabled);
+    if (status === "enabled" && !enabled) return false;
+    if (status === "disabled" && enabled) return false;
+    if (!query) return true;
+    const haystack = [
+      entityLabel(rule?.entity_type),
+      metricLabel(rule?.metric),
+      targetDisplayLabel(rule?.entity_type, rule?.target_id),
+      String(rule?.note || ""),
+      String(rule?.threshold ?? ""),
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
 function renderNotificationSettings(settings) {
   const channelSelect = notificationForm.querySelector('select[name="channel"]');
   const channelValue = String(settings?.channel || "feishu");
@@ -1268,6 +1415,8 @@ function renderNotificationSettings(settings) {
     </div>
     <p class="notify-inline-copy">${escapeHtml(targetInfo.detail)} ${settings?.alert_enabled ? `当前每批发送 ${formatNumber(settings?.alert_batch_size || 6)} 条阈值告警。` : "当前只保留页面内提醒，外发可后续开启。"} </p>
   `;
+  notificationStatus.dataset.tone = "neutral";
+  syncNotificationFormFields();
 }
 
 function renderSignalOverview(settings, rules) {
@@ -1285,7 +1434,7 @@ function renderSignalOverview(settings, rules) {
       <span class="signal-summary-sub">${escapeHtml(channelLabel(settings?.channel || "-"))} / ${escapeHtml(targetInfo.label)}</span>
     </article>
     <article class="signal-summary-card">
-      <span class="signal-summary-label">规则</span>
+      <span class="signal-summary-label">启用规则</span>
       <strong class="mono">${formatNumber(enabledRules)}</strong>
       <span class="signal-summary-sub">共 ${formatNumber(totalRules)} 条 · 计划 ${formatNumber(planRules)} · 账户 ${formatNumber(accountRules)}</span>
     </article>
@@ -1910,29 +2059,31 @@ function renderOverviewHero(latest) {
         ${pillMarkup}
       </div>
     </div>
-    <div class="overview-hero-metrics">
-      <article class="overview-hero-metric">
-        <span>今日消耗</span>
-        <strong class="mono">${formatMoney(summary.stat_cost)}</strong>
-      </article>
-      <article class="overview-hero-metric">
-        <span>支付金额</span>
-        <strong class="mono">${formatMoney(summary.pay_amount)}</strong>
-      </article>
-      <article class="overview-hero-metric">
-        <span>订单数</span>
-        <strong class="mono">${formatNumber(summary.order_count)}</strong>
-      </article>
-      <article class="overview-hero-metric accent">
-        <span>整体 ROI</span>
-        <strong class="mono">${formatRate(summary.roi)}</strong>
-      </article>
-    </div>
-    <div class="overview-hero-foot">
-      <div class="overview-foot-stat"><span>活跃账户</span><strong class="mono">${formatNumber(summary.active_account_count)}</strong></div>
-      <div class="overview-foot-stat"><span>活跃计划</span><strong class="mono">${formatNumber(summary.active_plan_count)}</strong></div>
-      <div class="overview-foot-stat"><span>活跃商品</span><strong class="mono">${formatNumber(summary.active_product_count)}</strong></div>
-      <div class="overview-foot-stat"><span>活跃${escapeHtml(teamLabel)}</span><strong class="mono">${activeTeamCount}</strong></div>
+    <div class="overview-hero-stage">
+      <div class="overview-hero-metrics">
+        <article class="overview-hero-metric">
+          <span>今日消耗</span>
+          <strong class="mono">${formatMoney(summary.stat_cost)}</strong>
+        </article>
+        <article class="overview-hero-metric">
+          <span>支付金额</span>
+          <strong class="mono">${formatMoney(summary.pay_amount)}</strong>
+        </article>
+        <article class="overview-hero-metric">
+          <span>订单数</span>
+          <strong class="mono">${formatNumber(summary.order_count)}</strong>
+        </article>
+        <article class="overview-hero-metric accent">
+          <span>整体 ROI</span>
+          <strong class="mono">${formatRate(summary.roi)}</strong>
+        </article>
+      </div>
+      <div class="overview-hero-foot">
+        <div class="overview-foot-stat"><span>活跃账户</span><strong class="mono">${formatNumber(summary.active_account_count)}</strong></div>
+        <div class="overview-foot-stat"><span>活跃计划</span><strong class="mono">${formatNumber(summary.active_plan_count)}</strong></div>
+        <div class="overview-foot-stat"><span>活跃商品</span><strong class="mono">${formatNumber(summary.active_product_count)}</strong></div>
+        <div class="overview-foot-stat"><span>活跃${escapeHtml(teamLabel)}</span><strong class="mono">${activeTeamCount}</strong></div>
+      </div>
     </div>
   `;
 }
@@ -2230,6 +2381,24 @@ function renderOceanEngineConfig(config) {
 }
 
 function renderAlerts(events) {
+  const pendingCount = events.filter((item) => item.status === "pending").length;
+  if (overviewAlertMeta) {
+    const latestCreatedAt = events[0]?.created_at || "暂无";
+    overviewAlertMeta.innerHTML = `
+      <div class="overview-alert-meta-item">
+        <strong class="mono">${formatNumber(events.length)}</strong>
+        <span>最近记录</span>
+      </div>
+      <div class="overview-alert-meta-item">
+        <strong class="mono">${formatNumber(pendingCount)}</strong>
+        <span>待处理</span>
+      </div>
+      <div class="overview-alert-meta-item is-wide">
+        <strong class="mono">${escapeHtml(latestCreatedAt)}</strong>
+        <span>最新触发</span>
+      </div>
+    `;
+  }
   renderAlertSummary(events);
   if (!events.length) {
     alertStream.className = "alert-stream empty";
@@ -4430,6 +4599,16 @@ function renderPlanTable(plans) {
 }
 
 function renderRuleTable(rules) {
+  const filteredRules = filteredAlertRules(rules);
+  if (ruleListMeta) {
+    const filterLabel = String(ruleStatusFilter?.value || "all");
+    const statusText = filterLabel === "enabled" ? "仅看启用" : filterLabel === "disabled" ? "仅看关闭" : "全部状态";
+    const query = String(ruleSearchInput?.value || "").trim();
+    ruleListMeta.textContent = query
+      ? `${statusText} · 命中 ${formatNumber(filteredRules.length)} / ${formatNumber(rules.length)} 条规则`
+      : `${statusText} · 当前共 ${formatNumber(filteredRules.length)} 条规则`;
+    ruleListMeta.dataset.tone = filteredRules.length ? "neutral" : "warn";
+  }
   ruleTable.innerHTML = `
     <thead>
       <tr>
@@ -4442,8 +4621,8 @@ function renderRuleTable(rules) {
       </tr>
     </thead>
     <tbody>
-      ${rules.length ? rules.map((rule) => `
-        <tr>
+      ${filteredRules.length ? filteredRules.map((rule) => `
+        <tr class="${Number(rule.id) === Number(state.editingRuleId || 0) ? "is-editing" : ""}">
           <td>
             <div class="cell-primary">${escapeHtml(entityLabel(rule.entity_type))}</div>
             <div class="cell-subline">
@@ -4466,7 +4645,7 @@ function renderRuleTable(rules) {
             <button class="button ghost compact delete-rule" data-id="${rule.id}">删除</button>
           </td>
         </tr>
-      `).join("") : '<tr><td colspan="6" class="empty-cell">还没有预警规则，先从账户余额、共享钱包、消耗或爆单规则开始。</td></tr>'}
+      `).join("") : `<tr><td colspan="6" class="empty-cell">${rules.length ? "当前筛选条件下没有命中规则。" : "还没有预警规则，先从账户余额、共享钱包、消耗或爆单规则开始。"}</td></tr>`}
     </tbody>
   `;
 
@@ -4478,15 +4657,17 @@ function renderRuleTable(rules) {
       fillRuleForm(rule);
       setActiveView("signals");
       ruleForm.scrollIntoView({ behavior: "smooth", block: "start" });
+      renderRuleTable(state.alertRules || []);
     });
   });
 
   ruleTable.querySelectorAll(".toggle-rule").forEach((button) => {
     button.addEventListener("click", async () => {
       const id = Number(button.dataset.id);
-      const rule = rules.find((item) => item.id === id);
+      const rule = rules.find((item) => Number(item.id) === id);
       if (!rule) return;
-      await fetch(`/api/alert-rules/${id}`, {
+      button.disabled = true;
+      const response = await fetch(`/api/alert-rules/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4501,6 +4682,12 @@ function renderRuleTable(rules) {
           note: rule.note,
         }),
       });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        window.alert(errorPayload.detail || "切换规则状态失败");
+        button.disabled = false;
+        return;
+      }
       await fetchDashboard();
     });
   });
@@ -4508,7 +4695,20 @@ function renderRuleTable(rules) {
   ruleTable.querySelectorAll(".delete-rule").forEach((button) => {
     button.addEventListener("click", async () => {
       const id = Number(button.dataset.id);
-      await fetch(`/api/alert-rules/${id}`, { method: "DELETE" });
+      const rule = rules.find((item) => Number(item.id) === id);
+      if (!rule) return;
+      if (!window.confirm(`确认删除${entityLabel(rule.entity_type)}规则“${metricLabel(rule.metric)}”吗？`)) return;
+      button.disabled = true;
+      const response = await fetch(`/api/alert-rules/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        window.alert(errorPayload.detail || "删除规则失败");
+        button.disabled = false;
+        return;
+      }
+      if (Number(state.editingRuleId || 0) === id) {
+        resetRuleFormState();
+      }
       await fetchDashboard();
     });
   });
@@ -6117,17 +6317,32 @@ function bindInputs() {
       summary_account_limit: 6,
       summary_plan_limit: 10,
     };
-    const response = await fetch("/api/notification-settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "保存通知设置失败");
-      return;
+    const submitButton = document.querySelector('button[form="notificationForm"]');
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.textContent = "保存中...";
     }
-    await fetchDashboard();
+    try {
+      const response = await fetch("/api/notification-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        window.alert(errorPayload.detail || "保存通知设置失败");
+        return;
+      }
+      await fetchDashboard();
+      if (notificationStatus) {
+        notificationStatus.dataset.tone = "success";
+      }
+    } finally {
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = "保存通知";
+      }
+    }
   });
 
   ruleForm?.addEventListener("submit", async (event) => {
@@ -6155,22 +6370,33 @@ function bindInputs() {
     };
     const method = ruleId ? "PUT" : "POST";
     const url = ruleId ? `/api/alert-rules/${encodeURIComponent(ruleId)}` : "/api/alert-rules";
-    const response = await fetch(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "保存规则失败");
-      return;
+    if (ruleFormSubmitButton) {
+      ruleFormSubmitButton.disabled = true;
+      ruleFormSubmitButton.textContent = ruleId ? "保存中..." : "创建中...";
     }
-    const savedLabel = payload.entity_type ? entityLabel(payload.entity_type) : String(form.get("entity_type") || "规则");
-    resetRuleFormState();
-    await fetchDashboard();
-    if (ruleFormHint) {
-      ruleFormHint.textContent = `已保存${savedLabel}规则。可继续新增，或到下方调整状态。`;
-      ruleFormHint.dataset.tone = "success";
+    try {
+      const response = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        window.alert(errorPayload.detail || "保存规则失败");
+        return;
+      }
+      const savedLabel = payload.entity_type ? entityLabel(payload.entity_type) : String(form.get("entity_type") || "规则");
+      resetRuleFormState();
+      await fetchDashboard();
+      if (ruleFormHint) {
+        ruleFormHint.textContent = `已保存${savedLabel}规则。可继续新增，或到下方调整状态。`;
+        ruleFormHint.dataset.tone = "success";
+      }
+    } finally {
+      if (ruleFormSubmitButton) {
+        ruleFormSubmitButton.disabled = false;
+        ruleFormSubmitButton.textContent = state.editingRuleId ? "保存规则" : "新增规则";
+      }
     }
   });
 
@@ -6180,6 +6406,30 @@ function bindInputs() {
 
   ruleTargetSearchInput?.addEventListener("change", () => {
     syncRuleTargetSelectionFromSearch();
+  });
+
+  ruleForm?.addEventListener("input", () => {
+    renderRulePreview();
+  });
+
+  ruleForm?.addEventListener("change", () => {
+    renderRulePreview();
+  });
+
+  notificationForm?.addEventListener("input", () => {
+    syncNotificationFormFields();
+  });
+
+  notificationForm?.addEventListener("change", () => {
+    syncNotificationFormFields();
+  });
+
+  ruleStatusFilter?.addEventListener("change", () => {
+    renderRuleTable(state.alertRules || []);
+  });
+
+  ruleSearchInput?.addEventListener("input", () => {
+    renderRuleTable(state.alertRules || []);
   });
 
   syncButton?.addEventListener("click", async () => {
@@ -6462,15 +6712,16 @@ async function fetchDashboard() {
 
 async function render(payload) {
   const latest = payload.latest;
+  state.alertRules = payload.alertRules || [];
   applyRoleViewPolicy();
   renderOceanEngineConfig(payload.oceanEngineConfig || { customer_center_id: payload.customerCenterId || "" });
   renderOverviewHero(latest);
   renderKpis(latest);
   renderSystemCards(latest, payload.extendedSync || latest?.extendedSync, payload.tokenInfo || {});
   renderAlerts(payload.alertEvents || []);
-  renderSignalOverview(payload.notificationSettings || {}, payload.alertRules || []);
+  renderSignalOverview(payload.notificationSettings || {}, state.alertRules);
   renderNotificationSettings(payload.notificationSettings || {});
-  renderRuleTable(payload.alertRules || []);
+  renderRuleTable(state.alertRules);
   syncRuleFormFields();
   lastSnapshotText.textContent = latest.snapshot_time;
   refreshHintText.textContent = "采集 1 分钟 · 明细 10 分钟 · 页面 60 秒";

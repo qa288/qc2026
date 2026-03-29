@@ -50,9 +50,10 @@
 5. [初始化配置模板](./standard/12_初始化配置模板.md)
 6. [工作台重构与完整开发计划](./standard/22_工作台重构与完整开发计划.md)
 7. [技术架构优化与分阶段推进计划](./standard/23_技术架构优化与分阶段推进计划.md)
-8. [运行目录说明](./runtime/README.md)
-9. [运行标准](./runtime/STANDARD.md)
-10. [接口参考](./runtime/API_REFERENCE.md)
+8. [文档治理与精简计划](./standard/24_文档治理与精简计划.md)
+9. [运行目录说明](./runtime/README.md)
+10. [运行标准](./runtime/STANDARD.md)
+11. [接口参考](./runtime/API_REFERENCE.md)
 
 ## 使用规则
 
@@ -71,4 +72,5 @@
 - 预警规则：[21_管理员预警规则页方案](./standard/21_管理员预警规则页方案.md)
 - 产品排期：[22_工作台重构与完整开发计划](./standard/22_工作台重构与完整开发计划.md)
 - 架构治理排期：[23_技术架构优化与分阶段推进计划](./standard/23_技术架构优化与分阶段推进计划.md)
+- 文档治理排期：[24_文档治理与精简计划](./standard/24_文档治理与精简计划.md)
 - 当前线上运行事实：[runtime/README.md](./runtime/README.md) 与 [runtime/STANDARD.md](./runtime/STANDARD.md)

@@ -97,7 +97,9 @@
             <div class="panel-head overview-alert-head">
               <div>
                 <h2 id="overviewAlertTitle">重点</h2>
+                <p class="overview-alert-copy">先看待处理与最新触发，再看最近告警记录。</p>
               </div>
+              <div id="overviewAlertMeta" class="overview-alert-meta"></div>
             </div>
             <div class="alert-focus-grid">
               <div class="alert-summary-shell">
@@ -607,6 +609,7 @@
               <div class="signal-config-head">
                 <div>
                   <h3>规则编辑器</h3>
+                  <p class="signal-config-copy">先选对象和指标，再补阈值、对象范围与备注。</p>
                 </div>
                 <div class="signal-head-actions">
                   <button type="submit" form="ruleForm" id="ruleFormSubmitButton" class="button primary compact">新增规则</button>
@@ -619,116 +622,147 @@
                   <button type="button" class="signal-template-button" data-entity="plan" data-metric="stat_cost" data-operator="gte" data-threshold="1000" data-min-spend="0" data-note="计划消耗过快，及时复核">计划消耗</button>
                   <button type="button" class="signal-template-button" data-entity="burst_plan" data-metric="burst_order_count" data-operator="gte" data-threshold="10" data-note="计划短时爆单，及时放量或复核">爆单计划</button>
               </div>
-              <div id="ruleFormHint" class="signal-form-hint">先选对象，再填阈值。</div>
-              <form id="ruleForm" class="signal-compact-form">
-                <input name="rule_id" type="hidden" />
-                <div class="signal-form-row signal-form-row-main">
-                  <label>
-                    <span>对象</span>
-                    <select name="entity_type" required>
-                      <option value="plan">计划</option>
-                      <option value="account">账户</option>
-                      <option value="account_balance">账户余额</option>
-                      <option value="shared_wallet">共享钱包</option>
-                      <option value="burst_plan">爆单计划</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>指标</span>
-                    <select name="metric" required>
-                    </select>
-                  </label>
-                  <label>
-                    <span id="ruleTargetLabel">搜索并选择对象</span>
-                    <input id="ruleTargetSearchInput" type="text" list="ruleTargetOptions" placeholder="输入关键词搜索对象，留空表示全部" autocomplete="off" />
-                    <input name="target_id" id="ruleTargetInput" type="hidden" />
-                    <datalist id="ruleTargetOptions"></datalist>
-                  </label>
+              <div class="signal-editor-layout">
+                <div class="signal-editor-main">
+                  <form id="ruleForm" class="signal-compact-form">
+                    <input name="rule_id" type="hidden" />
+                    <div class="signal-form-row signal-form-row-main">
+                      <label>
+                        <span>对象</span>
+                        <select name="entity_type" required>
+                          <option value="plan">计划</option>
+                          <option value="account">账户</option>
+                          <option value="account_balance">账户余额</option>
+                          <option value="shared_wallet">共享钱包</option>
+                          <option value="burst_plan">爆单计划</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>指标</span>
+                        <select name="metric" required>
+                        </select>
+                      </label>
+                      <label>
+                        <span id="ruleTargetLabel">搜索并选择对象</span>
+                        <input id="ruleTargetSearchInput" type="text" list="ruleTargetOptions" placeholder="输入关键词搜索对象，留空表示全部" autocomplete="off" />
+                        <input name="target_id" id="ruleTargetInput" type="hidden" />
+                        <datalist id="ruleTargetOptions"></datalist>
+                      </label>
+                    </div>
+                    <div id="ruleTargetMeta" class="signal-form-hint compact">先搜索，再选对象。</div>
+                    <div class="signal-form-row signal-form-row-aux">
+                      <label>
+                        <span>比较</span>
+                        <select name="operator" required>
+                          <option value="lt">&lt;</option>
+                          <option value="lte">&lt;=</option>
+                          <option value="gt">&gt;</option>
+                          <option value="gte">&gt;=</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>阈值</span>
+                        <input name="threshold" type="number" step="0.01" required />
+                      </label>
+                      <label>
+                        <span>冷却分钟</span>
+                        <input name="cooldown_minutes" type="number" step="1" value="60" />
+                      </label>
+                      <label id="ruleMinSpendField">
+                        <span>最低消耗</span>
+                        <input name="min_spend" type="number" step="0.01" value="0" />
+                      </label>
+                      <label class="wide-field">
+                        <span>备注</span>
+                        <input name="note" type="text" placeholder="例如：ROI 低于 1.2 立即复核" />
+                      </label>
+                      <label class="toggle-chip">
+                        <input name="enabled" type="checkbox" checked />
+                        <span>立即启用</span>
+                      </label>
+                    </div>
+                  </form>
                 </div>
-                <div id="ruleTargetMeta" class="signal-form-hint compact">先搜索，再选对象。</div>
-                <div class="signal-form-row signal-form-row-aux">
-                  <label>
-                    <span>比较</span>
-                    <select name="operator" required>
-                      <option value="lt">&lt;</option>
-                      <option value="lte">&lt;=</option>
-                      <option value="gt">&gt;</option>
-                      <option value="gte">&gt;=</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>阈值</span>
-                    <input name="threshold" type="number" step="0.01" required />
-                  </label>
-                  <label>
-                    <span>冷却分钟</span>
-                    <input name="cooldown_minutes" type="number" step="1" value="60" />
-                  </label>
-                  <label id="ruleMinSpendField">
-                    <span>最低消耗</span>
-                    <input name="min_spend" type="number" step="0.01" value="0" />
-                  </label>
-                  <label class="wide-field">
-                    <span>备注</span>
-                    <input name="note" type="text" placeholder="例如：ROI 低于 1.2 立即复核" />
-                  </label>
-                  <label class="toggle-chip">
-                    <input name="enabled" type="checkbox" checked />
-                    <span>立即启用</span>
-                  </label>
-                </div>
-              </form>
+                <aside class="signal-editor-rail">
+                  <div id="ruleFormHint" class="signal-form-hint">先选对象，再填阈值。</div>
+                  <div id="rulePreviewCard" class="signal-rule-preview"></div>
+                </aside>
+              </div>
             </section>
 
             <section class="signal-config-card signal-notify-card">
               <div class="signal-config-head">
                 <div>
                   <h3>通知渠道</h3>
+                  <p class="signal-config-copy">先决定是否外发，再填渠道、接收目标和批次设置。</p>
                 </div>
                 <button type="submit" form="notificationForm" class="button primary compact">保存通知</button>
               </div>
-              <div class="signal-form-hint compact">规则先在站内生效，再决定是否外发。</div>
-              <div id="notificationStatus" class="notify-inline-status"></div>
-              <form id="notificationForm" class="signal-compact-form">
-                <div class="signal-form-row signal-form-row-notify">
-                  <label class="toggle-chip">
-                    <input name="enabled" type="checkbox" />
-                    <span>开启通知</span>
-                  </label>
-                  <label>
-                    <span>渠道</span>
-                    <select name="channel" required>
-                      <option value="feishu">飞书</option>
-                      <option value="dingtalk">钉钉</option>
-                      <option value="wechat">微信</option>
-                    </select>
-                  </label>
-                  <label class="wide-field">
-                    <span>接收目标</span>
-                    <input name="target" type="text" placeholder="群机器人、群会话或接收对象标识" />
-                  </label>
-                  <label>
-                    <span>账号</span>
-                    <input name="account" type="text" placeholder="default" />
-                  </label>
-                  <label class="toggle-chip">
-                    <input name="alert_enabled" type="checkbox" />
-                    <span>阈值告警</span>
-                  </label>
-                  <label>
-                    <span>单次发送条数</span>
-                    <input name="alert_batch_size" type="number" step="1" min="1" max="20" value="6" />
-                  </label>
+              <div class="signal-notify-layout">
+                <div class="signal-notify-main">
+                  <div class="signal-form-hint compact">规则先在站内生效，再决定是否外发。</div>
+                  <form id="notificationForm" class="signal-compact-form">
+                    <div class="signal-form-row signal-form-row-notify">
+                      <label class="toggle-chip">
+                        <input name="enabled" type="checkbox" />
+                        <span>开启通知</span>
+                      </label>
+                      <label>
+                        <span>渠道</span>
+                        <select name="channel" required>
+                          <option value="feishu">飞书</option>
+                          <option value="dingtalk">钉钉</option>
+                          <option value="wechat">微信</option>
+                        </select>
+                      </label>
+                      <label class="wide-field">
+                        <span>接收目标</span>
+                        <input name="target" type="text" placeholder="群机器人、群会话或接收对象标识" />
+                      </label>
+                      <label>
+                        <span>账号</span>
+                        <input name="account" type="text" placeholder="default" />
+                      </label>
+                      <label class="toggle-chip">
+                        <input name="alert_enabled" type="checkbox" />
+                        <span>阈值告警</span>
+                      </label>
+                      <label>
+                        <span>单次发送条数</span>
+                        <input name="alert_batch_size" type="number" step="1" min="1" max="20" value="6" />
+                      </label>
+                    </div>
+                  </form>
                 </div>
-              </form>
+                <aside class="signal-notify-rail">
+                  <div id="notificationStatus" class="notify-inline-status"></div>
+                  <div id="notificationGuide" class="signal-channel-guide"></div>
+                </aside>
+              </div>
             </section>
 
             <section class="signal-config-card signal-rule-list-card">
               <div class="signal-config-head">
                 <div>
                   <h3>已生效规则</h3>
+                  <p class="signal-config-copy">支持按状态和关键词筛选，便于快速回看与复用。</p>
+                </div>
+                <div class="signal-list-tools">
+                  <label class="signal-inline-field">
+                    <span>状态</span>
+                    <select id="ruleStatusFilter">
+                      <option value="all">全部</option>
+                      <option value="enabled">仅启用</option>
+                      <option value="disabled">仅关闭</option>
+                    </select>
+                  </label>
+                  <label class="signal-inline-field signal-inline-field-search">
+                    <span>搜索</span>
+                    <input id="ruleSearchInput" type="search" placeholder="搜索对象、备注、指标" />
+                  </label>
                 </div>
               </div>
+              <div id="ruleListMeta" class="signal-form-hint compact">正在加载规则。</div>
               <div class="table-shell">
                 <table id="ruleTable" class="data-table compact"></table>
               </div>
