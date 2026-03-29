@@ -72,7 +72,7 @@ def register_user_routes(app: Any, service: Any, require_admin: Any) -> None:
     @app.get("/api/users/{user_id}/matched-materials")
     async def user_matched_materials(
         user_id: int,
-        range: str = "day",
+        range: str = "month",
         start_date: str = "",
         end_date: str = "",
         q: str = "",

@@ -20,25 +20,18 @@
                   <div class="customer-center-popover-head">
                     <div>
                       <p class="section-kicker">OceanEngine</p>
-                      <h3>Runtime CC Switch</h3>
+                      <h3>账号切换</h3>
                     </div>
-                    <div id="oceanEngineConfigStatus" class="section-range-meta compact-inline inline-feedback">Enter a CC ID here. The system will use the saved token for that account and queue a main snapshot sync.</div>
+                    <div id="oceanEngineConfigStatus" class="section-range-meta compact-inline inline-feedback">点击下方已授权账号即可切换，系统会自动提交一次主快照同步。</div>
                   </div>
-                  <form id="oceanEngineConfigForm" class="customer-center-form">
-                    <label>
-                      <span>Current CC</span>
-                      <input name="current_customer_center_id" type="text" readonly />
-                    </label>
-                    <label>
-                      <span>Target CC</span>
-                      <input name="customer_center_id" type="text" inputmode="numeric" placeholder="Enter a new customer_center_id" required />
-                    </label>
-                    <div class="customer-center-actions">
-                      <div id="oceanEngineConfigMeta" class="section-range-meta compact-inline">Using the server configuration.</div>
-                      <button type="submit" class="button primary compact">Save And Switch</button>
+                  <section class="customer-center-bound-section">
+                    <div class="customer-center-section-head">
+                      <span>已授权账号</span>
+                      <span id="oceanEngineBoundAccountsMeta" class="section-range-meta compact-inline">加载中...</span>
                     </div>
-                  </form>
-                  <div id="oceanEngineConfigPreview" class="runtime-config-preview hidden"></div>
+                    <div id="oceanEngineBoundAccounts" class="customer-center-bound-list"></div>
+                  </section>
+                  <div id="oceanEngineConfigMeta" class="customer-center-meta">当前使用服务器配置。</div>
                 </section>
               </div>
               <span class="hero-chip">1 分钟刷新</span>
@@ -585,7 +578,7 @@
                     <button type="button" id="toggleOperatorMaterialsButton" class="button ghost compact access-action-button">显示列表</button>
                   </div>
                 </div>
-                <div id="operatorMaterialStatus" class="section-range-meta compact-inline inline-feedback">只按素材名称关键词命中，默认收起。</div>
+                <div id="operatorMaterialStatus" class="section-range-meta compact-inline inline-feedback">展示近30天内按素材名称关键词命中的素材，默认收起。</div>
                 <div id="operatorMaterialContent" class="hidden">
                   <div class="ownership-inline-form simple-inline-form access-material-search-form">
                     <input id="operatorMaterialSearch" type="search" placeholder="搜索素材名称" />
@@ -781,6 +774,19 @@
             <button type="button" class="button primary" id="commentReplySubmit">发布回复</button>
           </div>
         </div>
+      </div>
+    </div>
+    <div class="preview-modal hidden" id="relationDetailModal" aria-hidden="true">
+      <div class="preview-backdrop" data-action="close-relation-detail"></div>
+      <div class="preview-dialog relation-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="relationDetailTitle">
+        <div class="preview-head">
+          <div>
+            <h3 id="relationDetailTitle">关联明细</h3>
+            <div id="relationDetailMeta" class="section-range-meta compact-inline">按当前筛选结果展示关联账户或计划。</div>
+          </div>
+          <button type="button" class="button ghost compact" data-action="close-relation-detail">关闭</button>
+        </div>
+        <div class="preview-body relation-detail-body" id="relationDetailBody"></div>
       </div>
     </div>
     <script src="/static/app.js"></script>

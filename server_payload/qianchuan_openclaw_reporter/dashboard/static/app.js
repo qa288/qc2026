@@ -69,6 +69,7 @@ const state = {
   oceanEngineConfig: null,
   oceanEnginePreview: null,
   oceanEnginePopoverOpen: false,
+  oceanEnginePendingCustomerCenterId: "",
   rangePayloads: {},
   planAssetCache: {},
   materialPayloads: {},
@@ -93,6 +94,7 @@ const state = {
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
   employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
+  productSort: loadSort("product-sort", { key: "order_count", dir: "desc" }),
   materialSort: loadSort("material-sort", { key: "create_time", dir: "desc" }),
   teamMaterialSort: loadSort("team-material-sort", { key: "create_time", dir: "desc" }),
   commentSort: loadSort("comment-sort", { key: "create_time", dir: "desc" }),
@@ -110,7 +112,9 @@ const state = {
   materialPage: 1,
   teamMaterialPage: 1,
   commentPage: 1,
+  selectedEmployeeName: null,
   selectedPlanId: null,
+  selectedProductKey: null,
   selectedMaterialKey: null,
   commentReplyTarget: null,
   materialPreviewRequestToken: 0,
@@ -224,6 +228,8 @@ const oceanEngineConfigForm = document.getElementById("oceanEngineConfigForm");
 const oceanEngineConfigStatus = document.getElementById("oceanEngineConfigStatus");
 const oceanEngineConfigMeta = document.getElementById("oceanEngineConfigMeta");
 const oceanEngineConfigPreview = document.getElementById("oceanEngineConfigPreview");
+const oceanEngineBoundAccounts = document.getElementById("oceanEngineBoundAccounts");
+const oceanEngineBoundAccountsMeta = document.getElementById("oceanEngineBoundAccountsMeta");
 const userEditorStatus = document.getElementById("userEditorStatus");
 const uploadPermissionField = document.getElementById("uploadPermissionField");
 const operatorKeywordSeedField = document.getElementById("operatorKeywordSeedField");
@@ -268,6 +274,10 @@ const commentReplyMeta = document.getElementById("commentReplyMeta");
 const commentReplyInput = document.getElementById("commentReplyInput");
 const commentReplyStatus = document.getElementById("commentReplyStatus");
 const commentReplySubmit = document.getElementById("commentReplySubmit");
+const relationDetailModal = document.getElementById("relationDetailModal");
+const relationDetailTitle = document.getElementById("relationDetailTitle");
+const relationDetailMeta = document.getElementById("relationDetailMeta");
+const relationDetailBody = document.getElementById("relationDetailBody");
 const ruleTemplateButtons = Array.from(document.querySelectorAll(".signal-template-button"));
 const PERFORMANCE_SECTION_CONFIG = {
   account: {
@@ -999,6 +1009,143 @@ function enrichAccountRow(row, accountMetrics) {
       ? Number((refundAmount1h / totalPayAmount * 100).toFixed(2))
       : Number(row?.refund_rate_1h || 0),
   };
+}
+
+function productKeyForItem(item) {
+  const productId = String(item?.product_id || "").trim();
+  const productName = String(item?.product_name || "").trim();
+  if (productId) return `id:${productId}`;
+  if (productName) return `name:${productName}`;
+  return "unlinked";
+}
+
+function buildPlanRelationItems(plans) {
+  return plans
+    .map((row) => enrichPlanRow(row))
+    .sort((left, right) => {
+      const orderDelta = Number(right.order_count || 0) - Number(left.order_count || 0);
+      if (orderDelta) return orderDelta;
+      const payDelta = Number(right.pay_amount || 0) - Number(left.pay_amount || 0);
+      if (payDelta) return payDelta;
+      const costDelta = Number(right.stat_cost || 0) - Number(left.stat_cost || 0);
+      if (costDelta) return costDelta;
+      return Number(left.ad_id || 0) - Number(right.ad_id || 0);
+    });
+}
+
+function buildAccountRelationItemsFromPlans(plans) {
+  const groups = new Map();
+  plans.map((row) => enrichPlanRow(row)).forEach((row) => {
+    const advertiserId = Number(row?.advertiser_id || 0);
+    if (!advertiserId) return;
+    const group = groups.get(advertiserId) || {
+      advertiser_id: advertiserId,
+      advertiser_name: String(row?.advertiser_name || "").trim(),
+      stat_cost: 0,
+      pay_amount: 0,
+      order_count: 0,
+      plan_count: 0,
+      top_plan_name: "",
+      top_plan_orders: -1,
+      top_plan_pay_amount: -1,
+    };
+    const statCost = Number(row?.stat_cost || 0);
+    const payAmount = Number(row?.pay_amount || 0);
+    const orderCount = Number(row?.order_count || 0);
+    group.stat_cost = Number((group.stat_cost + statCost).toFixed(2));
+    group.pay_amount = Number((group.pay_amount + payAmount).toFixed(2));
+    group.order_count += orderCount;
+    group.plan_count += 1;
+    if (
+      orderCount > group.top_plan_orders
+      || (orderCount === group.top_plan_orders && payAmount > group.top_plan_pay_amount)
+    ) {
+      group.top_plan_name = String(row?.ad_name || "").trim();
+      group.top_plan_orders = orderCount;
+      group.top_plan_pay_amount = payAmount;
+    }
+    groups.set(advertiserId, group);
+  });
+  return [...groups.values()].sort((left, right) => {
+    const costDelta = Number(right.stat_cost || 0) - Number(left.stat_cost || 0);
+    if (costDelta) return costDelta;
+    const planDelta = Number(right.plan_count || 0) - Number(left.plan_count || 0);
+    if (planDelta) return planDelta;
+    const orderDelta = Number(right.order_count || 0) - Number(left.order_count || 0);
+    if (orderDelta) return orderDelta;
+    return Number(left.advertiser_id || 0) - Number(right.advertiser_id || 0);
+  });
+}
+
+function loadedPlanLookup() {
+  const lookup = new Map();
+  Object.values(state.rangePayloads || {}).forEach((payload) => {
+    (payload?.plans || []).forEach((row) => {
+      const plan = enrichPlanRow(row);
+      const adId = Number(plan.ad_id || 0);
+      if (!adId || lookup.has(adId)) return;
+      lookup.set(adId, plan);
+    });
+  });
+  return lookup;
+}
+
+function loadedAccountLookup() {
+  const lookup = new Map();
+  Object.values(state.rangePayloads || {}).forEach((payload) => {
+    (payload?.accounts || []).forEach((row) => {
+      const advertiserId = Number(row?.advertiser_id || 0);
+      if (!advertiserId || lookup.has(advertiserId)) return;
+      lookup.set(advertiserId, row);
+    });
+  });
+  (state.catalogAccounts || []).forEach((row) => {
+    const advertiserId = Number(row?.advertiser_id || 0);
+    if (!advertiserId || lookup.has(advertiserId)) return;
+    lookup.set(advertiserId, row);
+  });
+  return lookup;
+}
+
+function resolvePlanRelationItemsByIds(planIds) {
+  const lookup = loadedPlanLookup();
+  const uniquePlanIds = [...new Set((planIds || []).map((item) => Number(item || 0)).filter((item) => item > 0))];
+  return uniquePlanIds
+    .map((planId) => {
+      const plan = lookup.get(planId);
+      if (plan) return enrichPlanRow(plan);
+      return {
+        ad_id: planId,
+        ad_name: "",
+        advertiser_name: "",
+      };
+    })
+    .sort((left, right) => Number(left.ad_id || 0) - Number(right.ad_id || 0));
+}
+
+function resolveAccountRelationItemsByIds(advertiserIds) {
+  const lookup = loadedAccountLookup();
+  const uniqueAdvertiserIds = [...new Set((advertiserIds || []).map((item) => Number(item || 0)).filter((item) => item > 0))];
+  return uniqueAdvertiserIds
+    .map((advertiserId) => {
+      const row = lookup.get(advertiserId);
+      if (row) {
+        return {
+          advertiser_id: advertiserId,
+          advertiser_name: String(row.advertiser_name || "").trim(),
+          plan_count: row.plan_count,
+          stat_cost: row.stat_cost,
+          pay_amount: row.pay_amount,
+          order_count: row.order_count,
+          top_plan_name: String(row.top_plan_name || "").trim(),
+        };
+      }
+      return {
+        advertiser_id: advertiserId,
+        advertiser_name: "",
+      };
+    })
+    .sort((left, right) => Number(left.advertiser_id || 0) - Number(right.advertiser_id || 0));
 }
 
 function formatMaterialTotalPayAmount(row) {
@@ -1889,7 +2036,7 @@ function syncOceanEnginePopoverState() {
     customerCenterChip.setAttribute("aria-expanded", open ? "true" : "false");
     customerCenterChip.setAttribute("aria-disabled", admin ? "false" : "true");
     customerCenterChip.tabIndex = admin ? 0 : -1;
-    customerCenterChip.title = admin ? "Click to switch CC by saved token" : "";
+    customerCenterChip.title = admin ? "点击查看已授权账号" : "";
   }
   if (oceanEngineConfigCard) {
     oceanEngineConfigCard.classList.toggle("hidden", !open);
@@ -1912,7 +2059,7 @@ function renderOceanEngineConfigPreview(preview) {
   }
   oceanEngineConfigPreview.classList.remove("hidden");
   oceanEngineConfigPreview.innerHTML = `
-    <div class="runtime-config-preview-meta">Validation passed. The current CC can access ${formatNumber(accountCount)} accounts. Showing the first ${formatNumber(sampleAccounts.length)} samples below.</div>
+    <div class="runtime-config-preview-meta">校验通过。当前 CC 可访问 ${formatNumber(accountCount)} 个账号，以下展示前 ${formatNumber(sampleAccounts.length)} 个样例。</div>
     <div class="runtime-config-preview-list">
       ${sampleAccounts.length
         ? sampleAccounts.map((item) => `
@@ -1921,9 +2068,130 @@ function renderOceanEngineConfigPreview(preview) {
             <span class="mono">${escapeHtml(String(item.advertiser_id || "--"))}</span>
           </span>
         `).join("")
-        : '<span class="runtime-config-preview-item">No visible accounts returned for this CC.</span>'}
+        : '<span class="runtime-config-preview-item">当前 CC 没有返回可见账号。</span>'}
     </div>
   `;
+}
+
+function oceanEngineBoundCustomerCenters(config) {
+  return Array.isArray(config?.bound_customer_centers) ? config.bound_customer_centers : [];
+}
+
+function renderOceanEngineBoundAccounts(config) {
+  if (!oceanEngineBoundAccounts) return;
+  const items = oceanEngineBoundCustomerCenters(config);
+  const hasPendingSwitch = Boolean(state.oceanEnginePendingCustomerCenterId);
+  if (oceanEngineBoundAccountsMeta) {
+    oceanEngineBoundAccountsMeta.textContent = items.length
+      ? `共 ${formatNumber(items.length)} 个`
+      : "暂无";
+  }
+  if (!items.length) {
+    oceanEngineBoundAccounts.innerHTML = `
+      <div class="customer-center-bound-empty">
+        暂无已授权并写入 token 的账号。
+      </div>
+    `;
+    return;
+  }
+  oceanEngineBoundAccounts.innerHTML = items.map((item) => {
+    const customerCenterId = String(item.customer_center_id || "").trim();
+    const isCurrent = Boolean(item.is_current);
+    const isPending = customerCenterId && customerCenterId === state.oceanEnginePendingCustomerCenterId;
+    const badges = [
+      isCurrent ? '<span class="customer-center-bound-badge">当前</span>' : "",
+      item.is_override_customer_center ? '<span class="customer-center-bound-badge subtle">运行中</span>' : "",
+      item.is_base_customer_center ? '<span class="customer-center-bound-badge subtle">默认</span>' : "",
+    ].filter(Boolean).join("");
+    const tokenMeta = `Token ${item.token_updated_at ? formatAgoFromEpoch(item.token_updated_at) : "未记录"}${item.token_source ? ` / ${escapeHtml(item.token_source)}` : ""}`;
+    const snapshotMeta = item.latest_snapshot_time
+      ? `主快照 ${escapeHtml(item.latest_snapshot_time)} · 账号 ${formatNumber(item.account_count || 0)} / 活跃 ${formatNumber(item.active_account_count || 0)} · 计划 ${formatNumber(item.plan_count || 0)}`
+      : "暂无主快照";
+    const detailMeta = item.latest_detail_snapshot_time
+      ? `明细 ${escapeHtml(item.latest_detail_snapshot_time)}${item.detail_status ? ` / ${escapeHtml(item.detail_status)}` : ""} · 素材 ${formatNumber(item.detail_material_row_count || 0)}`
+      : "暂无明细快照";
+    return `
+      <button
+        type="button"
+        class="customer-center-bound-button ${isCurrent ? "is-active" : ""}"
+        data-action="switch-bound-customer-center"
+        data-customer-center-id="${escapeHtml(customerCenterId)}"
+        ${isCurrent || hasPendingSwitch || isPending ? "disabled" : ""}
+      >
+        <div class="customer-center-bound-top">
+          <strong class="mono">CC ${escapeHtml(customerCenterId || "--")}</strong>
+          ${badges}
+        </div>
+        <div class="customer-center-bound-meta">${tokenMeta}</div>
+        <div class="customer-center-bound-stats">${snapshotMeta}</div>
+        <div class="customer-center-bound-stats">${detailMeta}</div>
+      </button>
+    `;
+  }).join("");
+}
+
+async function switchOceanEngineCustomerCenter(targetCc, sourceLabel = "已授权 token") {
+  const normalizedTargetCc = String(targetCc || "").trim();
+  const currentCc = String(state.oceanEngineConfig?.customer_center_id || "").trim();
+  const submitButton = oceanEngineConfigForm?.querySelector('button[type="submit"]');
+  if (!/^\d+$/.test(normalizedTargetCc)) {
+    setInlineFeedback(oceanEngineConfigStatus, "账号 ID 格式不正确。", "error");
+    oceanEngineConfigForm?.querySelector('input[name="customer_center_id"]')?.focus();
+    return;
+  }
+  if (normalizedTargetCc === currentCc) {
+    setInlineFeedback(oceanEngineConfigStatus, `CC ${normalizedTargetCc} 已经是当前账号。`, "neutral");
+    return;
+  }
+
+  state.oceanEnginePendingCustomerCenterId = normalizedTargetCc;
+  if (submitButton) submitButton.disabled = true;
+  renderOceanEngineConfig(state.oceanEngineConfig);
+  setInlineFeedback(
+    oceanEngineConfigStatus,
+    `正在校验 ${sourceLabel} 并切换到 CC ${normalizedTargetCc}...`,
+    "neutral",
+  );
+  try {
+    const response = await fetch("/api/system/integrations/ocean-engine/runtime-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customer_center_id: normalizedTargetCc,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || "切换授权账号失败。");
+    }
+    state.oceanEngineConfig = payload.config || state.oceanEngineConfig;
+    state.oceanEnginePreview = payload.preview || null;
+    clearDashboardDataCaches();
+    renderOceanEngineConfig(state.oceanEngineConfig);
+    setInlineFeedback(oceanEngineConfigStatus, `已切换到 CC ${normalizedTargetCc}，正在提交主快照同步。`, "success");
+
+    const syncResponse = await fetch("/api/sync", { method: "POST" });
+    const syncPayload = await syncResponse.json().catch(() => ({}));
+    if (!syncResponse.ok) {
+      throw new Error(syncPayload.detail || "账号已切换，但主快照同步提交失败。");
+    }
+    setInlineFeedback(
+      oceanEngineConfigStatus,
+      `已切换到 CC ${normalizedTargetCc}，主快照同步已入队。新快照完成前，页面可能短暂显示旧数据。`,
+      "success",
+    );
+    await fetchDashboard();
+    window.setTimeout(() => {
+      fetchDashboard().catch(() => {});
+    }, 1800);
+  } catch (error) {
+    setInlineFeedback(oceanEngineConfigStatus, error.message || "切换授权账号失败。", "error");
+    window.alert(error.message || "切换授权账号失败。");
+  } finally {
+    state.oceanEnginePendingCustomerCenterId = "";
+    if (submitButton) submitButton.disabled = false;
+    renderOceanEngineConfig(state.oceanEngineConfig);
+  }
 }
 
 function renderOceanEngineConfig(config) {
@@ -1936,36 +2204,29 @@ function renderOceanEngineConfig(config) {
     state.oceanEnginePopoverOpen = false;
   }
   syncOceanEnginePopoverState();
-  if (!admin || !config || !oceanEngineConfigForm) {
+  if (!admin || !config) {
+    renderOceanEngineBoundAccounts(null);
     renderOceanEngineConfigPreview(null);
     return;
   }
 
-  const currentCc = String(config.customer_center_id || "").trim();
   const baseCc = String(config.base_customer_center_id || "").trim();
   const overrideCc = String(config.override_customer_center_id || "").trim();
-  const currentInput = oceanEngineConfigForm.querySelector('input[name="current_customer_center_id"]');
-  const targetInput = oceanEngineConfigForm.querySelector('input[name="customer_center_id"]');
-  if (currentInput) currentInput.value = currentCc;
-  if (targetInput && document.activeElement !== targetInput) {
-    targetInput.value = currentCc;
-  }
-
-  const tokenAgeText = config?.token_updated_at ? formatAgoFromEpoch(config.token_updated_at) : "not recorded";
+  const tokenAgeText = config?.token_updated_at ? formatAgoFromEpoch(config.token_updated_at) : "未记录";
   const modeText = config?.has_customer_center_override
-    ? `Runtime override is active. Effective CC: ${overrideCc}. Server default CC: ${baseCc}.`
-    : `Using the server default CC ${baseCc}.`;
+    ? `当前生效账号：CC ${overrideCc}。服务器默认账号：CC ${baseCc}。`
+    : `当前使用服务器默认账号：CC ${baseCc}。`;
   if (oceanEngineConfigMeta) {
     oceanEngineConfigMeta.textContent = `${modeText} token ${tokenAgeText}${config?.token_source ? ` / ${config.token_source}` : ""}`;
   }
   if (!oceanEngineConfigStatus?.textContent) {
     setInlineFeedback(
       oceanEngineConfigStatus,
-      "Enter a CC ID here. The system will use the saved token for that account and queue a main snapshot sync.",
+      "点击下方已授权账号即可切换，系统会自动提交一次主快照同步。",
       "neutral",
     );
   }
-  renderOceanEngineConfigPreview(state.oceanEnginePreview);
+  renderOceanEngineBoundAccounts(config);
 }
 
 function renderAlerts(events) {
@@ -2095,7 +2356,11 @@ function renderAccountTable(accounts) {
           <td class="mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</td>
           <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</td>
           <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}</td>
-          <td class="mono">${formatNumber(row.plan_count)}</td>
+          <td class="mono">
+            ${Number(row.plan_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-account-plan-detail" data-advertiser-id="${row.advertiser_id}">${formatNumber(row.plan_count)}</button>`
+              : formatNumber(row.plan_count)}
+          </td>
           <td><span class="pill">${escapeHtml(row.status_text)}</span></td>
         </tr>
       `).join("")}
@@ -2110,6 +2375,16 @@ function renderAccountTable(accounts) {
       state.accountSort = toggleSort(activeSort, key);
       saveSort("account-sort", state.accountSort);
       renderAccountTable(accounts);
+    });
+  });
+
+  accountTable.querySelectorAll('[data-action="open-account-plan-detail"]').forEach((button) => {
+    const advertiserId = Number(button.dataset.advertiserId || 0);
+    const row = sorted.find((item) => Number(item.advertiser_id || 0) === advertiserId);
+    if (!row) return;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openAccountPlanRelationDetail(row);
     });
   });
 }
@@ -2311,6 +2586,7 @@ function renderEmployeeTable(rows) {
   const payload = rangePayload(sectionFilter("breakdown"));
   const operatorMode = breakdownUsesOperators(payload);
   const entityLabel = breakdownEntityLabel(payload);
+  const compactOperatorRanking = isOperator();
   if (operatorMode) {
     const enrichedRows = rows.map((row) => enrichOperatorRow(row));
     const query = employeeSearch.value.trim().toLowerCase();
@@ -2323,23 +2599,29 @@ function renderEmployeeTable(rows) {
       ].join(" ").toLowerCase();
       return haystack.includes(query);
     });
-    const columns = [
-      { key: "rank", label: "序号", sortable: false },
-      { key: "operator_name", label: entityLabel, sortable: true },
-      { key: "stat_cost", label: "消耗", sortable: true },
-      { key: "total_pay_amount", label: "整体成交", sortable: true },
-      { key: "settled_pay_amount", label: "净成交", sortable: true },
-      { key: "roi", label: "ROI", sortable: true },
-      { key: "settled_roi", label: "净ROI", sortable: true },
-      { key: "order_count", label: "整体订单", sortable: true },
-      { key: "settled_order_count", label: "净订单", sortable: true },
-      { key: "pay_order_cost", label: "订单成本", sortable: true },
-      { key: "settled_amount_rate", label: "结算率", sortable: true },
-      { key: "refund_rate_1h", label: "1h退款率", sortable: true },
-      { key: "material_count", label: "素材数", sortable: true },
-      { key: "advertiser_count", label: "账户数", sortable: true },
-      { key: "keyword_count", label: "关键词数", sortable: true },
-    ];
+    const columns = compactOperatorRanking
+      ? [
+          { key: "rank", label: "序号", sortable: false },
+          { key: "operator_name", label: entityLabel, sortable: true },
+          { key: "stat_cost", label: "消耗", sortable: true },
+        ]
+      : [
+          { key: "rank", label: "序号", sortable: false },
+          { key: "operator_name", label: entityLabel, sortable: true },
+          { key: "stat_cost", label: "消耗", sortable: true },
+          { key: "total_pay_amount", label: "整体成交", sortable: true },
+          { key: "settled_pay_amount", label: "净成交", sortable: true },
+          { key: "roi", label: "ROI", sortable: true },
+          { key: "settled_roi", label: "净ROI", sortable: true },
+          { key: "order_count", label: "整体订单", sortable: true },
+          { key: "settled_order_count", label: "净订单", sortable: true },
+          { key: "pay_order_cost", label: "订单成本", sortable: true },
+          { key: "settled_amount_rate", label: "结算率", sortable: true },
+          { key: "refund_rate_1h", label: "1h退款率", sortable: true },
+          { key: "material_count", label: "素材数", sortable: true },
+          { key: "advertiser_count", label: "账户数", sortable: true },
+          { key: "keyword_count", label: "关键词数", sortable: true },
+        ];
     const activeSort = columns.some((column) => column.key === state.employeeSort.key)
       ? state.employeeSort
       : { key: "stat_cost", dir: "desc" };
@@ -2354,9 +2636,11 @@ function renderEmployeeTable(rows) {
       <tbody>
         ${sorted.map((row, index) => {
           const entityName = breakdownEntityName(row);
-          const subline = [
-            row.top_material_name ? `代表素材 ${row.top_material_name}` : "",
-          ].filter(Boolean);
+          const subline = compactOperatorRanking
+            ? []
+            : [
+                row.top_material_name ? `代表素材 ${row.top_material_name}` : "",
+              ].filter(Boolean);
           const refundRateText = row.refund_rate_1h_available ? formatPercent(row.refund_rate_1h) : "-";
           return `
             <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
@@ -2366,6 +2650,7 @@ function renderEmployeeTable(rows) {
                 ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
               </td>
               <td class="mono">${formatMoney(row.stat_cost)}</td>
+              ${compactOperatorRanking ? "" : `
               <td class="mono">${formatMoney(row.total_pay_amount)}</td>
               <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
               <td class="mono">${formatRate(row.roi)}</td>
@@ -2378,6 +2663,7 @@ function renderEmployeeTable(rows) {
               <td class="mono">${formatNumber(row.material_count)}</td>
               <td class="mono">${formatNumber(row.advertiser_count)}</td>
               <td class="mono">${formatNumber(row.keyword_count)}</td>
+              `}
             </tr>
           `;
         }).join("")}
@@ -2581,9 +2867,17 @@ function renderProductTable(rows) {
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
-          <td class="mono">${formatNumber(row.advertiser_count)}</td>
+          <td class="mono">
+            ${Number(row.advertiser_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-product-account-detail" data-product-key="${escapeHtml(row.product_key)}">${formatNumber(row.advertiser_count)}</button>`
+              : formatNumber(row.advertiser_count)}
+          </td>
           <td class="mono">${formatNumber(row.employee_count)}</td>
-          <td class="mono">${formatNumber(row.plan_count)}</td>
+          <td class="mono">
+            ${Number(row.plan_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-product-plan-detail" data-product-key="${escapeHtml(row.product_key)}">${formatNumber(row.plan_count)}</button>`
+              : formatNumber(row.plan_count)}
+          </td>
         </tr>
       `).join("")}
     </tbody>
@@ -2597,6 +2891,16 @@ function renderProductTable(rows) {
       state.productSort = toggleSort(state.productSort, key);
       saveSort("product-sort", state.productSort);
       renderProductTable(rows);
+    });
+  });
+
+  productTable.querySelectorAll('[data-action="open-product-account-detail"], [data-action="open-product-plan-detail"]').forEach((button) => {
+    const productKey = String(button.dataset.productKey || "");
+    const row = sorted.find((item) => String(item.product_key || "") === productKey);
+    if (!row) return;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openProductRelationDetail(row, button.dataset.action === "open-product-account-detail" ? "account" : "plan");
     });
   });
 
@@ -2894,8 +3198,16 @@ function renderMaterialTable(rows) {
           <td>${escapeHtml(row.top_account_name || "--")}</td>
           <td>${escapeHtml(row.top_plan_name || "--")}</td>
           <td>${escapeHtml(row.top_anchor_name || "--")}</td>
-          <td class="mono">${formatNumber(row.plan_count)}</td>
-          <td class="mono">${formatNumber(row.advertiser_count)}</td>
+          <td class="mono">
+            ${Number(row.plan_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-material-plan-detail" data-material-key="${escapeHtml(row.material_key)}">${formatNumber(row.plan_count)}</button>`
+              : formatNumber(row.plan_count)}
+          </td>
+          <td class="mono">
+            ${Number(row.advertiser_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-material-account-detail" data-material-key="${escapeHtml(row.material_key)}">${formatNumber(row.advertiser_count)}</button>`
+              : formatNumber(row.advertiser_count)}
+          </td>
           `}
         </tr>
       `).join("")}
@@ -2909,6 +3221,15 @@ function renderMaterialTable(rows) {
       state.materialSort = toggleSort(state.materialSort, key);
       saveSort("material-sort", state.materialSort);
       renderMaterialTable(enrichedRows);
+    });
+  });
+  materialTable.querySelectorAll('[data-action="open-material-plan-detail"], [data-action="open-material-account-detail"]').forEach((button) => {
+    const materialKey = String(button.dataset.materialKey || "");
+    const row = pageRows.find((item) => String(item.material_key || "") === materialKey);
+    if (!row) return;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openMaterialRelationDetail(row, button.dataset.action === "open-material-account-detail" ? "account" : "plan");
     });
   });
   renderMaterialPager(
@@ -3158,6 +3479,164 @@ function closeCommentReplyModal() {
   if (!commentReplyModal) return;
   commentReplyModal.classList.add("hidden");
   commentReplyModal.setAttribute("aria-hidden", "true");
+}
+
+function closeRelationDetailModal() {
+  if (!relationDetailModal) return;
+  relationDetailModal.classList.add("hidden");
+  relationDetailModal.setAttribute("aria-hidden", "true");
+  if (relationDetailBody) relationDetailBody.innerHTML = "";
+}
+
+function relationMetricValue(value, formatter = (item) => item) {
+  if (value === null || value === undefined || value === "") {
+    return "--";
+  }
+  return formatter(value);
+}
+
+function relationMetricCardMarkup(label, value, className = "") {
+  return `
+    <div class="relation-card-metric">
+      <span>${escapeHtml(label)}</span>
+      <strong class="${className}">${escapeHtml(String(value))}</strong>
+    </div>
+  `;
+}
+
+function relationPlanCardMarkup(item) {
+  const planId = Number(item?.ad_id || 0);
+  const planName = String(item?.ad_name || "").trim() || (planId ? `计划 ${planId}` : "未命名计划");
+  const advertiserName = String(item?.advertiser_name || "").trim();
+  const payAmount = relationMetricValue(item?.pay_amount, formatMoney);
+  const orderCount = relationMetricValue(item?.order_count, formatNumber);
+  const roi = relationMetricValue(item?.roi, formatRate);
+  return `
+    <article class="relation-card">
+      <div class="relation-card-head">
+        <div>
+          <div class="cell-primary">${escapeHtml(planName)}</div>
+          <div class="cell-subline mono">
+            <span class="cell-subitem">PID ${escapeHtml(String(planId || "-"))}</span>
+            ${advertiserName ? `<span class="cell-subitem">${escapeHtml(advertiserName)}</span>` : ""}
+          </div>
+        </div>
+        ${item?.stat_cost !== null && item?.stat_cost !== undefined ? `<span class="pill">消耗 ${formatMoney(item.stat_cost)}</span>` : ""}
+      </div>
+      <div class="relation-card-metrics">
+        ${relationMetricCardMarkup("支付", payAmount, "mono")}
+        ${relationMetricCardMarkup("订单", orderCount, "mono")}
+        ${relationMetricCardMarkup("ROI", roi, "mono")}
+      </div>
+    </article>
+  `;
+}
+
+function relationAccountCardMarkup(item) {
+  const advertiserId = Number(item?.advertiser_id || 0);
+  const advertiserName = String(item?.advertiser_name || "").trim() || (advertiserId ? `账户 ${advertiserId}` : "未命名账户");
+  const topPlanName = String(item?.top_plan_name || "").trim();
+  const planCount = relationMetricValue(item?.plan_count, formatNumber);
+  const statCost = relationMetricValue(item?.stat_cost, formatMoney);
+  const payAmount = relationMetricValue(item?.pay_amount, formatMoney);
+  const orderCount = relationMetricValue(item?.order_count, formatNumber);
+  return `
+    <article class="relation-card">
+      <div class="relation-card-head">
+        <div>
+          <div class="cell-primary">${escapeHtml(advertiserName)}</div>
+          <div class="cell-subline mono">
+            <span class="cell-subitem">AID ${escapeHtml(String(advertiserId || "-"))}</span>
+            ${topPlanName ? `<span class="cell-subitem">代表计划 ${escapeHtml(topPlanName)}</span>` : ""}
+          </div>
+        </div>
+        ${item?.plan_count !== null && item?.plan_count !== undefined ? `<span class="pill">计划 ${formatNumber(item.plan_count)}</span>` : ""}
+      </div>
+      <div class="relation-card-metrics">
+        ${relationMetricCardMarkup("消耗", statCost, "mono")}
+        ${relationMetricCardMarkup("支付", payAmount, "mono")}
+        ${relationMetricCardMarkup("订单", orderCount, "mono")}
+      </div>
+    </article>
+  `;
+}
+
+function openRelationDetailModal({ title, meta, kind, items, emptyText }) {
+  if (!relationDetailModal || !relationDetailBody) return;
+  if (relationDetailTitle) {
+    relationDetailTitle.textContent = title || "关联明细";
+  }
+  if (relationDetailMeta) {
+    relationDetailMeta.textContent = meta || "按当前筛选结果展示关联明细。";
+  }
+  if (!items.length) {
+    relationDetailBody.innerHTML = `<div class="relation-empty">${escapeHtml(emptyText || "当前范围内没有关联明细。")}</div>`;
+  } else {
+    relationDetailBody.innerHTML = `<div class="relation-list">${items.map((item) => (
+      kind === "account" ? relationAccountCardMarkup(item) : relationPlanCardMarkup(item)
+    )).join("")}</div>`;
+  }
+  relationDetailModal.classList.remove("hidden");
+  relationDetailModal.setAttribute("aria-hidden", "false");
+}
+
+function openAccountPlanRelationDetail(row) {
+  const payload = rangePayload(sectionFilter("account"));
+  const advertiserId = Number(row?.advertiser_id || 0);
+  const plans = buildPlanRelationItems((payload?.plans || []).filter((item) => Number(item?.advertiser_id || 0) === advertiserId));
+  openRelationDetailModal({
+    title: `${String(row?.advertiser_name || "").trim() || "账户"} 关联计划`,
+    meta: `${formatDateWindowMeta(payload)} · AID ${advertiserId || "-"}`,
+    kind: "plan",
+    items: plans,
+    emptyText: "当前筛选范围内没有查询到这个账户的关联计划。",
+  });
+}
+
+function openProductRelationDetail(row, kind) {
+  const payload = rangePayload(sectionFilter("breakdown"));
+  const productKey = String(row?.product_key || productKeyForItem(row));
+  const plans = (payload?.plans || []).filter((item) => productKeyForItem(item) === productKey);
+  const label = String(row?.product_name || row?.product_id || "当前商品").trim() || "当前商品";
+  if (kind === "account") {
+    openRelationDetailModal({
+      title: `${label} 覆盖账户`,
+      meta: `${formatDateWindowMeta(payload)} · 由当前商品命中的计划汇总`,
+      kind: "account",
+      items: buildAccountRelationItemsFromPlans(plans),
+      emptyText: "当前筛选范围内没有查询到这个商品覆盖的账户。",
+    });
+    return;
+  }
+  openRelationDetailModal({
+    title: `${label} 关联计划`,
+    meta: `${formatDateWindowMeta(payload)} · 由当前商品命中的计划汇总`,
+    kind: "plan",
+    items: buildPlanRelationItems(plans),
+    emptyText: "当前筛选范围内没有查询到这个商品关联的计划。",
+  });
+}
+
+function openMaterialRelationDetail(row, kind) {
+  const payload = materialRangePayload(sectionFilter("material"));
+  const label = String(row?.material_name || row?.material_id || "当前素材").trim() || "当前素材";
+  if (kind === "account") {
+    openRelationDetailModal({
+      title: `${label} 覆盖账户`,
+      meta: `${formatDateWindowMeta(payload)} · 基于当前素材汇总关系`,
+      kind: "account",
+      items: resolveAccountRelationItemsByIds(row?.advertiser_ids || []),
+      emptyText: "当前素材没有可展示的关联账户。",
+    });
+    return;
+  }
+  openRelationDetailModal({
+    title: `${label} 关联计划`,
+    meta: `${formatDateWindowMeta(payload)} · 基于当前素材汇总关系`,
+    kind: "plan",
+    items: resolvePlanRelationItemsByIds(row?.plan_ids || []),
+    emptyText: "当前素材没有可展示的关联计划。",
+  });
 }
 
 function openCommentReplyModal(row) {
@@ -4549,7 +5028,7 @@ async function fetchUserKeywords(userId, force = false) {
 async function fetchUserMatchedMaterials(userId, force = false) {
   if (!userId || !isAdmin()) return [];
   if (!force && state.userMatchedMaterials[userId]) return state.userMatchedMaterials[userId];
-  const response = await fetch(`/api/users/${userId}/matched-materials?range=day`);
+  const response = await fetch(`/api/users/${userId}/matched-materials?range=month`);
   const payload = await response.json();
   state.userMatchedMaterials[userId] = payload.items || [];
   return state.userMatchedMaterials[userId];
@@ -4681,7 +5160,7 @@ function syncAccessRolePanels() {
   if (!user) {
     setInlineFeedback(scopeEditorMeta, "先选账号，再配范围。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "新建运营时可直接填关键词，也可后续追加。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "先选运营，再看命中素材。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "先选运营，再看近30天命中素材。", "neutral");
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
     return;
@@ -4691,7 +5170,7 @@ function syncAccessRolePanels() {
   } else if (isOperator) {
     setInlineFeedback(scopeEditorMeta, "运营不配置账户范围，只看关键词命中结果。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "新建运营时可直接填关键词，也可后续追加。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "只按素材名称关键词命中，默认收起。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "展示近30天内按素材名称关键词命中的素材，默认收起。", "neutral");
   } else {
     setInlineFeedback(scopeEditorMeta, "管理员默认全量可见。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "当前角色不使用运营关键词。", "neutral");
@@ -4912,7 +5391,7 @@ function resetUserFormState() {
     "neutral",
   );
   setInlineFeedback(operatorKeywordStatus, "新建运营时可直接填关键词，也可后续追加。", "neutral");
-  setInlineFeedback(operatorMaterialStatus, "先选运营，再看命中素材。", "neutral");
+  setInlineFeedback(operatorMaterialStatus, "先选运营，再看近30天命中素材。", "neutral");
   setOperatorMaterialVisibility(false);
   renderScopeChecklist();
   renderUserKeywordTable();
@@ -5385,12 +5864,21 @@ function bindInputs() {
       closeCommentReplyModal();
     }
   });
+  relationDetailModal?.addEventListener("click", (event) => {
+    const trigger = event.target.closest('[data-action="close-relation-detail"]');
+    if (trigger) {
+      closeRelationDetailModal();
+    }
+  });
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && materialPreviewModal && !materialPreviewModal.classList.contains("hidden")) {
       closeMaterialPreview();
     }
     if (event.key === "Escape" && commentReplyModal && !commentReplyModal.classList.contains("hidden")) {
       closeCommentReplyModal();
+    }
+    if (event.key === "Escape" && relationDetailModal && !relationDetailModal.classList.contains("hidden")) {
+      closeRelationDetailModal();
     }
     if (event.key === "Escape" && state.oceanEnginePopoverOpen) {
       setOceanEnginePopoverOpen(false);
@@ -5403,9 +5891,21 @@ function bindInputs() {
     setOceanEnginePopoverOpen(nextOpen);
     if (nextOpen) {
       window.setTimeout(() => {
+        const firstSavedCcButton = oceanEngineBoundAccounts?.querySelector('[data-action="switch-bound-customer-center"]:not(:disabled)');
+        if (firstSavedCcButton) {
+          firstSavedCcButton.focus();
+          return;
+        }
         oceanEngineConfigForm?.querySelector('input[name="customer_center_id"]')?.focus();
       }, 0);
     }
+  });
+  oceanEngineBoundAccounts?.addEventListener("click", async (event) => {
+    const button = event.target.closest('[data-action="switch-bound-customer-center"]');
+    if (!button || !isAdmin()) return;
+    const targetCc = String(button.dataset.customerCenterId || "").trim();
+    if (!targetCc) return;
+    await switchOceanEngineCustomerCenter(targetCc, "已授权 token");
   });
   oceanEngineConfigCard?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -5563,58 +6063,8 @@ function bindInputs() {
   oceanEngineConfigForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(oceanEngineConfigForm);
-    const currentCc = String(state.oceanEngineConfig?.customer_center_id || "").trim();
     const targetCc = String(form.get("customer_center_id") || "").trim();
-    const submitButton = oceanEngineConfigForm.querySelector('button[type="submit"]');
-    if (!/^\d+$/.test(targetCc)) {
-      setInlineFeedback(oceanEngineConfigStatus, "Target CC must be numeric.", "error");
-      oceanEngineConfigForm.querySelector('input[name="customer_center_id"]')?.focus();
-      return;
-    }
-    if (targetCc === currentCc) {
-      setInlineFeedback(oceanEngineConfigStatus, `CC ${targetCc} is already active.`, "neutral");
-      return;
-    }
-    if (submitButton) submitButton.disabled = true;
-    setInlineFeedback(oceanEngineConfigStatus, `Checking the saved token and switching to CC ${targetCc}...`, "neutral");
-    try {
-      const response = await fetch("/api/system/integrations/ocean-engine/runtime-config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          customer_center_id: targetCc,
-        }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.detail || "Failed to switch the authorized account.");
-      }
-      state.oceanEngineConfig = payload.config || state.oceanEngineConfig;
-      state.oceanEnginePreview = payload.preview || null;
-      clearDashboardDataCaches();
-      renderOceanEngineConfig(state.oceanEngineConfig);
-      setInlineFeedback(oceanEngineConfigStatus, `Switched to CC ${targetCc}. Submitting a main snapshot sync now.`, "success");
-
-      const syncResponse = await fetch("/api/sync", { method: "POST" });
-      const syncPayload = await syncResponse.json().catch(() => ({}));
-      if (!syncResponse.ok) {
-        throw new Error(syncPayload.detail || "CC switched, but submitting the main snapshot sync failed");
-      }
-      setInlineFeedback(
-        oceanEngineConfigStatus,
-        `Switched to CC ${targetCc}. The main snapshot sync is queued. Until the new snapshot finishes, the page may briefly show old data.`,
-        "success",
-      );
-      await fetchDashboard();
-      window.setTimeout(() => {
-        fetchDashboard().catch(() => {});
-      }, 1800);
-    } catch (error) {
-      setInlineFeedback(oceanEngineConfigStatus, error.message || "Failed to switch the authorized account.", "error");
-      window.alert(error.message || "Failed to switch the authorized account.");
-    } finally {
-      if (submitButton) submitButton.disabled = false;
-    }
+    await switchOceanEngineCustomerCenter(targetCc, "手动输入");
   });
 
 

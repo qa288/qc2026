@@ -816,6 +816,163 @@ class DashboardService:
         }
         return str(refreshed["access_token"]), refreshed
 
+    @staticmethod
+    def _latest_rows_by_customer_center(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        selected: list[dict[str, Any]] = []
+        seen_customer_centers: set[str] = set()
+        for raw_row in rows:
+            row = dict(raw_row)
+            customer_center_id = str(row.get("customer_center_id") or "").strip()
+            if not customer_center_id or customer_center_id in seen_customer_centers:
+                continue
+            selected.append(row)
+            seen_customer_centers.add(customer_center_id)
+        return selected
+
+    @staticmethod
+    def _latest_rows_by_customer_center_day(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        selected: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for raw_row in rows:
+            row = dict(raw_row)
+            customer_center_id = str(row.get("customer_center_id") or "").strip()
+            snapshot_time = str(row.get("snapshot_time") or "").strip()
+            day_key = snapshot_time[:10]
+            if not customer_center_id or not day_key:
+                continue
+            dedupe_key = (customer_center_id, day_key)
+            if dedupe_key in seen_keys:
+                continue
+            selected.append(row)
+            seen_keys.add(dedupe_key)
+        selected.sort(key=lambda item: str(item.get("snapshot_time") or ""))
+        return selected
+
+    def list_bound_customer_centers(self) -> list[dict[str, Any]]:
+        base_config = self._base_runtime_config()
+        current_customer_center_id = self._current_customer_center_id()
+        base_customer_center_id = str(base_config.get("customer_center_id") or "").strip()
+        override_row = self._runtime_config_override_row() or {}
+        override_customer_center_id = str(override_row.get("customer_center_id") or "").strip()
+        app_id = str(base_config.get("app_id") or "").strip()
+
+        with self.db() as conn:
+            token_rows = (
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT customer_center_id, updated_at, source, expires_at
+                        FROM oauth_tokens
+                        WHERE app_id = ?
+                        ORDER BY updated_at DESC, customer_center_id ASC
+                        """,
+                        (app_id,),
+                    ).fetchall()
+                ]
+                if app_id
+                else []
+            )
+            summary_rows = self._latest_rows_by_customer_center(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT
+                            customer_center_id,
+                            snapshot_time,
+                            account_count,
+                            active_account_count,
+                            plan_count,
+                            active_plan_count,
+                            stat_cost,
+                            pay_amount,
+                            order_count,
+                            roi
+                        FROM summary_snapshots
+                        WHERE COALESCE(customer_center_id, '') <> ''
+                        ORDER BY snapshot_time DESC, customer_center_id ASC
+                        """
+                    ).fetchall()
+                ]
+            )
+            detail_rows = self._latest_rows_by_customer_center(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT
+                            customer_center_id,
+                            snapshot_time,
+                            status,
+                            material_row_count,
+                            error_count
+                        FROM extended_sync_runs
+                        WHERE COALESCE(customer_center_id, '') <> ''
+                        ORDER BY snapshot_time DESC, customer_center_id ASC
+                        """
+                    ).fetchall()
+                ]
+            )
+
+        summary_by_customer_center = {
+            str(row.get("customer_center_id") or "").strip(): row for row in summary_rows if str(row.get("customer_center_id") or "").strip()
+        }
+        detail_by_customer_center = {
+            str(row.get("customer_center_id") or "").strip(): row for row in detail_rows if str(row.get("customer_center_id") or "").strip()
+        }
+
+        records: dict[str, dict[str, Any]] = {}
+        for row in token_rows:
+            customer_center_id = str(row.get("customer_center_id") or "").strip()
+            if not customer_center_id:
+                continue
+            records[customer_center_id] = {
+                "customer_center_id": customer_center_id,
+                "has_saved_token": True,
+                "token_updated_at": int(row.get("updated_at") or 0),
+                "token_source": str(row.get("source") or "").strip(),
+                "token_expires_at": int(row.get("expires_at") or 0),
+            }
+
+        items: list[dict[str, Any]] = []
+        for customer_center_id, row in records.items():
+            summary_row = summary_by_customer_center.get(customer_center_id) or {}
+            detail_row = detail_by_customer_center.get(customer_center_id) or {}
+            items.append(
+                {
+                    **row,
+                    "is_current": customer_center_id == current_customer_center_id,
+                    "is_base_customer_center": customer_center_id == base_customer_center_id,
+                    "is_override_customer_center": bool(override_customer_center_id)
+                    and customer_center_id == override_customer_center_id,
+                    "latest_snapshot_time": str(summary_row.get("snapshot_time") or "").strip(),
+                    "latest_detail_snapshot_time": str(detail_row.get("snapshot_time") or "").strip(),
+                    "account_count": int(summary_row.get("account_count") or 0),
+                    "active_account_count": int(summary_row.get("active_account_count") or 0),
+                    "plan_count": int(summary_row.get("plan_count") or 0),
+                    "active_plan_count": int(summary_row.get("active_plan_count") or 0),
+                    "stat_cost": round(float(summary_row.get("stat_cost", 0.0) or 0.0), 2),
+                    "pay_amount": round(float(summary_row.get("pay_amount", 0.0) or 0.0), 2),
+                    "order_count": int(summary_row.get("order_count") or 0),
+                    "roi": round(float(summary_row.get("roi", 0.0) or 0.0), 2),
+                    "detail_status": str(detail_row.get("status") or "").strip(),
+                    "detail_material_row_count": int(detail_row.get("material_row_count") or 0),
+                    "detail_error_count": int(detail_row.get("error_count") or 0),
+                }
+            )
+
+        items.sort(
+            key=lambda item: (
+                0 if bool(item.get("is_current")) else 1,
+                0 if bool(item.get("has_saved_token")) else 1,
+                -int(item.get("token_updated_at") or 0),
+                0 if str(item.get("latest_snapshot_time") or "").strip() else 1,
+                str(item.get("customer_center_id") or ""),
+            )
+        )
+        return items
+
     def ocean_engine_runtime_config(self) -> dict[str, Any]:
         base_config = self._base_runtime_config()
         override_row = self._runtime_config_override_row() or {}
@@ -834,6 +991,7 @@ class DashboardService:
             "timezone": str(effective_config.get("timezone") or ""),
             "token_updated_at": int(token_payload.get("updated_at") or 0),
             "token_source": str(token_payload.get("source") or ""),
+            "bound_customer_centers": self.list_bound_customer_centers(),
         }
 
     def update_ocean_engine_runtime_config(self, payload: Any) -> dict[str, Any]:
@@ -4387,7 +4545,7 @@ class DashboardService:
     def matched_materials_for_user(
         self,
         user_id: int,
-        range_key: str = "day",
+        range_key: str = "month",
         start_date: str = "",
         end_date: str = "",
         query: str = "",
@@ -4396,7 +4554,7 @@ class DashboardService:
         if not user or str(user.get("role") or "") != ROLE_OPERATOR:
             return {"items": [], "range_key": range_key, "query": str(query or "").strip()}
         operators, keywords = self._operator_config(include_disabled=True, only_user_id=user_id)
-        payload = self.material_rankings(range_key, start_date, end_date, "", None)
+        payload = self._cross_customer_center_material_payload(range_key, start_date, end_date, "", None)
         items = self._filter_material_items_for_operator(payload.get("items", []), user_id, operators, keywords)
         query_text = str(query or "").strip().casefold()
         if query_text:
@@ -4415,6 +4573,7 @@ class DashboardService:
             "query": str(query or "").strip(),
             "snapshot_time": payload.get("snapshot_time", ""),
             "snapshot_count": int(payload.get("snapshot_count") or 0),
+            "customer_center_count": int(payload.get("customer_center_count") or 0),
         }
 
     def process_material_upload_job(self, job_id: int) -> dict[str, Any]:
@@ -6844,6 +7003,218 @@ class DashboardService:
         self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
         return payload
 
+    def _cross_customer_center_material_payload(
+        self,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> dict[str, Any]:
+        target_snapshot = str(snapshot_time or "").strip()
+        normalized = str(range_key or "day").strip().lower()
+        config = self.read_config()
+        tz_name = str(config.get("timezone") or TIMEZONE)
+        if target_snapshot:
+            snapshot_day = _parse_date_input(target_snapshot[:10], "snapshot_time")
+            tz = ZoneInfo(tz_name)
+            start_dt = datetime(snapshot_day.year, snapshot_day.month, snapshot_day.day, 0, 0, 0, tzinfo=tz)
+            end_dt = datetime(snapshot_day.year, snapshot_day.month, snapshot_day.day, 23, 59, 59, tzinfo=tz)
+            range_label = "鎸囧畾蹇収"
+            range_label = "Specified snapshot"
+            normalized = "custom"
+        else:
+            if normalized not in PERFORMANCE_RANGES:
+                raise ValueError("range must be one of day/yesterday/week/month/custom")
+            if normalized == "custom":
+                start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, tz_name)
+            else:
+                start_dt, end_dt, range_label = build_performance_window(normalized, tz_name)
+
+        cache_key = build_material_cache_key(
+            normalized,
+            start_dt.strftime("%Y-%m-%d"),
+            end_dt.strftime("%Y-%m-%d"),
+            target_snapshot,
+            allowed_advertiser_ids,
+            "__all_customer_centers__",
+        )
+        cached = self._material_cache.get(cache_key)
+        now_ts = time.time()
+        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
+            return dict(cached["payload"])
+
+        with self.db() as conn:
+            run_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT
+                        customer_center_id,
+                        snapshot_time,
+                        status,
+                        plan_count,
+                        detail_count,
+                        product_row_count,
+                        material_row_count,
+                        original_video_row_count,
+                        error_count
+                    FROM extended_sync_runs
+                    WHERE status IN ('ok', 'partial')
+                      AND snapshot_time >= ?
+                      AND snapshot_time <= ?
+                    ORDER BY snapshot_time DESC, customer_center_id ASC
+                    """,
+                    (
+                        start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                ).fetchall()
+            ]
+            runs = self._latest_rows_by_customer_center_day(run_rows)
+            if not runs:
+                payload = {
+                    "snapshot_time": target_snapshot,
+                    "items": [],
+                    "snapshot_count": 0,
+                    "customer_center_count": 0,
+                    "range_key": normalized,
+                    "range_label": range_label,
+                    "query_start_date": start_dt.strftime("%Y-%m-%d"),
+                    "query_end_date": end_dt.strftime("%Y-%m-%d"),
+                }
+                self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+                return payload
+
+            selected_pairs = {
+                (
+                    str(item.get("customer_center_id") or "").strip(),
+                    str(item.get("snapshot_time") or "").strip(),
+                )
+                for item in runs
+                if str(item.get("customer_center_id") or "").strip() and str(item.get("snapshot_time") or "").strip()
+            }
+            snapshot_times = sorted({snapshot for _customer_center_id, snapshot in selected_pairs})
+            placeholders = ",".join("?" for _ in snapshot_times)
+
+            rollup_rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT *
+                    FROM material_rollups
+                    WHERE snapshot_time IN ({placeholders})
+                    ORDER BY snapshot_time DESC, create_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC
+                    """,
+                    snapshot_times,
+                ).fetchall()
+            ]
+            scoped_rollup_rows = [
+                row
+                for row in rollup_rows
+                if (
+                    str(row.get("customer_center_id") or "").strip(),
+                    str(row.get("snapshot_time") or "").strip(),
+                )
+                in selected_pairs
+            ]
+            if allowed_advertiser_ids is not None:
+                allowed = {int(item) for item in allowed_advertiser_ids}
+                scoped_rollup_rows = [
+                    row
+                    for row in scoped_rollup_rows
+                    if any(int(item) in allowed for item in json.loads(str(row.get("advertiser_ids_json") or "[]")))
+                ]
+            if not target_snapshot:
+                scoped_rollup_rows = self._filter_material_rows_by_create_time_window(
+                    scoped_rollup_rows,
+                    start_dt,
+                    end_dt,
+                    tz_name,
+                )
+
+            if scoped_rollup_rows:
+                items = self._aggregate_material_rollups(scoped_rollup_rows)
+            else:
+                snapshot_rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT
+                            m.snapshot_time,
+                            m.customer_center_id,
+                            m.advertiser_id,
+                            m.advertiser_name,
+                            m.ad_id,
+                            m.ad_name,
+                            m.material_type,
+                            m.material_key,
+                            m.material_id,
+                            m.material_name,
+                            m.create_time,
+                            m.video_id,
+                            m.cover_url,
+                            m.aweme_item_id,
+                            m.video_url,
+                            m.stat_cost,
+                            m.pay_amount,
+                            m.total_pay_amount,
+                            m.settled_pay_amount,
+                            m.order_count,
+                            m.settled_order_count,
+                            COALESCE(v.is_original, 0) AS is_original
+                        FROM material_snapshots AS m
+                        LEFT JOIN video_origin_flags AS v
+                          ON v.snapshot_time = m.snapshot_time
+                         AND v.customer_center_id = m.customer_center_id
+                         AND v.advertiser_id = m.advertiser_id
+                         AND v.material_id = m.material_id
+                        WHERE m.snapshot_time IN ({placeholders})
+                        ORDER BY m.snapshot_time DESC, m.create_time DESC, m.order_count DESC, m.pay_amount DESC, m.roi DESC, m.stat_cost DESC
+                        """,
+                        snapshot_times,
+                    ).fetchall()
+                ]
+                scoped_snapshot_rows = [
+                    row
+                    for row in snapshot_rows
+                    if (
+                        str(row.get("customer_center_id") or "").strip(),
+                        str(row.get("snapshot_time") or "").strip(),
+                    )
+                    in selected_pairs
+                ]
+                if allowed_advertiser_ids is not None:
+                    allowed = {int(item) for item in allowed_advertiser_ids}
+                    scoped_snapshot_rows = [
+                        row for row in scoped_snapshot_rows if int(row.get("advertiser_id", 0) or 0) in allowed
+                    ]
+                if not target_snapshot:
+                    scoped_snapshot_rows = self._filter_material_rows_by_create_time_window(
+                        scoped_snapshot_rows,
+                        start_dt,
+                        end_dt,
+                        tz_name,
+                    )
+                items = self._build_material_rankings(scoped_snapshot_rows)
+
+        if items:
+            with self.db() as preview_conn:
+                items = self._apply_latest_material_previews(preview_conn, items)
+
+        payload = {
+            "snapshot_time": str(runs[-1].get("snapshot_time") or target_snapshot) if runs else target_snapshot,
+            "items": items,
+            "snapshot_count": len(selected_pairs),
+            "customer_center_count": len({customer_center_id for customer_center_id, _snapshot in selected_pairs}),
+            "range_key": normalized,
+            "range_label": range_label,
+            "query_start_date": start_dt.strftime("%Y-%m-%d"),
+            "query_end_date": end_dt.strftime("%Y-%m-%d"),
+        }
+        self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+        return payload
+
     def _apply_material_operator_rankings(
         self,
         payload: dict[str, Any],
@@ -6862,7 +7233,7 @@ class DashboardService:
         target_snapshot = str(snapshot_time or "").strip()
         material_payload: dict[str, Any]
         if normalized_range:
-            material_payload = self.material_rankings(
+            material_payload = self._cross_customer_center_material_payload(
                 normalized_range,
                 query_start_date,
                 query_end_date,
@@ -6873,7 +7244,7 @@ class DashboardService:
             target_snapshot = target_snapshot or str(payload.get("snapshot_time") or "").strip()
             if not target_snapshot:
                 return payload
-            material_payload = self.material_rankings(
+            material_payload = self._cross_customer_center_material_payload(
                 "day",
                 "",
                 "",
