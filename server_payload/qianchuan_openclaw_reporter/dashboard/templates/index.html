@@ -374,19 +374,21 @@
                 </div>
                 <div id="uploadTargetMeta" class="section-range-meta compact-inline inline-feedback">先查再勾选。</div>
               </div>
-              <form id="uploadSearchForm" class="ownership-inline-form">
-                <label>
+              <form id="uploadSearchForm" class="ownership-inline-form upload-target-search-form">
+                <label class="upload-target-search-scope">
                   <span>搜索范围</span>
                   <select id="uploadScopeSelect" name="scope">
                     <option value="plan">计划</option>
                     <option value="account">账户</option>
                   </select>
                 </label>
-                <label class="wide-field">
-                  <span>关键词</span>
-                  <input id="uploadKeywordInput" name="query" type="search" placeholder="留空表示当前范围全部计划" />
-                </label>
-                <button type="submit" class="button ghost compact">查找</button>
+                <div class="upload-target-search-main">
+                  <label class="wide-field upload-target-search-keyword">
+                    <span>关键词</span>
+                    <input id="uploadKeywordInput" name="query" type="search" placeholder="留空表示当前范围全部计划" />
+                  </label>
+                  <button type="submit" class="button ghost compact upload-target-search-button">查找</button>
+                </div>
               </form>
               <div class="upload-target-toolbar">
                 <label class="toggle-chip">
@@ -449,7 +451,6 @@
             <section class="ownership-card access-config-card">
               <div class="subpanel-head access-card-head">
                 <div>
-                  <p class="section-kicker">Account Setup</p>
                   <h3>账号配置</h3>
                 </div>
                 <div id="userEditorStatus" class="section-range-meta compact-inline inline-feedback">新建账号时可同时填写关键词。</div>
@@ -509,7 +510,6 @@
             <section class="access-list-card">
               <div class="subpanel-head access-card-head">
                 <div>
-                  <p class="section-kicker">Member Roster</p>
                   <h3>后台账号</h3>
                 </div>
                 <div class="section-range-meta compact-inline">选择账号后，下方继续编辑可见范围、关键词规则和权限状态。</div>
@@ -523,7 +523,6 @@
               <section class="ownership-card">
                 <div class="subpanel-head access-card-head">
                   <div>
-                    <p class="section-kicker">Scope Mapping</p>
                     <h3>账户范围</h3>
                   </div>
                 </div>
@@ -547,7 +546,6 @@
               <section class="ownership-card hidden" id="operatorKeywordSection">
                 <div class="subpanel-head access-card-head">
                   <div>
-                    <p class="section-kicker">Keyword Rules</p>
                     <h3>运营关键词</h3>
                   </div>
                 </div>
@@ -571,7 +569,6 @@
               <section class="ownership-card hidden" id="operatorMaterialSection">
                 <div class="subpanel-head access-card-head">
                   <div>
-                    <p class="section-kicker">Matched Assets</p>
                     <h3>命中素材</h3>
                   </div>
                   <div class="ownership-inline-actions">

@@ -1849,6 +1849,144 @@ body {
   min-height: clamp(220px, calc(100vh - 620px), 320px);
 }
 
+.access-panel {
+  padding: 18px 18px 16px;
+}
+
+.access-panel-head {
+  margin-bottom: 12px;
+}
+
+.access-panel .meta-block.compact.single-line span {
+  font-size: 12px;
+}
+
+.access-panel .access-overview-grid {
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.access-panel .access-overview-card {
+  min-height: 104px;
+  gap: 6px;
+  padding: 13px 14px;
+  border-radius: 18px;
+}
+
+.access-panel .access-layout {
+  gap: 12px;
+}
+
+.access-panel .access-config-card,
+.access-panel .access-list-card,
+.access-panel .access-editor-card,
+.access-panel .ownership-card {
+  padding: 12px;
+  border-radius: 16px;
+}
+
+.access-panel .subpanel-head {
+  margin-bottom: 8px;
+}
+
+.access-panel .access-card-head {
+  gap: 8px;
+}
+
+.access-panel .access-card-head h3 {
+  margin-top: 0;
+  font-size: 15px;
+}
+
+.access-panel .ownership-form-grid.access-form-grid {
+  gap: 12px;
+}
+
+.access-panel .access-form-main-grid {
+  gap: 10px 12px;
+}
+
+.access-panel .ownership-form-grid .access-form-keyword-field textarea {
+  min-height: 96px;
+}
+
+.access-panel .access-form-rail {
+  gap: 8px;
+  padding: 10px;
+}
+
+.access-panel .access-option-list {
+  gap: 6px;
+}
+
+.access-panel .access-toggle-card {
+  min-height: 54px;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+}
+
+.access-panel .access-toggle-card-compact {
+  min-height: 34px;
+  padding: 7px 9px;
+}
+
+.access-panel .ownership-form-actions.access-button-stack {
+  gap: 6px;
+}
+
+.access-panel .access-action-button {
+  min-width: 108px;
+  min-height: 32px;
+  padding: 0 12px !important;
+}
+
+.access-panel .access-user-table-shell {
+  min-height: clamp(210px, calc(100vh - 660px), 300px);
+}
+
+.access-panel .access-user-cell {
+  gap: 10px;
+}
+
+.access-panel .access-user-copy {
+  gap: 3px;
+}
+
+.access-panel .access-user-name {
+  font-size: 13px;
+}
+
+.access-panel .access-user-subline,
+.access-panel .access-user-note {
+  font-size: 11px;
+}
+
+.access-panel .access-user-tags {
+  gap: 5px;
+  margin-bottom: 6px;
+}
+
+.access-panel .access-user-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.access-panel .scope-controls {
+  gap: 10px;
+  margin: 10px 0 8px;
+  padding: 12px;
+  border-radius: 14px;
+}
+
+.access-panel .scope-checklist {
+  gap: 10px;
+  max-height: 420px;
+  padding: 3px;
+}
+
 .decision-main,
 .decision-side {
   min-width: 0;
@@ -3824,7 +3962,32 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.upload-target-search-form {
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  gap: 12px 16px;
+  align-items: end;
+}
+
+.upload-target-search-scope,
+.upload-target-search-keyword {
+  min-width: 0;
+}
+
+.upload-target-search-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  min-width: 0;
+}
+
+.upload-target-search-button {
+  min-width: 116px;
+  align-self: end;
 }
 
 .upload-form-grid {
@@ -4612,6 +4775,16 @@ body {
   .signal-form-row-main,
   .signal-form-row-aux {
     grid-template-columns: 1fr;
+  }
+
+  .upload-target-search-form,
+  .upload-target-search-main {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-target-search-button {
+    width: 100%;
+    min-width: 0;
   }
 
   .scope-toolbar {

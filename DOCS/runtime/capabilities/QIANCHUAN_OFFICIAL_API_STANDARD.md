@@ -1,9 +1,11 @@
 # 千川官方接口开发标准手册
 
-最后更新：`2026-03-20`  
+最后更新：`2026-03-20`
 最后验证样本：工作台 `1802375893828620`，验证时间 `2026-03-19 03:48:18`
+适用范围：官方开放接口选型、调用顺序、字段口径
+读者对象：后端、联调同事
 
-这份文档给同事直接参考，用来基于**已验证的官方接口**做后续开发。  
+这份文档给同事直接参考，用来基于**已验证的官方接口**做后续开发。
 目标不是介绍页面，而是明确：
 
 - 哪些接口已经验证可用
@@ -18,6 +20,12 @@
 - [DATA_ARCHITECTURE.md](./DATA_ARCHITECTURE.md)
 - [DISCOVERY_RUNBOOK.md](./DISCOVERY_RUNBOOK.md)
 - [discovery/capability_snapshot_latest.md](./discovery/capability_snapshot_latest.md)
+
+文档分工：
+
+- 本文档负责“规范真源”
+- [../../integrations/qianchuan_uni_promotion_integration.md](../../integrations/qianchuan_uni_promotion_integration.md) 负责背景设计与选型原因
+- [DISCOVERY_RUNBOOK.md](./DISCOVERY_RUNBOOK.md) 负责能力发现操作步骤
 
 ## 1. 适用范围
 
@@ -66,7 +74,7 @@
 必须遵守：
 
 - 只用巨量官方 `open_api`
-- 统一通过共享客户端 [report_qianchuan.py](../report_qianchuan.py) 调用
+- 统一通过共享客户端 [report_qianchuan.py](../../../server_payload/qianchuan_openclaw_reporter/report_qianchuan.py) 调用
 - 页面层、通知层、脚本层不得各自复制一套 HTTP 请求逻辑
 
 禁止：
@@ -112,13 +120,18 @@
 
 当前配置样例见：
 
-- [config.example.json](../config.example.json)
+- [config.example.json](../../../server_payload/qianchuan_openclaw_reporter/config.example.json)
 
-当前配置优先级：
+当前调用层配置优先级：
 
 1. 默认值
 2. `config.json`
 3. 环境变量覆盖
+
+标准部署补充：
+
+- Docker Compose 标准部署以 `.env.dashboard + docker-compose.dashboard.yml` 为主
+- `config.json` 主要作为兼容覆盖或脚本运行配置，不作为标准部署初始化模板
 
 核心环境变量：
 
@@ -169,7 +182,7 @@
 
 - 方法：`POST`
 - 地址：`https://ad.oceanengine.com/open_api/oauth2/refresh_token/`
-- 代码入口：[report_qianchuan.py](../report_qianchuan.py)
+- 代码入口：[report_qianchuan.py](../../../server_payload/qianchuan_openclaw_reporter/report_qianchuan.py)
 
 作用：
 
@@ -539,7 +552,7 @@
 
 代码位置：
 
-- [report_qianchuan.py](../report_qianchuan.py)
+- [report_qianchuan.py](../../../server_payload/qianchuan_openclaw_reporter/report_qianchuan.py)
 
 ### 7.4 计划分页
 
@@ -625,7 +638,7 @@
 
 1. 查这份文档，看是不是已验证接口
 2. 如果涉及新主题，先跑发现脚本
-3. 先在 [report_qianchuan.py](../report_qianchuan.py) 补共享客户端
+3. 先在 [report_qianchuan.py](../../../server_payload/qianchuan_openclaw_reporter/report_qianchuan.py) 补共享客户端
 4. 再补规范化落库，不要直接页面临时查
 5. 再补页面、告警或通知逻辑
 6. 最后更新：
@@ -638,8 +651,8 @@
 
 同事开发时优先看这些文件：
 
-- 共享客户端：[report_qianchuan.py](../report_qianchuan.py)
-- 能力发现脚本：[tools/discover_qianchuan_capabilities.py](../tools/discover_qianchuan_capabilities.py)
+- 共享客户端：[report_qianchuan.py](../../../server_payload/qianchuan_openclaw_reporter/report_qianchuan.py)
+- 能力发现脚本：[tools/discover_qianchuan_capabilities.py](../../../server_payload/qianchuan_openclaw_reporter/tools/discover_qianchuan_capabilities.py)
 - 能力目录：[QIANCHUAN_CAPABILITY_CATALOG.md](./QIANCHUAN_CAPABILITY_CATALOG.md)
 - 架构基线：[DATA_ARCHITECTURE.md](./DATA_ARCHITECTURE.md)
 - 发现手册：[DISCOVERY_RUNBOOK.md](./DISCOVERY_RUNBOOK.md)

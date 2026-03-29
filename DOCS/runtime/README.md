@@ -1,5 +1,13 @@
 # Qianchuan Runtime Docs
 
+版本：`v2.1`
+状态：`生效中`
+最后更新：`2026-03-30`
+verified_commit：`539cc19`
+verified_date：`2026-03-30`
+适用范围：当前线上运行事实、部署方式、运行检查与现网页面口径
+读者对象：后端、运维、联调同事
+
 这是当前千川看板的试运行实现与运行口径文档。
 
 当前定位：
@@ -12,13 +20,13 @@
 专题真源：
 
 - 决策基线：
-  - [13_已确认决策基线](/Users/xy/千川/DOCS/standard/13_已确认决策基线.md)
+  - [13_已确认决策基线](../standard/13_已确认决策基线.md)
 - 角色与权限：
-  - [20_角色模型与运营工作台方案](/Users/xy/千川/DOCS/standard/20_角色模型与运营工作台方案.md)
+  - [20_角色模型与运营工作台方案](../standard/20_角色模型与运营工作台方案.md)
 - 素材上传：
-  - [19_素材上传与批量投放方案](/Users/xy/千川/DOCS/standard/19_素材上传与批量投放方案.md)
+  - [19_素材上传与批量投放方案](../standard/19_素材上传与批量投放方案.md)
 - 预警规则：
-  - [21_管理员预警规则页方案](/Users/xy/千川/DOCS/standard/21_管理员预警规则页方案.md)
+  - [21_管理员预警规则页方案](../standard/21_管理员预警规则页方案.md)
 
 在本目录内进行任何修改前，必须先阅读：
 
@@ -31,19 +39,23 @@
 
 ## 关联代码与配置
 
-- `server_payload/qianchuan_openclaw_reporter/config.json`
-  - 真实运行配置
-- `server_payload/qianchuan_openclaw_reporter/config.example.json`
-  - 配置样例
-- `server_payload/qianchuan_openclaw_reporter/report_qianchuan.py`
+- `../../server_payload/qianchuan_openclaw_reporter/.env.dashboard.example`
+  - 标准部署配置样例
+- `../../server_payload/qianchuan_openclaw_reporter/docker-compose.dashboard.yml`
+  - Web 看板的容器编排真源
+- `../../server_payload/qianchuan_openclaw_reporter/dashboard/settings.py`
+  - Dashboard 环境变量与默认值入口
+- `../../server_payload/qianchuan_openclaw_reporter/config.example.json`
+  - 可选 `config.json` 覆盖样例
+- `../../server_payload/qianchuan_openclaw_reporter/config.json`
+  - 运行时兼容读取的可选覆盖配置
+- `../../server_payload/qianchuan_openclaw_reporter/report_qianchuan.py`
   - 固定数据采集与报表生成脚本
-- `server_payload/qianchuan_openclaw_reporter/dashboard/`
+- `../../server_payload/qianchuan_openclaw_reporter/dashboard/`
   - Docker 内运行的经营看板服务
-- `server_payload/qianchuan_openclaw_reporter/docker-compose.dashboard.yml`
-  - Web 看板的容器编排文件
-- `server_payload/qianchuan_openclaw_reporter/bridge_send_alerts.py`
+- `../../server_payload/qianchuan_openclaw_reporter/bridge_send_alerts.py`
   - 将页面触发的待发送阈值告警推送到 OpenClaw 已配置的通知渠道
-- `server_payload/qianchuan_openclaw_reporter/tools/discover_qianchuan_capabilities.py`
+- `../../server_payload/qianchuan_openclaw_reporter/tools/discover_qianchuan_capabilities.py`
   - 官方能力发现脚本，用于确认主题、维度、指标和必填过滤条件
 - `capabilities/`
   - 能力目录、架构文档、发现手册与最新发现结果
@@ -58,17 +70,17 @@
 
 ## 配置优先级
 
-当前项目已经统一支持：
+当前运行期配置同时支持：
 
 1. 默认值
 2. `config.json`
 3. 环境变量覆盖
 
-也就是：
+说明：
 
-- 环境变量优先级最高
-- `config.json` 继续保留，作为本地和服务器默认配置
-- 如果只想覆盖敏感字段，可以只设置环境变量，不必改动 `config.json`
+- 对 `report_qianchuan.py` 及相关集成脚本，配置优先级仍是 `默认值 -> config.json -> 环境变量`。
+- 对标准 Docker Compose 部署，实际运维真源应视为 `.env.dashboard + docker-compose.dashboard.yml + 环境变量注入`。
+- `config.json` 继续保留为兼容覆盖项，但不再作为标准初始化模板。
 
 核心环境变量：
 
@@ -111,7 +123,7 @@ docker-compose -f docker-compose.dashboard.yml up -d --build
 当前运行检查接口：
 
 - `GET /healthz`
-  - 用于进程存活检查
+  - 用于进程存活检查，仅返回 `{"status":"ok"}`
 - `GET /readyz`
   - 用于数据库、Redis、Celery 与 schema 版本就绪检查
 
