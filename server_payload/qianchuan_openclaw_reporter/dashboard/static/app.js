@@ -2475,7 +2475,7 @@ function renderOceanEngineConfig(config) {
   }
   if (customerCenterChip) {
     customerCenterChip.textContent = usingAllCustomerCenters() && boundItems.length > 1
-      ? "鍏ㄩ儴璐﹀彿"
+      ? "全部账号"
       : `CC ${config?.customer_center_id || "--"}`;
   }
   if (!oceanEngineConfigCard) return;
