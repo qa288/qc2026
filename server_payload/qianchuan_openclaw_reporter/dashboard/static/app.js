@@ -5608,6 +5608,7 @@ function applyRoleViewPolicy() {
   }
   const accessTab = viewTabs?.querySelector('[data-view="access"]');
   const signalsTab = viewTabs?.querySelector('[data-view="signals"]');
+  const overviewTab = viewTabs?.querySelector('[data-view="overview"]');
   const accountTab = viewTabs?.querySelector('[data-view="accounts"]');
   const planTab = viewTabs?.querySelector('[data-view="plans"]');
   const breakdownTab = viewTabs?.querySelector('[data-view="breakdown"]');
@@ -5621,7 +5622,11 @@ function applyRoleViewPolicy() {
       ? (canUseUploadModule()
         ? ["overview", "accounts", "plans", "materials", "comments", "breakdown", "uploads"]
         : ["overview", "accounts", "plans", "materials", "comments", "breakdown"])
-      : ["overview", "materials", "team-materials", "breakdown"];
+      : ["breakdown", "materials", "team-materials"];
+  if (overviewTab) {
+    overviewTab.classList.toggle("hidden", operator);
+    overviewTab.textContent = "鎬昏";
+  }
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
     accessTab.textContent = "账号权限";
@@ -5704,7 +5709,7 @@ function applyRoleViewPolicy() {
     ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "comments", "uploads", "access", "signals"])
     : supervisor
       ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "comments", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials", "comments"])
-      : new Set(["overview", "breakdown", "materials", "team-materials"]);
+      : new Set(["breakdown", "materials", "team-materials"]);
   if (viewTabs) {
     tabOrder.forEach((view) => {
       const tab = viewTabs.querySelector(`[data-view="${view}"]`);
@@ -5712,7 +5717,7 @@ function applyRoleViewPolicy() {
     });
   }
   if (!allowedViews.has(state.activeView)) {
-    const fallback = allowedViews.has("overview") ? "overview" : Array.from(allowedViews)[0] || "overview";
+    const fallback = Array.from(allowedViews)[0] || "overview";
     setActiveView(fallback);
   }
   userFormReset && (userFormReset.disabled = !admin);
