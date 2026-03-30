@@ -8,6 +8,8 @@ const RANGE_LABELS = {
 
 const DISPLAY_SCOPE_CURRENT = "current";
 const DISPLAY_SCOPE_ALL = "all";
+const DISPLAY_SCOPE_PREFERENCE_KEY = "dashboard-display-scope";
+const DISPLAY_SCOPE_MIGRATION_KEY = "dashboard-display-scope-default-all-v1";
 
 const RULE_ENTITY_CONFIG = {
   account: {
@@ -94,7 +96,7 @@ const state = {
   uploadFiles: [],
   uploadRetryingJobId: null,
   uploadDeletingJobId: null,
-  displayScope: loadPreference("dashboard-display-scope", DISPLAY_SCOPE_CURRENT),
+  displayScope: DISPLAY_SCOPE_ALL,
   unassignedScope: "all",
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
@@ -375,6 +377,23 @@ function normalizeDisplayScope(value) {
     : DISPLAY_SCOPE_CURRENT;
 }
 
+function loadDisplayScopePreference() {
+  try {
+    const saved = localStorage.getItem(DISPLAY_SCOPE_PREFERENCE_KEY);
+    const migrated = localStorage.getItem(DISPLAY_SCOPE_MIGRATION_KEY);
+    if (!migrated) {
+      localStorage.setItem(DISPLAY_SCOPE_PREFERENCE_KEY, DISPLAY_SCOPE_ALL);
+      localStorage.setItem(DISPLAY_SCOPE_MIGRATION_KEY, "1");
+      return DISPLAY_SCOPE_ALL;
+    }
+    return normalizeDisplayScope(saved || DISPLAY_SCOPE_ALL);
+  } catch {
+    return DISPLAY_SCOPE_ALL;
+  }
+}
+
+state.displayScope = loadDisplayScopePreference();
+
 function requestDisplayScope() {
   if (!isAdmin()) {
     return DISPLAY_SCOPE_CURRENT;
@@ -391,7 +410,8 @@ function setDisplayScope(nextScope, options = {}) {
   const previous = normalizeDisplayScope(state.displayScope);
   state.displayScope = normalized;
   if (options.persist !== false) {
-    savePreference("dashboard-display-scope", normalized);
+    savePreference(DISPLAY_SCOPE_PREFERENCE_KEY, normalized);
+    savePreference(DISPLAY_SCOPE_MIGRATION_KEY, "1");
   }
   if (options.clearCaches !== false && previous !== normalized) {
     clearDashboardDataCaches();
