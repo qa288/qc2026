@@ -3423,7 +3423,7 @@ function renderMaterialTable(rows) {
   const enrichedRows = rows.map((row) => enrichMaterialRow(row));
   if (
     operatorMode
-    && !["material_name", "create_time", "overall_ctr", "stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.materialSort.key || ""))
+    && !["material_name", "create_time", "overall_ctr", "stat_cost", "top_anchor_name"].includes(String(state.materialSort.key || ""))
   ) {
     state.materialSort = { key: "create_time", dir: "desc" };
     saveSort("material-sort", state.materialSort);
@@ -3435,9 +3435,8 @@ function renderMaterialTable(rows) {
       row.material_id,
       row.video_id,
       row.product_info_text,
-      row.top_plan_name,
-      row.top_account_name,
       row.top_anchor_name,
+      ...(operatorMode ? [] : [row.top_plan_name, row.top_account_name]),
     ].join(" ").toLowerCase();
     return haystack.includes(query);
   });
@@ -3449,8 +3448,6 @@ function renderMaterialTable(rows) {
         { key: "create_time", label: "创建时间", sortable: true },
         { key: "overall_ctr", label: "整体点击率", sortable: true },
         { key: "stat_cost", label: "消耗", sortable: true },
-        { key: "top_account_name", label: "归属账户", sortable: true },
-        { key: "top_plan_name", label: "归属计划", sortable: true },
         { key: "top_anchor_name", label: "达人", sortable: true },
       ]
     : [
@@ -3508,8 +3505,6 @@ function renderMaterialTable(rows) {
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           ${operatorMode
             ? `
-          <td>${escapeHtml(row.top_account_name || "--")}</td>
-          <td>${escapeHtml(row.top_plan_name || "--")}</td>
           <td>${escapeHtml(row.top_anchor_name || "--")}</td>
           `
             : `
@@ -3612,8 +3607,17 @@ function renderTeamMaterialPager(totalRows, currentPage, totalPages, startIndex,
 
 function renderTeamMaterialTable(rows) {
   if (!teamMaterialTable) return;
+  const operatorMode = isOperator();
   const enrichedRows = rows.map((row) => enrichMaterialRow(row));
-  if (!["material_name", "create_time", "overall_ctr", "stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.teamMaterialSort.key || ""))) {
+  if (
+    ![
+      "material_name",
+      "create_time",
+      "overall_ctr",
+      "stat_cost",
+      ...(operatorMode ? ["top_anchor_name"] : ["top_account_name", "top_plan_name", "top_anchor_name"]),
+    ].includes(String(state.teamMaterialSort.key || ""))
+  ) {
     state.teamMaterialSort = { key: "create_time", dir: "desc" };
     saveSort("team-material-sort", state.teamMaterialSort);
   }
@@ -3624,23 +3628,32 @@ function renderTeamMaterialTable(rows) {
       row.material_id,
       row.video_id,
       row.product_info_text,
-      row.top_account_name,
-      row.top_plan_name,
       row.top_anchor_name,
+      ...(operatorMode ? [] : [row.top_account_name, row.top_plan_name]),
     ].join(" ").toLowerCase();
     return haystack.includes(query);
   });
-  const columns = [
-    { key: "material_name", label: "素材", sortable: true },
-    { key: "product_info_text", label: "商品信息", sortable: false },
-    { key: "preview", label: "预览", sortable: false },
-    { key: "create_time", label: "创建时间", sortable: true },
-    { key: "overall_ctr", label: "整体点击率", sortable: true },
-    { key: "stat_cost", label: "消耗", sortable: true },
-    { key: "top_account_name", label: "归属账户", sortable: true },
-    { key: "top_plan_name", label: "归属计划", sortable: true },
-    { key: "top_anchor_name", label: "达人", sortable: true },
-  ];
+  const columns = operatorMode
+    ? [
+        { key: "material_name", label: "素材", sortable: true },
+        { key: "product_info_text", label: "商品信息", sortable: false },
+        { key: "preview", label: "预览", sortable: false },
+        { key: "create_time", label: "创建时间", sortable: true },
+        { key: "overall_ctr", label: "整体点击率", sortable: true },
+        { key: "stat_cost", label: "消耗", sortable: true },
+        { key: "top_anchor_name", label: "达人", sortable: true },
+      ]
+    : [
+        { key: "material_name", label: "素材", sortable: true },
+        { key: "product_info_text", label: "商品信息", sortable: false },
+        { key: "preview", label: "预览", sortable: false },
+        { key: "create_time", label: "创建时间", sortable: true },
+        { key: "overall_ctr", label: "整体点击率", sortable: true },
+        { key: "stat_cost", label: "消耗", sortable: true },
+        { key: "top_account_name", label: "归属账户", sortable: true },
+        { key: "top_plan_name", label: "归属计划", sortable: true },
+        { key: "top_anchor_name", label: "达人", sortable: true },
+      ];
   const sorted = sortRows(visibleRows, state.teamMaterialSort);
   const totalRows = sorted.length;
   const totalPages = Math.max(1, Math.ceil(totalRows / MATERIAL_PAGE_SIZE));
@@ -3676,8 +3689,12 @@ function renderTeamMaterialTable(rows) {
           <td class="mono">${escapeHtml(formatDateTime(row.create_time || ""))}</td>
           <td class="mono">${formatPercent(row.overall_ctr)}</td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
+          ${operatorMode
+            ? ""
+            : `
           <td>${escapeHtml(row.top_account_name || "--")}</td>
           <td>${escapeHtml(row.top_plan_name || "--")}</td>
+          `}
           <td>${escapeHtml(row.top_anchor_name || "--")}</td>
         </tr>
       `).join("")}
@@ -4894,6 +4911,28 @@ function roleLabel(role) {
   return role || "--";
 }
 
+function confirmAccountMutation(payload, keywordSeeds = []) {
+  const editing = Boolean(state.selectedUserId);
+  const title = editing ? "\u4fdd\u5b58\u8d26\u53f7\u53d8\u66f4" : "\u65b0\u5efa\u8d26\u53f7";
+  const lines = [
+    `${title}\u540e\u5c06\u7acb\u5373\u751f\u6548\u3002`,
+    "",
+    `\u540d\u79f0\uff1a${payload.display_name || payload.username || "--"}`,
+    `\u767b\u5f55\u540d\uff1a${payload.username || "--"}`,
+    `\u89d2\u8272\uff1a${roleLabel(payload.role)}`,
+    `\u72b6\u6001\uff1a${payload.enabled ? "\u542f\u7528" : "\u505c\u7528"}`,
+  ];
+  if (payload.role === "supervisor") {
+    lines.push(`\u7d20\u6750\u4e0a\u4f20\uff1a${payload.upload_materials_enabled ? "\u5f00\u542f" : "\u5173\u95ed"}`);
+  }
+  if (payload.role === "operator") {
+    lines.push(`\u9884\u8bbe\u5173\u952e\u8bcd\uff1a${formatNumber(keywordSeeds.length)} \u6761`);
+  }
+  lines.push("");
+  lines.push(editing ? "\u786e\u8ba4\u4fdd\u5b58\u5417\uff1f" : "\u786e\u8ba4\u65b0\u5efa\u5417\uff1f");
+  return window.confirm(lines.join("\n"));
+}
+
 function roleTone(role) {
   if (role === "admin") return "admin";
   if (role === "supervisor") return "supervisor";
@@ -5290,6 +5329,7 @@ function closeMaterialPreview() {
 
 function openMaterialPreviewFromRow(row) {
   if (!row || !materialPreviewModal || !materialPreviewBody) return;
+  const operatorMode = isOperator();
   row = enrichMaterialRow(row);
   const directVideoUrl = String(row.video_url || "").trim();
   const coverUrl = String(row.cover_url || "").trim();
@@ -5298,7 +5338,10 @@ function openMaterialPreviewFromRow(row) {
     materialPreviewTitle.textContent = row.material_name || "素材预览";
   }
   if (materialPreviewMeta) {
-    materialPreviewMeta.textContent = [row.top_account_name || "", row.top_plan_name || "", row.top_anchor_name || ""].filter(Boolean).join(" / ") || "素材预览";
+    materialPreviewMeta.textContent = [
+      ...(operatorMode ? [] : [row.top_account_name || "", row.top_plan_name || ""]),
+      row.top_anchor_name || "",
+    ].filter(Boolean).join(" / ") || "素材预览";
   }
   const previewBlock = directVideoUrl
     ? `<video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>`
@@ -5315,8 +5358,12 @@ function openMaterialPreviewFromRow(row) {
       <div class="preview-curve-panel" data-role="preview-curve-panel">${materialPreviewCurveLoadingMarkup()}</div>
     </div>
     <div class="preview-detail-grid">
+      ${operatorMode
+        ? ""
+        : `
       <div class="preview-stat"><span>归属账户</span><strong>${escapeHtml(row.top_account_name || "--")}</strong></div>
       <div class="preview-stat"><span>归属计划</span><strong>${escapeHtml(row.top_plan_name || "--")}</strong></div>
+      `}
       <div class="preview-stat"><span>达人</span><strong>${escapeHtml(row.top_anchor_name || "--")}</strong></div>
       <div class="preview-stat"><span>消耗</span><strong class="mono">${formatMoney(row.stat_cost)}</strong></div>
       <div class="preview-stat"><span>整体成交</span><strong class="mono">${formatMaterialTotalPayAmount(row)}</strong></div>
@@ -5639,7 +5686,7 @@ function applyRoleViewPolicy() {
     materialSearch.placeholder = operator ? "搜索素材名称" : "搜索素材";
   }
   if (teamMaterialSearch) {
-    teamMaterialSearch.placeholder = "搜索素材 / 归属账户 / 计划 / 达人";
+    teamMaterialSearch.placeholder = operator ? "搜索素材 / 达人" : "搜索素材 / 归属账户 / 计划 / 达人";
   }
   if (heroCopy) {
     heroCopy.textContent = admin
@@ -6661,6 +6708,10 @@ function bindInputs() {
       enabled: form.get("enabled") === "on",
       upload_materials_enabled: form.get("upload_materials_enabled") === "on",
     };
+    if (!confirmAccountMutation(payload, keywordSeeds)) {
+      setInlineFeedback(userEditorStatus, "已取消提交账号变更。", "neutral");
+      return;
+    }
     const url = state.selectedUserId ? `/api/users/${state.selectedUserId}` : "/api/users";
     const method = state.selectedUserId ? "PUT" : "POST";
     const response = await fetch(url, {
