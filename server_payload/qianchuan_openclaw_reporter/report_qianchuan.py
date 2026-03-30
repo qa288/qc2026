@@ -657,6 +657,22 @@ class OceanEngineClient:
         normalized["customer_center_id"] = str(self.config.get("customer_center_id") or "")
         return normalized
 
+    def _normalize_integer_id_list(self, values: list[str | int], field_name: str) -> list[int]:
+        normalized: list[int] = []
+        for item in values:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if not text:
+                continue
+            try:
+                normalized.append(int(text))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{field_name} must contain integers") from exc
+        if not normalized:
+            raise ValueError(f"{field_name} is required")
+        return normalized
+
     def _save_token_cache(self, payload: dict[str, Any]) -> None:
         normalized = self._normalize_token_record(payload)
         dump_json(self.token_cache_path, normalized)
@@ -1211,9 +1227,7 @@ class OceanEngineClient:
         reply_text: str,
     ) -> dict[str, Any]:
         access_token = self.get_access_token()
-        normalized_comment_ids = [str(item).strip() for item in comment_ids if str(item).strip()]
-        if not normalized_comment_ids:
-            raise ValueError("comment_ids is required")
+        normalized_comment_ids = self._normalize_integer_id_list(comment_ids, "comment_ids")
         payload = {
             "advertiser_id": int(advertiser_id),
             "comment_ids": normalized_comment_ids,
@@ -1230,9 +1244,7 @@ class OceanEngineClient:
         comment_ids: list[str | int],
     ) -> dict[str, Any]:
         access_token = self.get_access_token()
-        normalized_comment_ids = [str(item).strip() for item in comment_ids if str(item).strip()]
-        if not normalized_comment_ids:
-            raise ValueError("comment_ids is required")
+        normalized_comment_ids = self._normalize_integer_id_list(comment_ids, "comment_ids")
         payload = {
             "advertiser_id": int(advertiser_id),
             "comment_ids": normalized_comment_ids,

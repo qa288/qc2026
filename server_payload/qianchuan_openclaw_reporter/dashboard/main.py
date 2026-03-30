@@ -138,6 +138,7 @@ COMMENT_LEVEL_LABELS = {
     "LEVEL_TWO": "二级评论",
 }
 COMMENT_REPLY_MAX_LENGTH = 100
+COMMENT_INCREMENTAL_HOT_DAYS = 2
 MATERIAL_REPORT_CORE_METRICS = [
     "stat_cost_for_roi2",
     "total_pay_order_gmv_for_roi2",
@@ -393,6 +394,7 @@ class DashboardService:
             self._ensure_app_users_schema_locked(conn)
             self._ensure_material_upload_schema_locked(conn)
             self._ensure_material_preview_schema_locked(conn)
+            self._ensure_comment_storage_schema_locked(conn)
             self.alert_access.ensure_notification_settings(conn)
 
     def _column_exists_locked(self, conn: Any, table_name: str, column_name: str) -> bool:
@@ -414,6 +416,28 @@ class DashboardService:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
         return any(str(row["name"]) == column for row in rows)
 
+    def _column_type_locked(self, conn: Any, table_name: str, column_name: str) -> str:
+        table = str(table_name or "").strip()
+        column = str(column_name or "").strip()
+        if not table or not column:
+            return ""
+        if getattr(conn, "backend", "") == "postgres":
+            row = conn.execute(
+                """
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+                LIMIT 1
+                """,
+                (table, column),
+            ).fetchone()
+            return str(row["data_type"] or "").strip().lower() if row else ""
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        for row in rows:
+            if str(row["name"]) == column:
+                return str(row["type"] or "").strip().lower()
+        return ""
+
     def _ensure_app_users_schema_locked(self, conn: Any) -> None:
         if not self._column_exists_locked(conn, "app_users", "upload_materials_enabled"):
             conn.execute("ALTER TABLE app_users ADD COLUMN upload_materials_enabled INTEGER NOT NULL DEFAULT 0")
@@ -422,6 +446,13 @@ class DashboardService:
         if self._column_exists_locked(conn, table_name, column_name):
             return
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+    def _ensure_bigint_column_locked(self, conn: Any, table_name: str, column_name: str) -> None:
+        if getattr(conn, "backend", "") != "postgres":
+            return
+        column_type = self._column_type_locked(conn, table_name, column_name)
+        if column_type in {"integer", "int", "int4", "smallint", "int2"}:
+            conn.execute(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE BIGINT")
 
     def _runtime_config_override_row_locked(self, conn: Any) -> dict[str, Any] | None:
         row = conn.execute(
@@ -594,6 +625,78 @@ class DashboardService:
             self._ensure_column_locked(conn, table_name, "total_pay_amount", "REAL NOT NULL DEFAULT 0")
             self._ensure_column_locked(conn, table_name, "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
             self._ensure_column_locked(conn, table_name, "settled_order_count", "INTEGER NOT NULL DEFAULT 0")
+
+    def _ensure_comment_storage_schema_locked(self, conn: Any) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comment_records (
+                customer_center_id TEXT NOT NULL DEFAULT '',
+                advertiser_id BIGINT NOT NULL,
+                comment_id TEXT NOT NULL,
+                comment_date TEXT NOT NULL DEFAULT '',
+                create_time TEXT NOT NULL DEFAULT '',
+                advertiser_name TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                reply_count INTEGER NOT NULL DEFAULT 0,
+                hide_status TEXT NOT NULL DEFAULT 'NOT_HIDE',
+                level_type TEXT NOT NULL DEFAULT '',
+                comment_user_name TEXT NOT NULL DEFAULT '',
+                comment_user_id TEXT NOT NULL DEFAULT '',
+                like_count INTEGER NOT NULL DEFAULT 0,
+                item_title TEXT NOT NULL DEFAULT '',
+                comment_type TEXT NOT NULL DEFAULT '',
+                promotion_id TEXT NOT NULL DEFAULT '',
+                material_id TEXT NOT NULL DEFAULT '',
+                item_id TEXT NOT NULL DEFAULT '',
+                raw_json TEXT NOT NULL DEFAULT '{}',
+                fetched_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (customer_center_id, advertiser_id, comment_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_comment_records_cc_date_adv
+            ON comment_records (customer_center_id, comment_date, advertiser_id, create_time)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_comment_records_cc_promotion
+            ON comment_records (customer_center_id, advertiser_id, promotion_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_comment_records_cc_material
+            ON comment_records (customer_center_id, advertiser_id, material_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comment_sync_states (
+                customer_center_id TEXT NOT NULL DEFAULT '',
+                advertiser_id BIGINT NOT NULL,
+                sync_date TEXT NOT NULL,
+                advertiser_name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                comment_count INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at TEXT NOT NULL DEFAULT '',
+                last_success_at TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (customer_center_id, advertiser_id, sync_date)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_comment_sync_states_cc_date_adv
+            ON comment_sync_states (customer_center_id, sync_date, advertiser_id)
+            """
+        )
+        self._ensure_bigint_column_locked(conn, "comment_records", "advertiser_id")
+        self._ensure_bigint_column_locked(conn, "comment_sync_states", "advertiser_id")
 
     def _ensure_plan_snapshot_schema_locked(self, conn: Any) -> None:
         self._ensure_column_locked(conn, "plan_snapshots", "plan_source", "TEXT NOT NULL DEFAULT 'UNI_PROMOTION'")
@@ -4343,6 +4446,461 @@ class DashboardService:
             fallback.setdefault(material_id, material_name)
         return exact, fallback
 
+    @classmethod
+    def _comment_record_from_item(
+        cls,
+        item: dict[str, Any],
+        fetched_at: str,
+        fallback_date: str = "",
+    ) -> dict[str, Any]:
+        create_time = cls._normalize_datetime_text(item.get("create_time"))
+        return {
+            "comment_id": str(item.get("comment_id") or "").strip(),
+            "advertiser_id": int(item.get("advertiser_id", 0) or 0),
+            "advertiser_name": str(item.get("advertiser_name") or item.get("advertiser_id") or "").strip(),
+            "comment_date": create_time[:10] if len(create_time) >= 10 else str(fallback_date or "").strip(),
+            "create_time": create_time,
+            "text": str(item.get("text") or "").strip(),
+            "reply_count": cls._safe_int(item.get("reply_count", 0)),
+            "hide_status": str(item.get("hide_status") or "NOT_HIDE").strip().upper(),
+            "level_type": str(item.get("level_type") or "").strip().upper(),
+            "comment_user_name": str(item.get("comment_user_name") or "").strip(),
+            "comment_user_id": str(item.get("comment_user_id") or "").strip(),
+            "like_count": cls._safe_int(item.get("like_count", 0)),
+            "item_title": str(item.get("item_title") or "").strip(),
+            "comment_type": str(item.get("comment_type") or "").strip().upper(),
+            "promotion_id": str(item.get("promotion_id") or "").strip(),
+            "material_id": str(item.get("material_id") or "").strip(),
+            "item_id": str(item.get("item_id") or "").strip(),
+            "raw_json": cls._json_text(item if isinstance(item, dict) else {}),
+            "fetched_at": str(fetched_at or "").strip(),
+            "updated_at": str(fetched_at or "").strip(),
+        }
+
+    def _comment_item_from_record(self, row: dict[str, Any]) -> dict[str, Any]:
+        reply_count = self._safe_int(row.get("reply_count", 0))
+        hide_status = str(row.get("hide_status") or "NOT_HIDE").strip().upper()
+        level_type = str(row.get("level_type") or "").strip().upper()
+        comment_type = str(row.get("comment_type") or "").strip().upper()
+        promotion_id = str(row.get("promotion_id") or "").strip()
+        material_id = str(row.get("material_id") or "").strip()
+        advertiser_id = int(row.get("advertiser_id", 0) or 0)
+        advertiser_name = str(row.get("advertiser_name") or advertiser_id).strip()
+        return {
+            "comment_id": str(row.get("comment_id") or "").strip(),
+            "advertiser_id": advertiser_id,
+            "advertiser_name": advertiser_name,
+            "text": str(row.get("text") or "").strip(),
+            "reply_count": reply_count,
+            "is_replied": reply_count > 0,
+            "reply_status_text": "已回复" if reply_count > 0 else "未回复",
+            "hide_status": hide_status,
+            "hide_status_text": self._comment_hide_status_label(hide_status),
+            "level_type": level_type,
+            "level_type_text": self._comment_level_label(level_type),
+            "comment_user_name": str(row.get("comment_user_name") or "").strip(),
+            "comment_user_id": str(row.get("comment_user_id") or "").strip(),
+            "create_time": self._normalize_datetime_text(row.get("create_time")),
+            "reply_count_text": reply_count,
+            "like_count": self._safe_int(row.get("like_count", 0)),
+            "item_title": str(row.get("item_title") or "").strip(),
+            "video_owner_aweme_id": "",
+            "comment_type": comment_type,
+            "comment_type_text": self._comment_type_label(comment_type),
+            "promotion_id": promotion_id,
+            "promotion_name": "",
+            "promotion_display_name": f"计划 {promotion_id}" if promotion_id else "-",
+            "material_id": material_id,
+            "material_name": "",
+            "material_display_name": f"素材 {material_id}" if material_id else "-",
+            "item_id": str(row.get("item_id") or "").strip(),
+        }
+
+    @staticmethod
+    def _comment_requested_dates(start_dt: datetime, end_dt: datetime) -> list[str]:
+        current = start_dt.date()
+        end_day = end_dt.date()
+        items: list[str] = []
+        while current <= end_day:
+            items.append(current.strftime("%Y-%m-%d"))
+            current += timedelta(days=1)
+        return items
+
+    @classmethod
+    def _parse_normalized_datetime_text(cls, value: Any) -> datetime | None:
+        text = cls._normalize_datetime_text(value)
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _comment_sync_ranges(sync_dates: list[str]) -> list[tuple[str, str]]:
+        if not sync_dates:
+            return []
+        parsed_days = sorted(
+            {
+                datetime.strptime(str(item).strip(), "%Y-%m-%d").date()
+                for item in sync_dates
+                if str(item).strip()
+            }
+        )
+        if not parsed_days:
+            return []
+        ranges: list[tuple[str, str]] = []
+        start_day = parsed_days[0]
+        end_day = parsed_days[0]
+        for current_day in parsed_days[1:]:
+            if current_day == end_day + timedelta(days=1):
+                end_day = current_day
+                continue
+            ranges.append((start_day.strftime("%Y-%m-%d"), end_day.strftime("%Y-%m-%d")))
+            start_day = current_day
+            end_day = current_day
+        ranges.append((start_day.strftime("%Y-%m-%d"), end_day.strftime("%Y-%m-%d")))
+        return ranges
+
+    def _comment_sync_state_map(
+        self,
+        conn: Any,
+        advertiser_ids: set[int],
+        sync_dates: list[str],
+    ) -> dict[tuple[int, str], dict[str, Any]]:
+        normalized_dates = [str(item).strip() for item in sync_dates if str(item).strip()]
+        if not advertiser_ids or not normalized_dates:
+            return {}
+        advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
+        date_placeholders = ",".join("?" for _ in normalized_dates)
+        params: list[Any] = [*normalized_dates, *sorted(advertiser_ids), self._current_customer_center_id()]
+        rows = conn.execute(
+            f"""
+            SELECT advertiser_id, sync_date, advertiser_name, status, comment_count, last_attempt_at, last_success_at, error_message
+            FROM comment_sync_states
+            WHERE sync_date IN ({date_placeholders})
+              AND advertiser_id IN ({advertiser_placeholders})
+              AND customer_center_id = ?
+            """,
+            params,
+        ).fetchall()
+        return {
+            (int(row["advertiser_id"]), str(row["sync_date"] or "").strip()): dict(row)
+            for row in rows
+        }
+
+    def _should_sync_comment_date(
+        self,
+        state_row: dict[str, Any] | None,
+        sync_date: str,
+        hot_cutoff_date: str,
+        now_local: datetime,
+        force_refresh: bool = False,
+    ) -> bool:
+        if force_refresh:
+            return True
+        if not state_row:
+            return True
+        status = str(state_row.get("status") or "").strip().lower()
+        last_success_at = self._parse_normalized_datetime_text(state_row.get("last_success_at"))
+        last_attempt_at = self._parse_normalized_datetime_text(state_row.get("last_attempt_at"))
+        if status != "ok":
+            if last_attempt_at is None:
+                return True
+            return max((now_local - last_attempt_at).total_seconds(), 0.0) >= RANGE_CACHE_SECONDS
+        if sync_date >= hot_cutoff_date:
+            if last_success_at is None:
+                return True
+            return max((now_local - last_success_at).total_seconds(), 0.0) >= RANGE_CACHE_SECONDS
+        return False
+
+    def _comment_sync_plans(
+        self,
+        conn: Any,
+        accounts: list[dict[str, Any]],
+        start_dt: datetime,
+        end_dt: datetime,
+        tz_name: str,
+        force_refresh: bool = False,
+    ) -> list[dict[str, Any]]:
+        requested_dates = self._comment_requested_dates(start_dt, end_dt)
+        advertiser_ids = {int(item["advertiser_id"]) for item in accounts if int(item.get("advertiser_id", 0) or 0)}
+        state_map = self._comment_sync_state_map(conn, advertiser_ids, requested_dates)
+        now_local = datetime.now(ZoneInfo(tz_name)).replace(tzinfo=None)
+        hot_cutoff_date = (now_local.date() - timedelta(days=max(COMMENT_INCREMENTAL_HOT_DAYS - 1, 0))).strftime(
+            "%Y-%m-%d"
+        )
+        plans: list[dict[str, Any]] = []
+        for account in accounts:
+            advertiser_id = int(account.get("advertiser_id", 0) or 0)
+            if not advertiser_id:
+                continue
+            advertiser_name = str(account.get("advertiser_name") or advertiser_id).strip()
+            required_dates = [
+                sync_date
+                for sync_date in requested_dates
+                if self._should_sync_comment_date(
+                    state_map.get((advertiser_id, sync_date)),
+                    sync_date,
+                    hot_cutoff_date,
+                    now_local,
+                    force_refresh=force_refresh,
+                )
+            ]
+            for range_start, range_end in self._comment_sync_ranges(required_dates):
+                plans.append(
+                    {
+                        "advertiser_id": advertiser_id,
+                        "advertiser_name": advertiser_name,
+                        "start_date": range_start,
+                        "end_date": range_end,
+                    }
+                )
+        return plans
+
+    def _persist_comment_sync_success(
+        self,
+        conn: Any,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_date: str,
+        end_date: str,
+        records: list[dict[str, Any]],
+        attempted_at: str,
+    ) -> None:
+        customer_center_id = self._current_customer_center_id()
+        conn.execute(
+            """
+            DELETE FROM comment_records
+            WHERE customer_center_id = ?
+              AND advertiser_id = ?
+              AND comment_date >= ?
+              AND comment_date <= ?
+            """,
+            (customer_center_id, int(advertiser_id), str(start_date).strip(), str(end_date).strip()),
+        )
+        if records:
+            conn.executemany(
+                """
+                INSERT INTO comment_records (
+                    customer_center_id, advertiser_id, comment_id, comment_date, create_time, advertiser_name, text,
+                    reply_count, hide_status, level_type, comment_user_name, comment_user_id, like_count, item_title,
+                    comment_type, promotion_id, material_id, item_id, raw_json, fetched_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (customer_center_id, advertiser_id, comment_id) DO UPDATE SET
+                    comment_date = excluded.comment_date,
+                    create_time = excluded.create_time,
+                    advertiser_name = excluded.advertiser_name,
+                    text = excluded.text,
+                    reply_count = excluded.reply_count,
+                    hide_status = excluded.hide_status,
+                    level_type = excluded.level_type,
+                    comment_user_name = excluded.comment_user_name,
+                    comment_user_id = excluded.comment_user_id,
+                    like_count = excluded.like_count,
+                    item_title = excluded.item_title,
+                    comment_type = excluded.comment_type,
+                    promotion_id = excluded.promotion_id,
+                    material_id = excluded.material_id,
+                    item_id = excluded.item_id,
+                    raw_json = excluded.raw_json,
+                    fetched_at = excluded.fetched_at,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (
+                        customer_center_id,
+                        int(record["advertiser_id"]),
+                        str(record["comment_id"]),
+                        str(record["comment_date"] or ""),
+                        str(record["create_time"] or ""),
+                        str(record["advertiser_name"] or advertiser_name or advertiser_id),
+                        str(record["text"] or ""),
+                        self._safe_int(record.get("reply_count", 0)),
+                        str(record["hide_status"] or "NOT_HIDE"),
+                        str(record["level_type"] or ""),
+                        str(record["comment_user_name"] or ""),
+                        str(record["comment_user_id"] or ""),
+                        self._safe_int(record.get("like_count", 0)),
+                        str(record["item_title"] or ""),
+                        str(record["comment_type"] or ""),
+                        str(record["promotion_id"] or ""),
+                        str(record["material_id"] or ""),
+                        str(record["item_id"] or ""),
+                        str(record["raw_json"] or "{}"),
+                        str(record["fetched_at"] or attempted_at),
+                        str(record["updated_at"] or attempted_at),
+                    )
+                    for record in records
+                ],
+            )
+        requested_dates = self._comment_requested_dates(
+            datetime.strptime(str(start_date).strip(), "%Y-%m-%d"),
+            datetime.strptime(str(end_date).strip(), "%Y-%m-%d"),
+        )
+        date_counts = {sync_date: 0 for sync_date in requested_dates}
+        for record in records:
+            sync_date = str(record.get("comment_date") or "").strip()
+            if sync_date in date_counts:
+                date_counts[sync_date] += 1
+        conn.executemany(
+            """
+            INSERT INTO comment_sync_states (
+                customer_center_id, advertiser_id, sync_date, advertiser_name, status, comment_count,
+                last_attempt_at, last_success_at, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (customer_center_id, advertiser_id, sync_date) DO UPDATE SET
+                advertiser_name = excluded.advertiser_name,
+                status = excluded.status,
+                comment_count = excluded.comment_count,
+                last_attempt_at = excluded.last_attempt_at,
+                last_success_at = excluded.last_success_at,
+                error_message = excluded.error_message
+            """,
+            [
+                (
+                    customer_center_id,
+                    int(advertiser_id),
+                    sync_date,
+                    str(advertiser_name or advertiser_id),
+                    "ok",
+                    int(date_counts.get(sync_date, 0)),
+                    attempted_at,
+                    attempted_at,
+                    "",
+                )
+                for sync_date in requested_dates
+            ],
+        )
+
+    def _persist_comment_sync_error(
+        self,
+        conn: Any,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_date: str,
+        end_date: str,
+        error_message: str,
+        attempted_at: str,
+    ) -> None:
+        customer_center_id = self._current_customer_center_id()
+        requested_dates = self._comment_requested_dates(
+            datetime.strptime(str(start_date).strip(), "%Y-%m-%d"),
+            datetime.strptime(str(end_date).strip(), "%Y-%m-%d"),
+        )
+        conn.executemany(
+            """
+            INSERT INTO comment_sync_states (
+                customer_center_id, advertiser_id, sync_date, advertiser_name, status, comment_count,
+                last_attempt_at, last_success_at, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (customer_center_id, advertiser_id, sync_date) DO UPDATE SET
+                advertiser_name = excluded.advertiser_name,
+                status = excluded.status,
+                comment_count = excluded.comment_count,
+                last_attempt_at = excluded.last_attempt_at,
+                error_message = excluded.error_message
+            """,
+            [
+                (
+                    customer_center_id,
+                    int(advertiser_id),
+                    sync_date,
+                    str(advertiser_name or advertiser_id),
+                    "error",
+                    0,
+                    attempted_at,
+                    "",
+                    str(error_message or ""),
+                )
+                for sync_date in requested_dates
+            ],
+        )
+
+    def _stored_comment_records(
+        self,
+        conn: Any,
+        advertiser_ids: set[int],
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        if not advertiser_ids:
+            return []
+        advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
+        params: list[Any] = [
+            self._current_customer_center_id(),
+            str(start_date).strip(),
+            str(end_date).strip(),
+            *sorted(advertiser_ids),
+        ]
+        rows = conn.execute(
+            f"""
+            SELECT
+                advertiser_id, advertiser_name, comment_id, comment_date, create_time, text, reply_count, hide_status,
+                level_type, comment_user_name, comment_user_id, like_count, item_title, comment_type, promotion_id,
+                material_id, item_id, raw_json, fetched_at, updated_at
+            FROM comment_records
+            WHERE customer_center_id = ?
+              AND comment_date >= ?
+              AND comment_date <= ?
+              AND advertiser_id IN ({advertiser_placeholders})
+            ORDER BY create_time DESC, like_count DESC, reply_count DESC, comment_id DESC
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _mark_comment_replied(self, conn: Any, advertiser_id: int, comment_id: str, updated_at: str) -> None:
+        row = conn.execute(
+            """
+            SELECT reply_count
+            FROM comment_records
+            WHERE customer_center_id = ?
+              AND advertiser_id = ?
+              AND comment_id = ?
+            LIMIT 1
+            """,
+            (self._current_customer_center_id(), int(advertiser_id), str(comment_id).strip()),
+        ).fetchone()
+        if not row:
+            return
+        next_reply_count = max(1, self._safe_int(row["reply_count"]))
+        conn.execute(
+            """
+            UPDATE comment_records
+            SET reply_count = ?, updated_at = ?, fetched_at = ?
+            WHERE customer_center_id = ?
+              AND advertiser_id = ?
+              AND comment_id = ?
+            """,
+            (
+                next_reply_count,
+                str(updated_at or ""),
+                str(updated_at or ""),
+                self._current_customer_center_id(),
+                int(advertiser_id),
+                str(comment_id).strip(),
+            ),
+        )
+
+    def _mark_comment_hidden(self, conn: Any, advertiser_id: int, comment_id: str, updated_at: str) -> None:
+        conn.execute(
+            """
+            UPDATE comment_records
+            SET hide_status = 'HIDE', updated_at = ?, fetched_at = ?
+            WHERE customer_center_id = ?
+              AND advertiser_id = ?
+              AND comment_id = ?
+            """,
+            (
+                str(updated_at or ""),
+                str(updated_at or ""),
+                self._current_customer_center_id(),
+                int(advertiser_id),
+                str(comment_id).strip(),
+            ),
+        )
+
     def comment_items(
         self,
         range_key: str = "day",
@@ -4350,6 +4908,7 @@ class DashboardService:
         end_date: str = "",
         advertiser_id: int | None = None,
         allowed_advertiser_ids: set[int] | None = None,
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
         normalized = str(range_key or "day").strip().lower()
         if normalized not in PERFORMANCE_RANGES:
@@ -4370,7 +4929,7 @@ class DashboardService:
         )
         cached = self._comment_cache.get(cache_key)
         now_ts = time.time()
-        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
+        if not force_refresh and cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
             return dict(cached["payload"])
 
         client = self.build_client(config)
@@ -4405,35 +4964,88 @@ class DashboardService:
         comment_end_date = end_dt.strftime("%Y-%m-%d")
         window_start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         window_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-        max_workers = max(1, min(int(config.get("comment_max_workers", 4) or 4), len(accounts)))
-        items: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            future_map = {
-                pool.submit(
-                    self._fetch_account_comments,
-                    client,
-                    int(account["advertiser_id"]),
-                    str(account["advertiser_name"]),
-                    comment_start_date,
-                    comment_end_date,
-                ): account
-                for account in accounts
-            }
-            for future in as_completed(future_map):
-                account_items, error_payload = future.result()
-                items.extend(account_items)
-                if error_payload:
-                    errors.append(error_payload)
-
-        advertiser_ids = {int(item["advertiser_id"]) for item in items if int(item.get("advertiser_id", 0) or 0)}
-        promotion_ids = {
-            int(str(item.get("promotion_id") or "").strip())
-            for item in items
-            if str(item.get("promotion_id") or "").strip().isdigit()
-        }
-        material_ids = {str(item.get("material_id") or "").strip() for item in items if str(item.get("material_id") or "").strip()}
+        account_ids = {int(account["advertiser_id"]) for account in accounts if int(account.get("advertiser_id", 0) or 0)}
         with self.db() as conn:
+            sync_plans = self._comment_sync_plans(
+                conn,
+                accounts,
+                start_dt,
+                end_dt,
+                config["timezone"],
+                force_refresh=force_refresh,
+            )
+
+        if sync_plans:
+            max_workers = max(1, min(int(config.get("comment_max_workers", 4) or 4), len(sync_plans)))
+            sync_results: list[tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]] = []
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_map = {
+                    pool.submit(
+                        self._fetch_account_comments,
+                        client,
+                        int(plan["advertiser_id"]),
+                        str(plan["advertiser_name"]),
+                        str(plan["start_date"]),
+                        str(plan["end_date"]),
+                    ): plan
+                    for plan in sync_plans
+                }
+                for future in as_completed(future_map):
+                    plan = future_map[future]
+                    account_items, error_payload = future.result()
+                    sync_results.append((plan, account_items, error_payload))
+                    if error_payload:
+                        errors.append(error_payload)
+
+            with self.db() as conn:
+                for plan, account_items, error_payload in sync_results:
+                    attempted_at = now_text(config["timezone"])
+                    if error_payload:
+                        self._persist_comment_sync_error(
+                            conn,
+                            int(plan["advertiser_id"]),
+                            str(plan["advertiser_name"]),
+                            str(plan["start_date"]),
+                            str(plan["end_date"]),
+                            str(error_payload.get("error") or ""),
+                            attempted_at,
+                        )
+                        continue
+                    records = [
+                        self._comment_record_from_item(item, attempted_at, str(plan["start_date"]))
+                        for item in account_items
+                        if str(item.get("comment_id") or "").strip()
+                    ]
+                    self._persist_comment_sync_success(
+                        conn,
+                        int(plan["advertiser_id"]),
+                        str(plan["advertiser_name"]),
+                        str(plan["start_date"]),
+                        str(plan["end_date"]),
+                        records,
+                        attempted_at,
+                    )
+            self._comment_cache.clear()
+
+        items: list[dict[str, Any]] = []
+        advertiser_ids: set[int] = set()
+        promotion_ids: set[int] = set()
+        material_ids: set[str] = set()
+        with self.db() as conn:
+            stored_rows = self._stored_comment_records(conn, account_ids, comment_start_date, comment_end_date)
+            items = [self._comment_item_from_record(row) for row in stored_rows]
+            advertiser_ids = {int(item["advertiser_id"]) for item in items if int(item.get("advertiser_id", 0) or 0)}
+            promotion_ids = {
+                int(str(item.get("promotion_id") or "").strip())
+                for item in items
+                if str(item.get("promotion_id") or "").strip().isdigit()
+            }
+            material_ids = {
+                str(item.get("material_id") or "").strip()
+                for item in items
+                if str(item.get("material_id") or "").strip()
+            }
             plan_map, fallback_plan_map = self._comment_plan_name_maps(conn, advertiser_ids, promotion_ids)
             material_map, fallback_material_map = self._comment_material_name_maps(conn, advertiser_ids, material_ids)
 
@@ -4509,6 +5121,9 @@ class DashboardService:
             raise ValueError(f"reply_text must be <= {COMMENT_REPLY_MAX_LENGTH} chars")
         client = self.build_client(self.read_config())
         response = client.reply_comments(advertiser_id_value, [comment_text], reply_body)
+        updated_at = now_text(self.read_config()["timezone"])
+        with self.db() as conn:
+            self._mark_comment_replied(conn, advertiser_id_value, comment_text, updated_at)
         self._comment_cache.clear()
         return {
             "ok": True,
@@ -4534,6 +5149,9 @@ class DashboardService:
             raise ValueError("comment_id is required")
         client = self.build_client(self.read_config())
         response = client.hide_comments(advertiser_id_value, [comment_text])
+        updated_at = now_text(self.read_config()["timezone"])
+        with self.db() as conn:
+            self._mark_comment_hidden(conn, advertiser_id_value, comment_text, updated_at)
         self._comment_cache.clear()
         return {
             "ok": True,
@@ -6202,6 +6820,7 @@ class DashboardService:
 
     def cleanup_history(self) -> None:
         base_cutoff = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+        base_cutoff_date = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
         extended_cutoff = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=EXTENDED_RETENTION_DAYS)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -6212,6 +6831,8 @@ class DashboardService:
             conn.execute("DELETE FROM account_balances WHERE snapshot_time < ?", (base_cutoff,))
             conn.execute("DELETE FROM shared_wallets WHERE snapshot_time < ?", (base_cutoff,))
             conn.execute("DELETE FROM shared_wallet_account_relations WHERE snapshot_time < ?", (base_cutoff,))
+            conn.execute("DELETE FROM comment_records WHERE comment_date < ?", (base_cutoff_date,))
+            conn.execute("DELETE FROM comment_sync_states WHERE sync_date < ?", (base_cutoff_date,))
             conn.execute("DELETE FROM plan_detail_snapshots WHERE snapshot_time < ?", (extended_cutoff,))
             conn.execute("DELETE FROM product_snapshots WHERE snapshot_time < ?", (extended_cutoff,))
             conn.execute("DELETE FROM material_snapshots WHERE snapshot_time < ?", (extended_cutoff,))

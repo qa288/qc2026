@@ -40,6 +40,62 @@ MIGRATIONS: tuple[Migration, ...] = (
         name="customer_center_scoped_snapshots",
         sql="SELECT 1;",
     ),
+    Migration(
+        version=5,
+        name="comment_storage",
+        sql="""
+        CREATE TABLE IF NOT EXISTS comment_records (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            advertiser_id BIGINT NOT NULL,
+            comment_id TEXT NOT NULL,
+            comment_date TEXT NOT NULL DEFAULT '',
+            create_time TEXT NOT NULL DEFAULT '',
+            advertiser_name TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL DEFAULT '',
+            reply_count INTEGER NOT NULL DEFAULT 0,
+            hide_status TEXT NOT NULL DEFAULT 'NOT_HIDE',
+            level_type TEXT NOT NULL DEFAULT '',
+            comment_user_name TEXT NOT NULL DEFAULT '',
+            comment_user_id TEXT NOT NULL DEFAULT '',
+            like_count INTEGER NOT NULL DEFAULT 0,
+            item_title TEXT NOT NULL DEFAULT '',
+            comment_type TEXT NOT NULL DEFAULT '',
+            promotion_id TEXT NOT NULL DEFAULT '',
+            material_id TEXT NOT NULL DEFAULT '',
+            item_id TEXT NOT NULL DEFAULT '',
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            fetched_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (customer_center_id, advertiser_id, comment_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_comment_records_cc_date_adv
+        ON comment_records (customer_center_id, comment_date, advertiser_id, create_time);
+        CREATE INDEX IF NOT EXISTS idx_comment_records_cc_promotion
+        ON comment_records (customer_center_id, advertiser_id, promotion_id);
+        CREATE INDEX IF NOT EXISTS idx_comment_records_cc_material
+        ON comment_records (customer_center_id, advertiser_id, material_id);
+
+        CREATE TABLE IF NOT EXISTS comment_sync_states (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            advertiser_id BIGINT NOT NULL,
+            sync_date TEXT NOT NULL,
+            advertiser_name TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            comment_count INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at TEXT NOT NULL DEFAULT '',
+            last_success_at TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (customer_center_id, advertiser_id, sync_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_comment_sync_states_cc_date_adv
+        ON comment_sync_states (customer_center_id, sync_date, advertiser_id);
+        """,
+    ),
+    Migration(
+        version=6,
+        name="comment_storage_bigint",
+        sql="SELECT 1;",
+    ),
 )
 
 

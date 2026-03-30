@@ -4140,6 +4140,9 @@ async function fetchComments(force = false) {
   if (advertiserId > 0) {
     params.set("advertiser_id", String(advertiserId));
   }
+  if (force) {
+    params.set("force", "1");
+  }
   const response = await fetch(`/api/comments?${params.toString()}`).catch(() => null);
   if (!response || !response.ok) {
     const errorPayload = response ? await response.json().catch(() => ({})) : {};

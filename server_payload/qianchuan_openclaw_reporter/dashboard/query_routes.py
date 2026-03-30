@@ -221,6 +221,7 @@ def register_query_routes(
         start_date: str = "",
         end_date: str = "",
         advertiser_id: int = 0,
+        force: bool = False,
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
@@ -232,6 +233,7 @@ def register_query_routes(
                 end_date,
                 advertiser_id,
                 allowed,
+                force,
             )
             payload = service._apply_comment_scope(payload, user)
         except PermissionError as exc:
