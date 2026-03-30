@@ -908,7 +908,8 @@ function planSourceTone(source) {
 
 function renderPlanSourceBadge(row) {
   const source = String(row?.plan_source || "").trim().toUpperCase();
-  const text = row?.plan_source_text || (source === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u4e58\u65b9\u6295\u653e");
+  const deliveryType = String(row?.plan_delivery_type || "").trim().toUpperCase();
+  const text = row?.plan_source_text || (deliveryType === "CUBIC" ? "\u4e58\u65b9\u6295\u653e" : "\u5168\u57df\u6295\u653e");
   const tone = planSourceTone(source);
   const title = source || text;
   return `<span class="pill plan-source-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
@@ -923,7 +924,7 @@ function enrichPlanRow(row) {
   const refundAmount1h = Number(row?.refund_amount_1h || 0);
   return {
     ...row,
-    plan_source_text: row?.plan_source_text || (String(row?.plan_source || "").trim().toUpperCase() === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u4e58\u65b9\u6295\u653e"),
+    plan_source_text: row?.plan_source_text || (String(row?.plan_delivery_type || "").trim().toUpperCase() === "CUBIC" ? "\u4e58\u65b9\u6295\u653e" : "\u5168\u57df\u6295\u653e"),
     marketing_goal_text: row?.marketing_goal_text || row?.marketing_goal_label || row?.marketing_goal || "-",
     status_text: row?.status_text || `${row?.status || ""}/${row?.opt_status || ""}`,
     settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),

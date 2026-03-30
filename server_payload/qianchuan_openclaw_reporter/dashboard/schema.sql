@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS plan_snapshots (
     anchor_name TEXT NOT NULL,
     marketing_goal TEXT NOT NULL,
     plan_source TEXT NOT NULL DEFAULT 'UNI_PROMOTION',
+    plan_delivery_type TEXT NOT NULL DEFAULT 'GLOBAL',
     status TEXT NOT NULL,
     opt_status TEXT NOT NULL,
     roi_goal REAL NOT NULL,

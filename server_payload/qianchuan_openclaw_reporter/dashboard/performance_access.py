@@ -206,6 +206,8 @@ class PerformanceAccess:
                 group["settled_order_count"] = 0
                 group["refund_amount_1h"] = 0.0
                 groups[ad_id] = group
+            if str(row.get("plan_delivery_type") or "").strip().upper() == "CUBIC":
+                group["plan_delivery_type"] = "CUBIC"
             group["stat_cost"] = round(
                 float(group.get("stat_cost", 0.0) or 0.0) + float(row.get("stat_cost", 0.0) or 0.0),
                 2,

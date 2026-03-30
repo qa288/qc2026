@@ -33,9 +33,10 @@ if str(ROOT_DIR) not in sys.path:
 from report_qianchuan import (  # noqa: E402
     ACCESS_TOKEN_URL,
     CUSTOMER_CENTER_URL,
+    PLAN_DELIVERY_TYPE_CUBIC,
+    PLAN_DELIVERY_TYPE_GLOBAL,
     PLAN_MATERIAL_TYPES,
     PLAN_PRODUCT_FIELDS,
-    PLAN_SOURCE_STANDARD,
     PLAN_SOURCE_UNI_PROMOTION,
     REFRESH_URL,
     AccountSummary,
@@ -731,6 +732,7 @@ class DashboardService:
 
     def _ensure_plan_snapshot_schema_locked(self, conn: Any) -> None:
         self._ensure_column_locked(conn, "plan_snapshots", "plan_source", "TEXT NOT NULL DEFAULT 'UNI_PROMOTION'")
+        self._ensure_column_locked(conn, "plan_snapshots", "plan_delivery_type", "TEXT NOT NULL DEFAULT 'GLOBAL'")
         self._ensure_column_locked(conn, "plan_snapshots", "raw_json", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column_locked(conn, "plan_snapshots", "total_pay_amount", "REAL NOT NULL DEFAULT 0")
         self._ensure_column_locked(conn, "plan_snapshots", "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
@@ -2767,7 +2769,11 @@ class DashboardService:
     def _decorate_plan_item(row: Any) -> dict[str, Any]:
         item = dict(row)
         item["plan_source"] = str(item.get("plan_source") or PLAN_SOURCE_UNI_PROMOTION).strip().upper()
-        item["plan_source_text"] = "基础投放" if item["plan_source"] == PLAN_SOURCE_STANDARD else "乘方投放"
+        delivery_type = str(item.get("plan_delivery_type") or PLAN_DELIVERY_TYPE_GLOBAL).strip().upper()
+        if delivery_type not in {PLAN_DELIVERY_TYPE_GLOBAL, PLAN_DELIVERY_TYPE_CUBIC}:
+            delivery_type = PLAN_DELIVERY_TYPE_GLOBAL
+        item["plan_delivery_type"] = delivery_type
+        item["plan_source_text"] = "乘方投放" if delivery_type == PLAN_DELIVERY_TYPE_CUBIC else "全域投放"
         item["marketing_goal_label"] = plan_marketing_goal_label(item["marketing_goal"])
         if item["marketing_goal_label"]:
             item["marketing_goal_text"] = f"{item['plan_source_text']} / {item['marketing_goal_label']}"
@@ -7103,11 +7109,11 @@ class DashboardService:
                 """
                 INSERT INTO plan_snapshots (
                     snapshot_time, customer_center_id, advertiser_id, advertiser_name, ad_id, ad_name,
-                    product_id, product_name, anchor_name, marketing_goal, plan_source, status,
+                    product_id, product_name, anchor_name, marketing_goal, plan_source, plan_delivery_type, status,
                     opt_status, roi_goal, stat_cost, roi, order_count, pay_amount,
                     total_pay_amount, settled_pay_amount, settled_roi, settled_order_count,
                     pay_order_cost, settled_amount_rate, refund_rate_1h, refund_amount_1h
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -7122,6 +7128,7 @@ class DashboardService:
                         item["anchor_name"],
                         item["marketing_goal"],
                         item.get("plan_source", PLAN_SOURCE_UNI_PROMOTION),
+                        item.get("plan_delivery_type", PLAN_DELIVERY_TYPE_GLOBAL),
                         item["status"],
                         item["opt_status"],
                         item["roi_goal"],

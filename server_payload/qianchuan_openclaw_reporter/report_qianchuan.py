@@ -157,6 +157,8 @@ PLAN_MATERIAL_FIELDS_BY_TYPE = {
 PLAN_MATERIAL_TYPES = ["VIDEO", "IMAGE", "TITLE", "CAROUSEL", "LIVE_ROOM"]
 PLAN_SOURCE_UNI_PROMOTION = "UNI_PROMOTION"
 PLAN_SOURCE_STANDARD = "STANDARD"
+PLAN_DELIVERY_TYPE_GLOBAL = "GLOBAL"
+PLAN_DELIVERY_TYPE_CUBIC = "CUBIC"
 TOKEN_LOCK_KEY = os.environ.get("OCEANENGINE_TOKEN_LOCK_KEY", "qianchuan:oauth:refresh")
 TOKEN_LOCK_TIMEOUT_SECONDS = int(os.environ.get("OCEANENGINE_TOKEN_LOCK_TIMEOUT_SECONDS", "120") or 120)
 TOKEN_LOCK_BLOCKING_TIMEOUT_SECONDS = int(
@@ -234,6 +236,7 @@ class PlanSummary:
     refund_rate_1h: float
     refund_amount_1h: float
     plan_source: str = PLAN_SOURCE_UNI_PROMOTION
+    plan_delivery_type: str = PLAN_DELIVERY_TYPE_GLOBAL
 
 
 class ApiError(RuntimeError):
@@ -1753,6 +1756,7 @@ class OceanEngineClient:
                             ),
                             refund_amount_1h=refund_amount_1h,
                             plan_source=PLAN_SOURCE_UNI_PROMOTION,
+                            plan_delivery_type=PLAN_DELIVERY_TYPE_GLOBAL,
                         )
                     )
                 page_info = data.get("page_info") or {}
@@ -1891,6 +1895,7 @@ class OceanEngineClient:
                     refund_rate_1h=0.0,
                     refund_amount_1h=0.0,
                     plan_source=PLAN_SOURCE_STANDARD,
+                    plan_delivery_type=PLAN_DELIVERY_TYPE_GLOBAL,
                 )
             )
         return plans
@@ -2033,6 +2038,7 @@ class OceanEngineClient:
                     refund_rate_1h=0.0,
                     refund_amount_1h=0.0,
                     plan_source=PLAN_SOURCE_UNI_PROMOTION,
+                    plan_delivery_type=PLAN_DELIVERY_TYPE_CUBIC,
                 )
                 try:
                     detail_response = self.get_plan_detail(advertiser_id, ad_id)
@@ -2096,6 +2102,11 @@ class OceanEngineClient:
             primary.plan_source = PLAN_SOURCE_UNI_PROMOTION
         elif not str(primary.plan_source or "").strip() and str(secondary.plan_source or "").strip():
             primary.plan_source = str(secondary.plan_source)
+
+        if str(secondary.plan_delivery_type or "").strip() == PLAN_DELIVERY_TYPE_CUBIC:
+            primary.plan_delivery_type = PLAN_DELIVERY_TYPE_CUBIC
+        elif not str(primary.plan_delivery_type or "").strip() and str(secondary.plan_delivery_type or "").strip():
+            primary.plan_delivery_type = str(secondary.plan_delivery_type)
         return primary
 
     def list_plan_summaries(
