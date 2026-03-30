@@ -2345,6 +2345,11 @@ body {
   font-size: 12px;
 }
 
+.cell-subline-stack {
+  display: grid;
+  gap: 4px;
+}
+
 .cell-subitem {
   display: inline-flex;
   align-items: center;

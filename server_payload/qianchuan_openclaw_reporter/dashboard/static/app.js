@@ -3669,9 +3669,9 @@ function renderTeamMaterialTable(rows) {
         <tr>
           <td>
             <div class="cell-primary">${escapeHtml(row.material_name || "未命名素材")}</div>
-            <div class="cell-subline">
-              <span class="cell-subitem">MID ${escapeHtml(row.material_id || "--")}</span>
-              <span class="cell-subitem">VID ${escapeHtml(row.video_id || "--")}</span>
+            <div class="cell-subline cell-subline-stack mono">
+              <span class="cell-subitem" title="素材 ID：${escapeHtml(row.material_id || "-")}">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
+              <span class="cell-subitem" title="视频 ID：${escapeHtml(row.video_id || "-")}">VID ${escapeHtml(truncateMiddle(row.video_id || "-", 8, 6))}</span>
             </div>
           </td>
           <td>
@@ -5638,7 +5638,7 @@ function applyRoleViewPolicy() {
       : ["breakdown", "materials", "team-materials"];
   if (overviewTab) {
     overviewTab.classList.toggle("hidden", operator);
-    overviewTab.textContent = "鎬昏";
+    overviewTab.textContent = "总览";
   }
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
