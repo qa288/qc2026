@@ -5353,18 +5353,15 @@ function openMaterialPreviewFromRow(row) {
     awemeLink ? `<a class="button ghost compact" href="${escapeHtml(awemeLink)}" target="_blank" rel="noreferrer">打开抖音作品</a>` : "",
     directVideoUrl ? `<a class="button ghost compact" href="${escapeHtml(directVideoUrl)}" target="_blank" rel="noreferrer">打开原始视频</a>` : "",
   ].filter(Boolean).join("");
-  materialPreviewBody.innerHTML = `
-    <div class="preview-media-shell">
-      <div class="preview-media-stage">${previewBlock}</div>
-      <div class="preview-curve-panel" data-role="preview-curve-panel">${materialPreviewCurveLoadingMarkup()}</div>
-    </div>
-    <div class="preview-detail-grid">
-      ${operatorMode
-        ? ""
-        : `
+  const detailStatsMarkup = operatorMode
+    ? `
+      <div class="preview-stat"><span>达人</span><strong>${escapeHtml(row.top_anchor_name || "--")}</strong></div>
+      <div class="preview-stat"><span>消耗</span><strong class="mono">${formatMoney(row.stat_cost)}</strong></div>
+      <div class="preview-stat"><span>整体点击率</span><strong class="mono">${formatPercent(row.overall_ctr)}</strong></div>
+    `
+    : `
       <div class="preview-stat"><span>归属账户</span><strong>${escapeHtml(row.top_account_name || "--")}</strong></div>
       <div class="preview-stat"><span>归属计划</span><strong>${escapeHtml(row.top_plan_name || "--")}</strong></div>
-      `}
       <div class="preview-stat"><span>达人</span><strong>${escapeHtml(row.top_anchor_name || "--")}</strong></div>
       <div class="preview-stat"><span>消耗</span><strong class="mono">${formatMoney(row.stat_cost)}</strong></div>
       <div class="preview-stat"><span>整体成交</span><strong class="mono">${formatMaterialTotalPayAmount(row)}</strong></div>
@@ -5375,6 +5372,14 @@ function openMaterialPreviewFromRow(row) {
       <div class="preview-stat"><span>覆盖计划</span><strong class="mono">${formatNumber(row.plan_count)}</strong></div>
       <div class="preview-stat"><span>素材 ID</span><strong class="mono">${escapeHtml(row.material_id || "--")}</strong></div>
       <div class="preview-stat"><span>视频 ID</span><strong class="mono">${escapeHtml(row.video_id || "--")}</strong></div>
+    `;
+  materialPreviewBody.innerHTML = `
+    <div class="preview-media-shell">
+      <div class="preview-media-stage">${previewBlock}</div>
+      <div class="preview-curve-panel" data-role="preview-curve-panel">${materialPreviewCurveLoadingMarkup()}</div>
+    </div>
+    <div class="preview-detail-grid">
+      ${detailStatsMarkup}
     </div>
     ${extraActions ? `<div class="preview-actions">${extraActions}</div>` : ""}
   `;
@@ -5602,10 +5607,17 @@ function applyRoleViewPolicy() {
   const admin = isAdmin();
   const supervisor = isSupervisor();
   const operator = isOperator();
+  const customerCenterShell = customerCenterChip?.closest(".customer-center-shell");
   if (document.body) {
     document.body.classList.toggle("role-admin", admin);
     document.body.classList.toggle("role-supervisor", supervisor);
     document.body.classList.toggle("role-operator", operator);
+  }
+  if (operator) {
+    state.oceanEnginePopoverOpen = false;
+  }
+  if (customerCenterShell) {
+    customerCenterShell.classList.toggle("hidden", operator);
   }
   const accessTab = viewTabs?.querySelector('[data-view="access"]');
   const signalsTab = viewTabs?.querySelector('[data-view="signals"]');
