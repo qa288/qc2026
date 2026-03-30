@@ -5601,6 +5601,11 @@ function applyRoleViewPolicy() {
   const admin = isAdmin();
   const supervisor = isSupervisor();
   const operator = isOperator();
+  if (document.body) {
+    document.body.classList.toggle("role-admin", admin);
+    document.body.classList.toggle("role-supervisor", supervisor);
+    document.body.classList.toggle("role-operator", operator);
+  }
   const accessTab = viewTabs?.querySelector('[data-view="access"]');
   const signalsTab = viewTabs?.querySelector('[data-view="signals"]');
   const accountTab = viewTabs?.querySelector('[data-view="accounts"]');
