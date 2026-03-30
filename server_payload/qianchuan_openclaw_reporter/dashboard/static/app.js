@@ -2386,11 +2386,13 @@ function renderOceanEngineBoundAccounts(config) {
     const customerCenterId = String(item.customer_center_id || "").trim();
     const isCurrent = Boolean(item.is_current);
     const isPending = customerCenterId && customerCenterId === state.oceanEnginePendingCustomerCenterId;
-    const badges = [
-      isCurrent ? '<span class="customer-center-bound-badge">当前</span>' : "",
-      item.is_override_customer_center ? '<span class="customer-center-bound-badge subtle">运行中</span>' : "",
-      item.is_base_customer_center ? '<span class="customer-center-bound-badge subtle">默认</span>' : "",
-    ].filter(Boolean).join("");
+    const badges = allScopeActive
+      ? ""
+      : [
+        isCurrent ? '<span class="customer-center-bound-badge">当前</span>' : "",
+        item.is_override_customer_center ? '<span class="customer-center-bound-badge subtle">运行中</span>' : "",
+        item.is_base_customer_center ? '<span class="customer-center-bound-badge subtle">默认</span>' : "",
+      ].filter(Boolean).join("");
     const tokenMeta = `Token ${item.token_updated_at ? formatAgoFromEpoch(item.token_updated_at) : "未记录"}${item.token_source ? ` / ${escapeHtml(item.token_source)}` : ""}`;
     const snapshotMeta = item.latest_snapshot_time
       ? `主快照 ${escapeHtml(item.latest_snapshot_time)} · 账号 ${formatNumber(item.account_count || 0)} / 活跃 ${formatNumber(item.active_account_count || 0)} · 计划 ${formatNumber(item.plan_count || 0)}`
