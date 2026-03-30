@@ -6,7 +6,7 @@ from bridge_send_alerts import dispatch_once
 
 
 def _prepare() -> None:
-    service.init_db()
+    service.init_db_once()
     service.bootstrap_token_store()
 
 
@@ -32,6 +32,12 @@ def sync_dashboard_detail(force_refresh: bool = False) -> dict:
 def backfill_dashboard_performance(days: int = 30) -> dict:
     _prepare()
     return service.backfill_recent_performance_history(int(days or 30))
+
+
+@celery_app.task(name="dashboard.performance_refresh_recent")
+def refresh_dashboard_performance(days: int = 30) -> dict:
+    _prepare()
+    return service.refresh_recent_performance_history(int(days or 30))
 
 
 @celery_app.task(name="dashboard.detail_backfill")

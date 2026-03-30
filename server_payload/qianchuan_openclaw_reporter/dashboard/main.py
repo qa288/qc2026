@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, UploadFile, status
@@ -116,11 +118,14 @@ RANGE_LABEL_MAP = {
     "custom": "指定日期范围",
 }
 DETAIL_SYNC_INTERVAL_MINUTES = settings.detail_sync_interval_minutes
+HISTORY_BACKFILL_DAYS = settings.history_backfill_days
 EXTENDED_HISTORY_REFRESH_DAYS = settings.extended_history_refresh_days
 ENABLE_IN_PROCESS_SCHEDULER = settings.enable_in_process_scheduler
 ROLE_ADMIN = "admin"
 ROLE_SUPERVISOR = "supervisor"
 ROLE_OPERATOR = "operator"
+DISPLAY_SCOPE_CURRENT = "current"
+DISPLAY_SCOPE_ALL = "all"
 PUBLIC_SORT_FIELDS = {"stat_cost", "pay_amount", "order_count", "roi"}
 EMPLOYEE_KEYWORD_SCOPES = {"all", "account", "plan", "product", "material"}
 EMPLOYEE_BINDING_TYPES = {"account", "plan", "product", "material"}
@@ -157,6 +162,9 @@ MATERIAL_REPORT_TITLE_METRICS = MATERIAL_REPORT_CORE_METRICS + [
     "total_pay_order_gmv_include_coupon_for_roi2",
     "total_cost_per_pay_order_for_roi2",
 ]
+MATERIAL_PREVIEW_REFRESH_CACHE_SECONDS = 600
+INIT_DB_LOCK_NAMESPACE = 20260330
+INIT_DB_LOCK_KEY = 1
 MATERIAL_REPORT_TOPIC_CONFIGS = {
     "VIDEO": {
         "data_topic": "SITE_PROMOTION_PRODUCT_POST_DATA_VIDEO",
@@ -293,9 +301,12 @@ class DashboardService:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self._sync_lock = asyncio.Lock()
         self._detail_sync_lock = asyncio.Lock()
+        self._db_init_thread_lock = threading.Lock()
+        self._db_init_pid: int | None = None
         self._templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
         self._performance_cache: dict[str, dict[str, Any]] = {}
         self._material_cache: dict[str, dict[str, Any]] = {}
+        self._material_preview_refresh_cache: dict[str, dict[str, Any]] = {}
         self._comment_cache: dict[str, dict[str, Any]] = {}
         self._backfill_queue_marks: dict[str, float] = {}
         self.user_access = UserAccess(
@@ -388,6 +399,7 @@ class DashboardService:
 
     def init_db(self) -> None:
         with self.db() as conn:
+            self._acquire_init_db_lock(conn)
             apply_migrations(conn)
             self._ensure_customer_center_scope_schema_locked(conn)
             self._ensure_plan_snapshot_schema_locked(conn)
@@ -396,6 +408,25 @@ class DashboardService:
             self._ensure_material_preview_schema_locked(conn)
             self._ensure_comment_storage_schema_locked(conn)
             self.alert_access.ensure_notification_settings(conn)
+
+    def init_db_once(self) -> None:
+        current_pid = os.getpid()
+        if self._db_init_pid == current_pid:
+            return
+        with self._db_init_thread_lock:
+            if self._db_init_pid == current_pid:
+                return
+            self.init_db()
+            self._db_init_pid = current_pid
+
+    @staticmethod
+    def _acquire_init_db_lock(conn: Any) -> None:
+        if getattr(conn, "backend", "") != "postgres":
+            return
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(?, ?)",
+            (INIT_DB_LOCK_NAMESPACE, INIT_DB_LOCK_KEY),
+        )
 
     def _column_exists_locked(self, conn: Any, table_name: str, column_name: str) -> bool:
         table = str(table_name or "").strip()
@@ -758,6 +789,126 @@ class DashboardService:
 
     def _current_customer_center_id(self) -> str:
         return str(self.read_config().get("customer_center_id") or "").strip()
+
+    @staticmethod
+    def _normalize_display_scope(display_scope: str) -> str:
+        return DISPLAY_SCOPE_ALL if str(display_scope or "").strip().lower() == DISPLAY_SCOPE_ALL else DISPLAY_SCOPE_CURRENT
+
+    def _display_scope_uses_all_customer_centers(self, display_scope: str) -> bool:
+        return self._normalize_display_scope(display_scope) == DISPLAY_SCOPE_ALL
+
+    @staticmethod
+    def _snapshot_pairs_from_rows(rows: list[dict[str, Any]]) -> set[tuple[str, str]]:
+        return {
+            (
+                str(row.get("customer_center_id") or "").strip(),
+                str(row.get("snapshot_time") or "").strip(),
+            )
+            for row in rows
+            if str(row.get("customer_center_id") or "").strip() and str(row.get("snapshot_time") or "").strip()
+        }
+
+    @staticmethod
+    def _latest_snapshot_pairs_by_customer_center(selected_pairs: set[tuple[str, str]]) -> set[tuple[str, str]]:
+        latest_by_customer_center: dict[str, str] = {}
+        for customer_center_id, snapshot_time in selected_pairs:
+            current_snapshot = latest_by_customer_center.get(customer_center_id, "")
+            if snapshot_time > current_snapshot:
+                latest_by_customer_center[customer_center_id] = snapshot_time
+        return {
+            (customer_center_id, snapshot_time)
+            for customer_center_id, snapshot_time in latest_by_customer_center.items()
+            if customer_center_id and snapshot_time
+        }
+
+    @staticmethod
+    def _filter_rows_for_snapshot_pairs(
+        rows: list[dict[str, Any]],
+        selected_pairs: set[tuple[str, str]],
+    ) -> list[dict[str, Any]]:
+        if not rows or not selected_pairs:
+            return []
+        return [
+            row
+            for row in rows
+            if (
+                str(row.get("customer_center_id") or "").strip(),
+                str(row.get("snapshot_time") or "").strip(),
+            )
+            in selected_pairs
+        ]
+
+    def _latest_extended_sync_all_customer_centers(self) -> dict[str, Any] | None:
+        with self.db() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM extended_sync_runs
+                    WHERE COALESCE(customer_center_id, '') <> ''
+                    ORDER BY snapshot_time DESC, customer_center_id ASC
+                    """
+                ).fetchall()
+            ]
+        latest_rows = self._latest_rows_by_customer_center(rows)
+        if not latest_rows:
+            return None
+        latest_snapshot_time = max(str(row.get("snapshot_time") or "") for row in latest_rows)
+        return {
+            "snapshot_time": latest_snapshot_time,
+            "status": "partial" if any(str(row.get("status") or "") != "ok" for row in latest_rows) else "ok",
+            "plan_count": sum(int(row.get("plan_count") or 0) for row in latest_rows),
+            "detail_count": sum(int(row.get("detail_count") or 0) for row in latest_rows),
+            "product_row_count": sum(int(row.get("product_row_count") or 0) for row in latest_rows),
+            "material_row_count": sum(int(row.get("material_row_count") or 0) for row in latest_rows),
+            "original_video_row_count": sum(int(row.get("original_video_row_count") or 0) for row in latest_rows),
+            "error_count": sum(int(row.get("error_count") or 0) for row in latest_rows),
+            "customer_center_count": len(latest_rows),
+        }
+
+    def _summary_history_all_customer_centers(self, limit: int = 144) -> list[dict[str, Any]]:
+        with self.db() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT snapshot_time, customer_center_id, stat_cost, pay_amount, order_count
+                    FROM summary_snapshots
+                    WHERE COALESCE(customer_center_id, '') <> ''
+                    ORDER BY snapshot_time DESC, customer_center_id ASC
+                    """
+                ).fetchall()
+            ]
+        latest_rows = self._latest_rows_by_customer_center_day(rows)
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in latest_rows:
+            day_key = str(row.get("snapshot_time") or "")[:10]
+            if not day_key:
+                continue
+            bucket = grouped.setdefault(
+                day_key,
+                {
+                    "snapshot_time": "",
+                    "stat_cost": 0.0,
+                    "pay_amount": 0.0,
+                    "order_count": 0,
+                },
+            )
+            snapshot_time = str(row.get("snapshot_time") or "")
+            if snapshot_time > str(bucket.get("snapshot_time") or ""):
+                bucket["snapshot_time"] = snapshot_time
+            bucket["stat_cost"] = round(float(bucket.get("stat_cost", 0.0) or 0.0) + float(row.get("stat_cost", 0.0) or 0.0), 2)
+            bucket["pay_amount"] = round(float(bucket.get("pay_amount", 0.0) or 0.0) + float(row.get("pay_amount", 0.0) or 0.0), 2)
+            bucket["order_count"] = int(bucket.get("order_count", 0) or 0) + int(row.get("order_count") or 0)
+        items = []
+        for day_key in sorted(grouped):
+            item = dict(grouped[day_key])
+            stat_cost = round(float(item.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(item.get("pay_amount", 0.0) or 0.0), 2)
+            item["roi"] = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            items.append(item)
+        return items[-max(int(limit or 0), 0) :] if limit > 0 else items
 
     def _persist_runtime_config_override(
         self,
@@ -1269,15 +1420,25 @@ class DashboardService:
     def alert_events(self, limit: int = 80) -> list[dict[str, Any]]:
         return self.alert_access.alert_events(limit)
 
-    def latest_extended_sync(self) -> dict[str, Any] | None:
+    def latest_extended_sync(self, display_scope: str = DISPLAY_SCOPE_CURRENT) -> dict[str, Any] | None:
+        if self._display_scope_uses_all_customer_centers(display_scope):
+            return self._latest_extended_sync_all_customer_centers()
         return self.snapshot_access.latest_extended_sync()
 
     def plan_assets(
-        self, ad_id: int, snapshot_time: str = "", allowed_advertiser_ids: set[int] | None = None
+        self,
+        ad_id: int,
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
     ) -> dict[str, Any]:
+        if self._display_scope_uses_all_customer_centers(display_scope):
+            return self._plan_assets_all_customer_centers(ad_id, snapshot_time, allowed_advertiser_ids)
         return self.snapshot_access.plan_assets(ad_id, snapshot_time, allowed_advertiser_ids)
 
-    def summary_history(self, limit: int = 144) -> list[dict[str, Any]]:
+    def summary_history(self, limit: int = 144, display_scope: str = DISPLAY_SCOPE_CURRENT) -> list[dict[str, Any]]:
+        if self._display_scope_uses_all_customer_centers(display_scope):
+            return self._summary_history_all_customer_centers(limit)
         return self.snapshot_access.summary_history(limit)
 
     def account_history(
@@ -1813,7 +1974,150 @@ class DashboardService:
     def _performance_snapshot_from_db(self, start_dt: datetime, end_dt: datetime) -> dict[str, Any]:
         return self.performance_access.performance_snapshot_from_db(start_dt, end_dt)
 
-    def latest_snapshot(self, allowed_advertiser_ids: set[int] | None = None) -> dict[str, Any] | None:
+    def _latest_snapshot_all_customer_centers(
+        self,
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> dict[str, Any] | None:
+        with self.db() as conn:
+            summary_rows = self._latest_rows_by_customer_center(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT snapshot_time, customer_center_id
+                        FROM summary_snapshots
+                        WHERE COALESCE(customer_center_id, '') <> ''
+                        ORDER BY snapshot_time DESC, customer_center_id ASC
+                        """
+                    ).fetchall()
+                ]
+            )
+            selected_pairs = self._snapshot_pairs_from_rows(summary_rows)
+            if not selected_pairs:
+                return None
+            snapshot_times = sorted({snapshot_time for _customer_center_id, snapshot_time in selected_pairs})
+            placeholders = ",".join("?" for _ in snapshot_times)
+            account_rows = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM account_snapshots
+                        WHERE snapshot_time IN ({placeholders})
+                        ORDER BY snapshot_time DESC, stat_cost DESC, advertiser_id ASC
+                        """,
+                        snapshot_times,
+                    ).fetchall()
+                ],
+                selected_pairs,
+            )
+            plan_rows = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM plan_snapshots
+                        WHERE snapshot_time IN ({placeholders})
+                        ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
+                        """,
+                        snapshot_times,
+                    ).fetchall()
+                ],
+                selected_pairs,
+            )
+            latest_pairs = self._latest_snapshot_pairs_by_customer_center(selected_pairs)
+            latest_snapshot_times = sorted({snapshot_time for _customer_center_id, snapshot_time in latest_pairs})
+            latest_placeholders = ",".join("?" for _ in latest_snapshot_times)
+            account_balance_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM account_balances
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            shared_wallet_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallets
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            wallet_relation_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallet_account_relations
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+
+        account_items = self.performance_access.aggregate_account_snapshots(account_rows)
+        plan_items = self._apply_employee_attribution(
+            [self._decorate_plan_item(item) for item in self.performance_access.aggregate_plan_snapshots(plan_rows)],
+            account_items,
+        )
+        summary_payload, products, employees, operators = self._rankings_bundle(
+            self._scoped_summary(account_items, plan_items),
+            account_items,
+            plan_items,
+        )
+        summary_payload["wallet_count"] = len(shared_wallet_items)
+        summary_payload["account_balance_count"] = len(account_balance_items)
+        payload = {
+            "snapshot_time": max(snapshot_times) if snapshot_times else "",
+            "summary": summary_payload,
+            "accounts": account_items,
+            "plans": plan_items,
+            "accountBalances": account_balance_items,
+            "sharedWallets": shared_wallet_items,
+            "walletRelations": wallet_relation_items,
+            "products": products,
+            "employees": employees,
+            "operators": operators,
+            "extendedSync": self._latest_extended_sync_all_customer_centers(),
+            "customer_center_count": len(latest_pairs),
+        }
+        return self._apply_account_scope(payload, allowed_advertiser_ids)
+
+    def latest_snapshot(
+        self,
+        allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+    ) -> dict[str, Any] | None:
+        if self._display_scope_uses_all_customer_centers(display_scope):
+            payload = self._latest_snapshot_all_customer_centers(allowed_advertiser_ids)
+            if not payload:
+                return payload
+            return self._safe_apply_material_operator_rankings(
+                payload,
+                allowed_advertiser_ids=allowed_advertiser_ids,
+                snapshot_time=str(payload.get("snapshot_time") or "").strip(),
+            )
         payload = self.performance_access.latest_snapshot(allowed_advertiser_ids)
         if not payload:
             return payload
@@ -1822,8 +2126,354 @@ class DashboardService:
             allowed_advertiser_ids=allowed_advertiser_ids,
         )
 
+    def _performance_snapshot_from_db_all_customer_centers(
+        self,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> dict[str, Any]:
+        with self.db() as conn:
+            snapshots = self._latest_rows_by_customer_center_day(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT snapshot_time, customer_center_id, window_start, window_end
+                        FROM summary_snapshots
+                        WHERE COALESCE(customer_center_id, '') <> ''
+                          AND snapshot_time >= ?
+                          AND snapshot_time <= ?
+                        ORDER BY snapshot_time DESC, customer_center_id ASC
+                        """,
+                        (
+                            start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                            end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        ),
+                    ).fetchall()
+                ]
+            )
+            if not snapshots:
+                return self.performance_access._empty_performance_snapshot(start_dt, end_dt)
+
+            selected_pairs = self._snapshot_pairs_from_rows(snapshots)
+            snapshot_times = sorted({snapshot_time for _customer_center_id, snapshot_time in selected_pairs})
+            placeholders = ",".join("?" for _ in snapshot_times)
+            account_rows = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM account_snapshots
+                        WHERE snapshot_time IN ({placeholders})
+                        ORDER BY snapshot_time DESC, stat_cost DESC, advertiser_id ASC
+                        """,
+                        snapshot_times,
+                    ).fetchall()
+                ],
+                selected_pairs,
+            )
+            plan_rows = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM plan_snapshots
+                        WHERE snapshot_time IN ({placeholders})
+                        ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
+                        """,
+                        snapshot_times,
+                    ).fetchall()
+                ],
+                selected_pairs,
+            )
+            latest_pairs = self._latest_snapshot_pairs_by_customer_center(selected_pairs)
+            latest_snapshot_times = sorted({snapshot_time for _customer_center_id, snapshot_time in latest_pairs})
+            latest_placeholders = ",".join("?" for _ in latest_snapshot_times)
+            account_balance_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM account_balances
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            shared_wallet_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallets
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            wallet_relation_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallet_account_relations
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+
+        account_items = self.performance_access.aggregate_account_snapshots(account_rows)
+        plan_items = [self._decorate_plan_item(item) for item in self.performance_access.aggregate_plan_snapshots(plan_rows)]
+        total_cost = round(
+            sum(float(item.get("stat_cost", 0.0) or 0.0) for item in account_items if bool(item.get("ok", True))),
+            2,
+        )
+        total_pay = round(
+            sum(float(item.get("pay_amount", 0.0) or 0.0) for item in account_items if bool(item.get("ok", True))),
+            2,
+        )
+        total_orders = int(
+            sum(int(float(item.get("order_count", 0.0) or 0.0)) for item in account_items if bool(item.get("ok", True)))
+        )
+        active_accounts = sum(
+            1 for item in account_items if bool(item.get("ok", True)) and float(item.get("stat_cost", 0.0) or 0.0) > 0
+        )
+        active_plans = sum(1 for item in plan_items if float(item.get("stat_cost", 0.0) or 0.0) > 0)
+        return {
+            "snapshot_time": max(snapshot_times) if snapshot_times else "",
+            "window_start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "window_end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": {
+                "account_count": len(account_items),
+                "active_account_count": active_accounts,
+                "plan_count": len(plan_items),
+                "active_plan_count": active_plans,
+                "stat_cost": total_cost,
+                "pay_amount": total_pay,
+                "order_count": total_orders,
+                "roi": round(total_pay / total_cost, 2) if total_cost > 0 else 0.0,
+                "account_failures": sum(1 for item in account_items if not bool(item.get("ok", True))),
+                "plan_failures": 0,
+                "wallet_count": len(shared_wallet_items),
+                "balance_failures": 0,
+            },
+            "accounts": account_items,
+            "plans": plan_items,
+            "accountBalances": account_balance_items,
+            "sharedWallets": shared_wallet_items,
+            "walletRelations": wallet_relation_items,
+            "errors": {
+                "accounts": [dict(item) for item in account_items if not bool(item.get("ok", True))],
+                "plans": [],
+                "balances": [],
+            },
+            "snapshot_count": len(snapshot_times),
+            "customer_center_count": len(latest_pairs),
+        }
+
     def _latest_extended_sync_run(self, conn: Any) -> Any:
         return self.history_access.latest_extended_sync_run(conn)
+
+    def _plan_assets_all_customer_centers(
+        self,
+        ad_id: int,
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> dict[str, Any]:
+        target_snapshot = str(snapshot_time or "").strip()
+        with self.db() as conn:
+            if target_snapshot:
+                summary_rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT snapshot_time, customer_center_id
+                        FROM summary_snapshots
+                        WHERE COALESCE(customer_center_id, '') <> ''
+                          AND snapshot_time = ?
+                        ORDER BY customer_center_id ASC
+                        """,
+                        (target_snapshot,),
+                    ).fetchall()
+                ]
+            else:
+                summary_rows = self._latest_rows_by_customer_center(
+                    [
+                        dict(row)
+                        for row in conn.execute(
+                            """
+                            SELECT snapshot_time, customer_center_id
+                            FROM summary_snapshots
+                            WHERE COALESCE(customer_center_id, '') <> ''
+                            ORDER BY snapshot_time DESC, customer_center_id ASC
+                            """
+                        ).fetchall()
+                    ]
+                )
+            selected_pairs = self._snapshot_pairs_from_rows(summary_rows)
+            if not selected_pairs:
+                return {"snapshot_time": target_snapshot, "plan": None, "detail": None, "products": [], "materials": []}
+
+            snapshot_times = sorted({snapshot_time for _customer_center_id, snapshot_time in selected_pairs})
+            placeholders = ",".join("?" for _ in snapshot_times)
+            plan_rows = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM plan_snapshots
+                        WHERE snapshot_time IN ({placeholders})
+                          AND ad_id = ?
+                        ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC
+                        """,
+                        [*snapshot_times, ad_id],
+                    ).fetchall()
+                ],
+                selected_pairs,
+            )
+            if not plan_rows:
+                return {
+                    "snapshot_time": max(snapshot_times) if snapshot_times else target_snapshot,
+                    "plan": None,
+                    "detail": None,
+                    "products": [],
+                    "materials": [],
+                }
+            if allowed_advertiser_ids is not None:
+                allowed = {int(item) for item in allowed_advertiser_ids}
+                plan_rows = [row for row in plan_rows if int(row.get("advertiser_id", 0) or 0) in allowed]
+                if not plan_rows:
+                    return {
+                        "snapshot_time": max(snapshot_times) if snapshot_times else target_snapshot,
+                        "plan": None,
+                        "detail": None,
+                        "products": [],
+                        "materials": [],
+                    }
+
+            plan_pairs = {
+                (
+                    str(row.get("customer_center_id") or "").strip(),
+                    str(row.get("snapshot_time") or "").strip(),
+                )
+                for row in plan_rows
+            }
+            detail_rows = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM plan_detail_snapshots
+                        WHERE snapshot_time IN ({placeholders})
+                          AND ad_id = ?
+                        ORDER BY snapshot_time DESC
+                        """,
+                        [*snapshot_times, ad_id],
+                    ).fetchall()
+                ],
+                plan_pairs,
+            )
+            product_rows = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM product_snapshots
+                        WHERE snapshot_time IN ({placeholders})
+                          AND ad_id = ?
+                        ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, product_key ASC
+                        """,
+                        [*snapshot_times, ad_id],
+                    ).fetchall()
+                ],
+                plan_pairs,
+            )
+            material_rows = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM material_snapshots
+                        WHERE snapshot_time IN ({placeholders})
+                          AND ad_id = ?
+                        ORDER BY snapshot_time DESC, create_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, material_type ASC, material_key ASC
+                        """,
+                        [*snapshot_times, ad_id],
+                    ).fetchall()
+                ],
+                plan_pairs,
+            )
+            original_flag_rows = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT snapshot_time, customer_center_id, advertiser_id, material_id, is_original
+                        FROM video_origin_flags
+                        WHERE snapshot_time IN ({placeholders})
+                        ORDER BY snapshot_time DESC
+                        """,
+                        snapshot_times,
+                    ).fetchall()
+                ],
+                plan_pairs,
+            )
+
+        aggregated_plan_rows = self.performance_access.aggregate_plan_snapshots(plan_rows)
+        plan_payload = self._decorate_plan_item(aggregated_plan_rows[0]) if aggregated_plan_rows else None
+        detail_payload = dict(detail_rows[0]) if detail_rows else None
+        if detail_payload:
+            detail_payload["marketing_goal_label"] = plan_marketing_goal_label(detail_payload["marketing_goal"])
+            detail_payload["status_text"] = format_plan_status_text(
+                detail_payload["status"],
+                detail_payload["opt_status"],
+            )
+        original_flags = {
+            (
+                str(row.get("snapshot_time") or "").strip(),
+                str(row.get("customer_center_id") or "").strip(),
+                int(row.get("advertiser_id", 0) or 0),
+                str(row.get("material_id") or ""),
+            ): bool(row.get("is_original"))
+            for row in original_flag_rows
+        }
+        material_items: list[dict[str, Any]] = []
+        for row in material_rows:
+            item = dict(row)
+            material_key = (
+                str(item.get("snapshot_time") or "").strip(),
+                str(item.get("customer_center_id") or "").strip(),
+                int(item.get("advertiser_id", 0) or 0),
+                str(item.get("material_id") or ""),
+            )
+            item["is_original"] = bool(original_flags.get(material_key, False))
+            material_items.append(item)
+        return {
+            "snapshot_time": max(snapshot_times) if snapshot_times else target_snapshot,
+            "plan": plan_payload,
+            "detail": detail_payload,
+            "products": product_rows,
+            "materials": material_items,
+            "originalVideoCount": sum(1 for item in material_items if item["is_original"]),
+        }
 
     def _latest_extended_sync_runs_for_window(
         self, conn: Any, start_dt: datetime, end_dt: datetime
@@ -1836,8 +2486,12 @@ class DashboardService:
     def _missing_extended_days(self, conn: Any, start_dt: datetime, end_dt: datetime) -> list[datetime]:
         return self.history_access.missing_extended_days(conn, start_dt, end_dt)
 
-    def latest_account_catalog(self, allowed_advertiser_ids: set[int] | None = None) -> list[dict[str, Any]]:
-        latest = self.latest_snapshot(allowed_advertiser_ids)
+    def latest_account_catalog(
+        self,
+        allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+    ) -> list[dict[str, Any]]:
+        latest = self.latest_snapshot(allowed_advertiser_ids, display_scope)
         if not latest:
             return []
         items = latest.get("accounts", [])
@@ -2088,11 +2742,32 @@ class DashboardService:
             token_persist_callback=self.persist_token_record,
         )
 
+    def _build_scoped_customer_center_client(self, customer_center_id: str) -> OceanEngineClient:
+        target_customer_center_id = str(customer_center_id or "").strip()
+        if not target_customer_center_id:
+            raise ValueError("customer_center_id is required")
+        config = dict(self.read_config())
+        config["customer_center_id"] = target_customer_center_id
+        stored_payload = self._stored_token_payload_for_config(config) or {}
+        stored_refresh_token = str(stored_payload.get("refresh_token") or "").strip()
+        if stored_refresh_token:
+            config["refresh_token"] = stored_refresh_token
+        token_dir = DATA_DIR / "preview_token_cache"
+        token_dir.mkdir(parents=True, exist_ok=True)
+        token_cache_path = token_dir / f"{target_customer_center_id}.json"
+        latest_token_path = token_dir / f"{target_customer_center_id}.latest.json"
+        return OceanEngineClient(
+            config=config,
+            token_cache_path=token_cache_path,
+            latest_token_path=latest_token_path,
+            token_persist_callback=self.persist_token_record,
+        )
+
     @staticmethod
     def _decorate_plan_item(row: Any) -> dict[str, Any]:
         item = dict(row)
         item["plan_source"] = str(item.get("plan_source") or PLAN_SOURCE_UNI_PROMOTION).strip().upper()
-        item["plan_source_text"] = "基础投放" if item["plan_source"] == PLAN_SOURCE_STANDARD else "全域投放"
+        item["plan_source_text"] = "基础投放" if item["plan_source"] == PLAN_SOURCE_STANDARD else "乘方投放"
         item["marketing_goal_label"] = plan_marketing_goal_label(item["marketing_goal"])
         if item["marketing_goal_label"]:
             item["marketing_goal_text"] = f"{item['plan_source_text']} / {item['marketing_goal_label']}"
@@ -2942,6 +3617,26 @@ class DashboardService:
     def _active_operator_config(self) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
         return self._operator_config()
 
+    @staticmethod
+    def _operator_keyword_map(
+        operators: dict[int, dict[str, Any]],
+        keywords: list[dict[str, Any]],
+    ) -> dict[int, list[str]]:
+        keyword_map: dict[int, set[str]] = {}
+        for row in keywords:
+            operator_id = int(row.get("user_id", 0) or 0)
+            if operator_id not in operators:
+                continue
+            keyword_text = str(row.get("keyword") or "").strip()
+            if not keyword_text:
+                continue
+            keyword_map.setdefault(operator_id, set()).add(keyword_text)
+        return {
+            operator_id: sorted(values)
+            for operator_id, values in keyword_map.items()
+            if values
+        }
+
     def _match_operator_candidates(
         self,
         texts: list[str],
@@ -3400,7 +4095,28 @@ class DashboardService:
         operators, keywords = self._active_operator_config()
         if not operators or not keywords:
             return []
-        groups: dict[int, dict[str, Any]] = {}
+        configured_keywords_by_user = self._operator_keyword_map(operators, keywords)
+        if not configured_keywords_by_user:
+            return []
+        groups: dict[int, dict[str, Any]] = {
+            operator_id: {
+                "operator_id": operator_id,
+                "operator_name": str(operator["display_name"]),
+                "operator_username": str(operator["username"]),
+                "stat_cost": 0.0,
+                "pay_amount": 0.0,
+                "order_count": 0,
+                "plan_ids": set(),
+                "advertiser_ids": set(),
+                "matched_keywords": set(),
+                "configured_keywords": set(configured_keywords_by_user.get(operator_id, [])),
+                "top_plan_name": "",
+                "top_plan_orders": -1,
+                "top_plan_pay_amount": -1.0,
+            }
+            for operator_id, operator in operators.items()
+            if configured_keywords_by_user.get(operator_id)
+        }
         for row in plans:
             matches = self._matched_operators_for_plan(row, operators, keywords)
             if not matches:
@@ -3424,6 +4140,7 @@ class DashboardService:
                         "plan_ids": set(),
                         "advertiser_ids": set(),
                         "matched_keywords": set(),
+                        "configured_keywords": set(configured_keywords_by_user.get(operator_id, [])),
                         "top_plan_name": "",
                         "top_plan_orders": -1,
                         "top_plan_pay_amount": -1.0,
@@ -3458,7 +4175,8 @@ class DashboardService:
                     "order_count": group["order_count"],
                     "plan_count": len(group["plan_ids"]),
                     "advertiser_count": len(group["advertiser_ids"]),
-                    "keyword_count": len(group["matched_keywords"]),
+                    "keyword_count": len(group["configured_keywords"]),
+                    "matched_keyword_count": len(group["matched_keywords"]),
                     "top_plan_name": group["top_plan_name"],
                     "roi": roi,
                 }
@@ -3478,7 +4196,35 @@ class DashboardService:
         operators, keywords = self._active_operator_config()
         if not operators or not keywords:
             return []
-        groups: dict[int, dict[str, Any]] = {}
+        configured_keywords_by_user = self._operator_keyword_map(operators, keywords)
+        if not configured_keywords_by_user:
+            return []
+        groups: dict[int, dict[str, Any]] = {
+            operator_id: {
+                "operator_id": operator_id,
+                "operator_name": str(operator["display_name"]),
+                "operator_username": str(operator["username"]),
+                "stat_cost": 0.0,
+                "pay_amount": 0.0,
+                "total_pay_amount": 0.0,
+                "settled_pay_amount": 0.0,
+                "refund_amount_1h": 0.0,
+                "order_count": 0,
+                "settled_order_count": 0,
+                "material_keys": set(),
+                "plan_ids": set(),
+                "advertiser_ids": set(),
+                "matched_keywords": set(),
+                "configured_keywords": set(configured_keywords_by_user.get(operator_id, [])),
+                "has_refund_rate_1h": False,
+                "top_material_name": "",
+                "top_account_name": "",
+                "top_material_orders": -1,
+                "top_material_pay_amount": -1.0,
+            }
+            for operator_id, operator in operators.items()
+            if configured_keywords_by_user.get(operator_id)
+        }
         for row in items:
             matches = self._matched_operators_for_material(row, operators, keywords)
             if not matches:
@@ -3515,6 +4261,7 @@ class DashboardService:
                         "plan_ids": set(),
                         "advertiser_ids": set(),
                         "matched_keywords": set(),
+                        "configured_keywords": set(configured_keywords_by_user.get(operator_id, [])),
                         "has_refund_rate_1h": False,
                         "top_material_name": "",
                         "top_account_name": "",
@@ -3576,7 +4323,8 @@ class DashboardService:
                     "material_count": len(group["material_keys"]),
                     "plan_count": len(group["plan_ids"]),
                     "advertiser_count": len(group["advertiser_ids"]),
-                    "keyword_count": len(group["matched_keywords"]),
+                    "keyword_count": len(group["configured_keywords"]),
+                    "matched_keyword_count": len(group["matched_keywords"]),
                     "top_material_name": group["top_material_name"],
                     "top_account_name": group["top_account_name"],
                     "roi": round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
@@ -3860,6 +4608,230 @@ class DashboardService:
                 text = str(preview.get(field) or "").strip()
                 if text:
                     item[field] = text
+        return items
+
+    @staticmethod
+    def _preview_url_expires_at(url: str) -> int:
+        text = str(url or "").strip()
+        if not text:
+            return 0
+        try:
+            query = parse_qs(urlsplit(text).query)
+        except ValueError:
+            return 0
+        values = query.get("x-expires") or query.get("expires") or []
+        if not values:
+            return 0
+        raw_value = str(values[0] or "").strip()
+        return int(raw_value) if raw_value.isdigit() else 0
+
+    @classmethod
+    def _preview_url_needs_refresh(cls, url: str, *, leeway_seconds: int = 300) -> bool:
+        text = str(url or "").strip()
+        if not text:
+            return True
+        expires_at = cls._preview_url_expires_at(text)
+        if expires_at <= 0:
+            return False
+        return expires_at <= int(time.time()) + max(leeway_seconds, 0)
+
+    @staticmethod
+    def _material_preview_refresh_cache_key(
+        customer_center_id: str,
+        advertiser_id: int,
+        ad_id: int,
+        material_type: str,
+    ) -> str:
+        return ":".join(
+            [
+                str(customer_center_id or "").strip(),
+                str(int(advertiser_id or 0)),
+                str(int(ad_id or 0)),
+                str(material_type or "").strip().upper(),
+            ]
+        )
+
+    def _plan_material_rows_for_preview_refresh(
+        self,
+        customer_center_id: str,
+        advertiser_id: int,
+        ad_id: int,
+        material_type: str,
+    ) -> list[dict[str, Any]]:
+        cache_key = self._material_preview_refresh_cache_key(customer_center_id, advertiser_id, ad_id, material_type)
+        now_ts = time.time()
+        cached = self._material_preview_refresh_cache.get(cache_key)
+        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < MATERIAL_PREVIEW_REFRESH_CACHE_SECONDS:
+            return [dict(row) for row in cached.get("rows", [])]
+        client = self._build_scoped_customer_center_client(customer_center_id)
+        rows = client.list_plan_materials(
+            int(advertiser_id),
+            int(ad_id),
+            {"material_type": str(material_type or "").strip().upper()},
+        )
+        normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
+        self._material_preview_refresh_cache[cache_key] = {
+            "_cached_at": now_ts,
+            "rows": normalized_rows,
+        }
+        return [dict(row) for row in normalized_rows]
+
+    @classmethod
+    def _material_preview_candidate_indexes(
+        cls,
+        rows: list[dict[str, Any]],
+        material_type: str,
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        indexes = {
+            "material_id": {},
+            "material_key": {},
+            "video_id": {},
+            "aweme_item_id": {},
+        }
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_material_info = cls._json_object(row.get("material_info"))
+            resolved_material_type = str(
+                row.get("material_type")
+                or raw_material_info.get("material_type")
+                or material_type
+                or "VIDEO"
+            ).strip().upper()
+            identity = cls._extract_material_identity(resolved_material_type, row)
+            preview = cls._extract_material_preview(resolved_material_type, row)
+            if not cls._material_preview_available(preview):
+                continue
+            candidate = {
+                "material_type": resolved_material_type,
+                "identity": identity,
+                "preview": preview,
+            }
+            material_id = cls._numeric_material_id_text(identity.get("material_id"))
+            if material_id and material_id not in indexes["material_id"]:
+                indexes["material_id"][material_id] = candidate
+            material_key = str(identity.get("material_key") or "").strip()
+            if material_key and material_key not in indexes["material_key"]:
+                indexes["material_key"][material_key] = candidate
+            video_id = str(identity.get("video_id") or "").strip()
+            if video_id and video_id not in indexes["video_id"]:
+                indexes["video_id"][video_id] = candidate
+            aweme_item_id = str(preview.get("aweme_item_id") or "").strip()
+            if aweme_item_id and aweme_item_id not in indexes["aweme_item_id"]:
+                indexes["aweme_item_id"][aweme_item_id] = candidate
+        return indexes
+
+    @classmethod
+    def _match_refreshed_material_preview(
+        cls,
+        item: dict[str, Any],
+        source: dict[str, Any],
+        indexes: dict[str, dict[str, dict[str, Any]]],
+    ) -> dict[str, Any] | None:
+        material_id = cls._numeric_material_id_text(source.get("material_id"), item.get("material_id"))
+        if material_id:
+            candidate = indexes["material_id"].get(material_id)
+            if candidate:
+                return candidate
+        video_id = cls._first_text(source.get("video_id"), item.get("video_id"))
+        if video_id:
+            candidate = indexes["video_id"].get(video_id)
+            if candidate:
+                return candidate
+        aweme_item_id = cls._first_text(source.get("aweme_item_id"), item.get("aweme_item_id"))
+        if aweme_item_id:
+            candidate = indexes["aweme_item_id"].get(aweme_item_id)
+            if candidate:
+                return candidate
+        material_key = cls._first_text(source.get("material_key"), item.get("material_key"))
+        if material_key:
+            return indexes["material_key"].get(material_key)
+        return None
+
+    def _refresh_stale_material_previews(
+        self,
+        items: list[dict[str, Any]],
+        start_date: str,
+        end_date: str,
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not items:
+            return items
+        refresh_targets: dict[tuple[str, int, int, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+        current_customer_center_id = self._current_customer_center_id()
+        for item in items:
+            if not self._preview_url_needs_refresh(str(item.get("cover_url") or "")):
+                continue
+            source = self._resolve_material_curve_source(
+                item,
+                start_date,
+                end_date,
+                snapshot_time,
+                allowed_advertiser_ids,
+            )
+            if not source:
+                continue
+            customer_center_id = str(source.get("customer_center_id") or current_customer_center_id).strip()
+            advertiser_id = int(source.get("advertiser_id", 0) or 0)
+            ad_id = int(source.get("ad_id", 0) or 0)
+            material_type = str(source.get("material_type") or item.get("material_type") or "VIDEO").strip().upper()
+            if not customer_center_id or advertiser_id <= 0 or ad_id <= 0 or material_type not in PLAN_MATERIAL_TYPES:
+                continue
+            refresh_targets.setdefault(
+                (customer_center_id, advertiser_id, ad_id, material_type),
+                [],
+            ).append((item, source))
+        if not refresh_targets:
+            return items
+
+        refreshed_rows: dict[tuple[str, int, int, str], list[dict[str, Any]]] = {}
+        with ThreadPoolExecutor(max_workers=min(len(refresh_targets), 4)) as executor:
+            future_map = {
+                executor.submit(
+                    self._plan_material_rows_for_preview_refresh,
+                    customer_center_id,
+                    advertiser_id,
+                    ad_id,
+                    material_type,
+                ): (customer_center_id, advertiser_id, ad_id, material_type)
+                for customer_center_id, advertiser_id, ad_id, material_type in refresh_targets
+            }
+            for future in as_completed(future_map):
+                group_key = future_map[future]
+                try:
+                    refreshed_rows[group_key] = future.result()
+                except Exception:
+                    refreshed_rows[group_key] = []
+
+        for group_key, targets in refresh_targets.items():
+            customer_center_id, advertiser_id, ad_id, material_type = group_key
+            candidate_rows = refreshed_rows.get(group_key) or []
+            if not candidate_rows:
+                continue
+            indexes = self._material_preview_candidate_indexes(candidate_rows, material_type)
+            for item, source in targets:
+                candidate = self._match_refreshed_material_preview(item, source, indexes)
+                if not candidate:
+                    continue
+                preview = candidate.get("preview") or {}
+                identity = candidate.get("identity") or {}
+                cover_url = str(preview.get("cover_url") or "").strip()
+                if cover_url:
+                    item["cover_url"] = cover_url
+                aweme_item_id = str(preview.get("aweme_item_id") or "").strip()
+                if aweme_item_id:
+                    item["aweme_item_id"] = aweme_item_id
+                video_url = str(preview.get("video_url") or "").strip()
+                if video_url:
+                    item["video_url"] = video_url
+                video_id = str(identity.get("video_id") or "").strip()
+                if video_id:
+                    item["video_id"] = video_id
+                item["_preview_refreshed"] = True
+                item["_preview_refresh_customer_center_id"] = customer_center_id
+                item["_preview_refresh_advertiser_id"] = advertiser_id
+                item["_preview_refresh_ad_id"] = ad_id
         return items
 
     def _apply_material_top_anchor_names(
@@ -5185,7 +6157,7 @@ class DashboardService:
             ]
         return {
             "user": user,
-            "items": items[:200],
+            "items": items,
             "range_key": payload.get("range_key", range_key),
             "range_label": payload.get("range_label", RANGE_LABEL_MAP.get(range_key, "今日")),
             "query": str(query or "").strip(),
@@ -5948,6 +6920,46 @@ class DashboardService:
             }
         )
         return result
+
+    def refresh_recent_performance_history(self, days: int = HISTORY_BACKFILL_DAYS) -> dict[str, Any]:
+        tz = ZoneInfo(self.read_config()["timezone"])
+        refresh_days = max(int(days or HISTORY_BACKFILL_DAYS), 1)
+        today = datetime.now(tz).date()
+        start_day = today - timedelta(days=refresh_days)
+        refreshed = 0
+        error_count = 0
+        for offset in range(refresh_days, 0, -1):
+            target_day = today - timedelta(days=offset)
+            day_start = datetime(target_day.year, target_day.month, target_day.day, 0, 0, 0, tzinfo=tz)
+            day_end = datetime(target_day.year, target_day.month, target_day.day, 23, 59, 59, tzinfo=tz)
+            payload = self._collect_window_snapshot(day_start, day_end, include_balances=False)
+            payload["snapshot_time"] = self._scoped_day_snapshot_time(
+                day_end,
+                str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip(),
+            )
+            payload["window_start"] = day_start.strftime("%Y-%m-%d %H:%M:%S")
+            payload["window_end"] = day_end.strftime("%Y-%m-%d %H:%M:%S")
+            payload["accountBalances"] = []
+            payload["sharedWallets"] = []
+            payload["walletRelations"] = []
+            if "errors" not in payload or not isinstance(payload["errors"], dict):
+                payload["errors"] = {"accounts": [], "plans": [], "balances": []}
+            else:
+                payload["errors"]["balances"] = []
+            error_count += len(payload["errors"].get("accounts") or [])
+            error_count += len(payload["errors"].get("plans") or [])
+            self.persist_snapshot(payload)
+            refreshed += 1
+        if refreshed:
+            self._performance_cache.clear()
+        return {
+            "refresh_days": refresh_days,
+            "refreshed_days": refreshed,
+            "skipped_current_day": 1,
+            "error_count": error_count,
+            "range_start": start_day.strftime("%Y-%m-%d"),
+            "range_end": (today - timedelta(days=1)).strftime("%Y-%m-%d"),
+        }
 
     def backfill_recent_extended_history(self, days: int = 30) -> dict[str, Any]:
         tz = ZoneInfo(self.read_config()["timezone"])
@@ -7057,13 +8069,17 @@ class DashboardService:
         end_date: str,
         snapshot_time: str,
         allowed_advertiser_ids: set[int] | None = None,
+        *,
+        search_all_customer_centers: bool = False,
     ) -> list[dict[str, Any]]:
         material_key_text = str(material_key or "").strip()
         if not material_key_text:
             return []
-        clauses = ["material_key = ?", "customer_center_id = ?"]
+        clauses = ["material_key = ?"]
         params: list[Any] = [material_key_text]
-        params.append(self._current_customer_center_id())
+        if not search_all_customer_centers:
+            clauses.append("customer_center_id = ?")
+            params.append(self._current_customer_center_id())
         target_snapshot = str(snapshot_time or "").strip()
         if target_snapshot:
             clauses.append("snapshot_time = ?")
@@ -7085,6 +8101,7 @@ class DashboardService:
                 f"""
                 SELECT
                     snapshot_time,
+                    customer_center_id,
                     advertiser_id,
                     advertiser_name,
                     ad_id,
@@ -7132,10 +8149,13 @@ class DashboardService:
         )
         return {
             "snapshot_time": str(row.get("snapshot_time") or ""),
+            "customer_center_id": str(row.get("customer_center_id") or "").strip(),
             "advertiser_id": int(row.get("advertiser_id", 0) or 0),
             "advertiser_name": str(row.get("advertiser_name") or "").strip(),
             "ad_id": int(row.get("ad_id", 0) or 0),
             "ad_name": str(row.get("ad_name") or "").strip(),
+            "material_type": material_type,
+            "material_key": str(row.get("material_key") or "").strip(),
             "material_id": resolved_material_id,
             "video_id": resolved_video_id,
             "aweme_item_id": resolved_aweme_item_id,
@@ -7152,6 +8172,8 @@ class DashboardService:
         end_date: str,
         snapshot_time: str,
         allowed_advertiser_ids: set[int] | None = None,
+        *,
+        search_all_customer_centers: bool = False,
     ) -> dict[str, Any] | None:
         ranking_material_id = self._numeric_material_id_text(row.get("material_id"))
         ranking_video_id = str(row.get("video_id") or "").strip()
@@ -7167,6 +8189,7 @@ class DashboardService:
             end_date,
             snapshot_time,
             allowed_advertiser_ids,
+            search_all_customer_centers=search_all_customer_centers,
         ):
             candidate = self._material_curve_source_from_snapshot_row(snapshot_row)
             if not candidate:
@@ -7200,10 +8223,13 @@ class DashboardService:
         if ranking_material_id and advertiser_id:
             return {
                 "snapshot_time": "",
+                "customer_center_id": self._current_customer_center_id(),
                 "advertiser_id": advertiser_id,
                 "advertiser_name": str(row.get("top_account_name") or "").strip(),
                 "ad_id": 0,
                 "ad_name": str(row.get("top_plan_name") or "").strip(),
+                "material_type": str(row.get("material_type") or "VIDEO").strip().upper(),
+                "material_key": str(row.get("material_key") or "").strip(),
                 "material_id": ranking_material_id,
                 "video_id": ranking_video_id,
                 "aweme_item_id": ranking_aweme_item_id,
@@ -7223,23 +8249,78 @@ class DashboardService:
         snapshot_time: str = "",
         allowed_advertiser_ids: set[int] | None = None,
         user: dict[str, Any] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
     ) -> dict[str, Any]:
         material_key_text = str(material_key or "").strip()
         if not material_key_text:
             raise ValueError("material_key is required")
 
-        rankings_payload = self.material_rankings(range_key, start_date, end_date, snapshot_time, allowed_advertiser_ids)
-        if user is not None:
-            rankings_payload = self._apply_material_scope(rankings_payload, user)
-
-        row = next(
-            (
-                dict(item)
-                for item in rankings_payload.get("items", [])
-                if str(item.get("material_key") or "").strip() == material_key_text
-            ),
-            None,
-        )
+        role = str((user or {}).get("role") or "")
+        search_all_customer_centers = self._display_scope_uses_all_customer_centers(display_scope)
+        if role == ROLE_OPERATOR or search_all_customer_centers:
+            rankings_payload = self._cross_customer_center_material_payload(
+                range_key,
+                start_date,
+                end_date,
+                snapshot_time,
+                allowed_advertiser_ids,
+            )
+            search_all_customer_centers = True
+            if role == ROLE_OPERATOR:
+                scoped_payload = self._apply_material_scope(rankings_payload, user or {})
+                row = next(
+                    (
+                        dict(item)
+                        for item in scoped_payload.get("items", [])
+                        if str(item.get("material_key") or "").strip() == material_key_text
+                    ),
+                    None,
+                )
+                if row is None:
+                    row = next(
+                        (
+                            dict(item)
+                            for item in rankings_payload.get("items", [])
+                            if str(item.get("material_key") or "").strip() == material_key_text
+                        ),
+                        None,
+                    )
+            else:
+                row = next(
+                    (
+                        dict(item)
+                        for item in rankings_payload.get("items", [])
+                        if str(item.get("material_key") or "").strip() == material_key_text
+                    ),
+                    None,
+                )
+        else:
+            rankings_payload = self.material_rankings(range_key, start_date, end_date, snapshot_time, allowed_advertiser_ids)
+            row = next(
+                (
+                    dict(item)
+                    for item in rankings_payload.get("items", [])
+                    if str(item.get("material_key") or "").strip() == material_key_text
+                ),
+                None,
+            )
+            if row is None:
+                rankings_payload = self._cross_customer_center_material_payload(
+                    range_key,
+                    start_date,
+                    end_date,
+                    snapshot_time,
+                    allowed_advertiser_ids,
+                )
+                search_all_customer_centers = True
+                row = next(
+                    (
+                        dict(item)
+                        for item in rankings_payload.get("items", [])
+                        if str(item.get("material_key") or "").strip() == material_key_text
+                    ),
+                    None,
+                )
         if row is None:
             raise ValueError("material not found in current material rankings")
 
@@ -7345,6 +8426,7 @@ class DashboardService:
             response_payload["query_end_date"],
             snapshot_time,
             allowed_advertiser_ids,
+            search_all_customer_centers=search_all_customer_centers,
         )
         if resolved_source:
             response_payload["curve_material_id"] = str(resolved_source.get("material_id") or "")
@@ -7606,6 +8688,13 @@ class DashboardService:
                 items = self._apply_material_snapshot_context(preview_conn, items, snapshot_times, allowed_advertiser_ids)
                 items = self._apply_latest_material_previews(preview_conn, items)
                 items = self._apply_material_top_anchor_names(preview_conn, items, snapshot_times)
+            items = self._refresh_stale_material_previews(
+                items,
+                start_dt.strftime("%Y-%m-%d") if start_dt is not None else str(target_snapshot or "")[:10],
+                end_dt.strftime("%Y-%m-%d") if end_dt is not None else str(target_snapshot or "")[:10],
+                target_snapshot,
+                allowed_advertiser_ids,
+            )
         payload = {
             "snapshot_time": str(latest_meta.get("snapshot_time") or "") if latest_meta else target_snapshot,
             "items": items,
@@ -7623,6 +8712,203 @@ class DashboardService:
             payload["history_backfill_queued"] = backfill_queued
         self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
         return payload
+
+    def material_rankings_for_user(
+        self,
+        user: dict[str, Any] | None,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+    ) -> dict[str, Any]:
+        role = str((user or {}).get("role") or "")
+        if role == ROLE_OPERATOR or self._display_scope_uses_all_customer_centers(display_scope):
+            payload = self._cross_customer_center_material_payload(
+                range_key,
+                start_date,
+                end_date,
+                snapshot_time,
+                allowed_advertiser_ids,
+            )
+            return self._apply_material_scope(payload, user or {}) if role == ROLE_OPERATOR else payload
+        return self.material_rankings(range_key, start_date, end_date, snapshot_time, allowed_advertiser_ids)
+
+    def team_material_rankings_for_user(
+        self,
+        user: dict[str, Any] | None,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+    ) -> dict[str, Any]:
+        role = str((user or {}).get("role") or "")
+        if role == ROLE_OPERATOR or self._display_scope_uses_all_customer_centers(display_scope):
+            return self._cross_customer_center_material_payload(
+                range_key,
+                start_date,
+                end_date,
+                snapshot_time,
+                allowed_advertiser_ids,
+            )
+        return self.material_rankings(range_key, start_date, end_date, snapshot_time, allowed_advertiser_ids)
+
+    def _apply_material_snapshot_context_for_pairs(
+        self,
+        conn: Any,
+        items: list[dict[str, Any]],
+        selected_pairs: set[tuple[str, str]],
+        allowed_advertiser_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not items or not selected_pairs:
+            return items
+        snapshot_times = sorted(
+            {
+                str(snapshot_time or "").strip()
+                for _customer_center_id, snapshot_time in selected_pairs
+                if str(snapshot_time or "").strip()
+            }
+        )
+        material_keys = sorted(
+            {
+                str(item.get("material_key") or "").strip()
+                for item in items
+                if str(item.get("material_key") or "").strip()
+            }
+        )
+        if not snapshot_times or not material_keys:
+            return items
+        clauses = [
+            f"snapshot_time IN ({','.join('?' for _ in snapshot_times)})",
+            f"material_key IN ({','.join('?' for _ in material_keys)})",
+        ]
+        params: list[Any] = [*snapshot_times, *material_keys]
+        if allowed_advertiser_ids is not None:
+            allowed = sorted(int(item) for item in allowed_advertiser_ids if int(item or 0))
+            if allowed:
+                clauses.append(f"advertiser_id IN ({','.join('?' for _ in allowed)})")
+                params.extend(allowed)
+        rows = conn.execute(
+            f"""
+            SELECT snapshot_time, customer_center_id, material_key, product_show_count, product_click_count, raw_json
+            FROM material_snapshots
+            WHERE {" AND ".join(clauses)}
+            """,
+            params,
+        ).fetchall()
+        context_by_key: dict[str, dict[str, Any]] = {}
+        for raw_row in rows:
+            row = dict(raw_row)
+            pair = (
+                str(row.get("customer_center_id") or "").strip(),
+                str(row.get("snapshot_time") or "").strip(),
+            )
+            if pair not in selected_pairs:
+                continue
+            material_key = str(row.get("material_key") or "").strip()
+            if not material_key:
+                continue
+            group = context_by_key.setdefault(
+                material_key,
+                {
+                    "product_show_count": 0,
+                    "product_click_count": 0,
+                    "product_names": [],
+                },
+            )
+            group["product_show_count"] += int(row.get("product_show_count", 0) or 0)
+            group["product_click_count"] += int(row.get("product_click_count", 0) or 0)
+            for name in self._extract_material_product_names(row.get("raw_json")):
+                if name not in group["product_names"]:
+                    group["product_names"].append(name)
+        for item in items:
+            context = context_by_key.get(str(item.get("material_key") or "").strip())
+            if not context:
+                continue
+            show_count = int(context.get("product_show_count", 0) or 0)
+            click_count = int(context.get("product_click_count", 0) or 0)
+            item["product_info_text"] = self._summarize_material_product_names(list(context.get("product_names") or []))
+            item["overall_show_count"] = show_count
+            item["overall_click_count"] = click_count
+            item["overall_ctr"] = round(click_count / show_count * 100.0, 2) if show_count > 0 else 0.0
+        return items
+
+    def _apply_material_top_anchor_names_for_pairs(
+        self,
+        conn: Any,
+        items: list[dict[str, Any]],
+        selected_pairs: set[tuple[str, str]],
+    ) -> list[dict[str, Any]]:
+        if not items or not selected_pairs:
+            return items
+        unresolved_keys = {
+            (
+                str(item.get("top_account_name") or "").strip(),
+                str(item.get("top_plan_name") or "").strip(),
+            )
+            for item in items
+            if not str(item.get("top_anchor_name") or "").strip()
+            and str(item.get("top_account_name") or "").strip()
+            and str(item.get("top_plan_name") or "").strip()
+        }
+        if not unresolved_keys:
+            return items
+        snapshot_times = sorted(
+            {
+                str(snapshot_time or "").strip()
+                for _customer_center_id, snapshot_time in selected_pairs
+                if str(snapshot_time or "").strip()
+            }
+        )
+        if not snapshot_times:
+            return items
+        placeholders = ",".join("?" for _ in snapshot_times)
+        rows = conn.execute(
+            f"""
+            SELECT snapshot_time, customer_center_id, advertiser_name, ad_name, anchor_name, ad_id
+            FROM plan_snapshots
+            WHERE snapshot_time IN ({placeholders})
+              AND COALESCE(anchor_name, '') <> ''
+            ORDER BY snapshot_time DESC, ad_id DESC
+            """,
+            snapshot_times,
+        ).fetchall()
+        anchor_map: dict[tuple[str, str], str] = {}
+        for raw_row in rows:
+            row = dict(raw_row)
+            pair = (
+                str(row.get("customer_center_id") or "").strip(),
+                str(row.get("snapshot_time") or "").strip(),
+            )
+            if pair not in selected_pairs:
+                continue
+            key = (
+                str(row.get("advertiser_name") or "").strip(),
+                str(row.get("ad_name") or "").strip(),
+            )
+            if key not in unresolved_keys or key in anchor_map:
+                continue
+            anchor_name = str(row.get("anchor_name") or "").strip()
+            if anchor_name:
+                anchor_map[key] = anchor_name
+        if not anchor_map:
+            return items
+        enriched_items: list[dict[str, Any]] = []
+        for item in items:
+            enriched = dict(item)
+            if not str(enriched.get("top_anchor_name") or "").strip():
+                enriched["top_anchor_name"] = anchor_map.get(
+                    (
+                        str(enriched.get("top_account_name") or "").strip(),
+                        str(enriched.get("top_plan_name") or "").strip(),
+                    ),
+                    "",
+                )
+            enriched_items.append(enriched)
+        return enriched_items
 
     def _cross_customer_center_material_payload(
         self,
@@ -7697,6 +8983,7 @@ class DashboardService:
                 payload = {
                     "snapshot_time": target_snapshot,
                     "items": [],
+                    "meta": None,
                     "snapshot_count": 0,
                     "customer_center_count": 0,
                     "range_key": normalized,
@@ -7716,6 +9003,24 @@ class DashboardService:
                 if str(item.get("customer_center_id") or "").strip() and str(item.get("snapshot_time") or "").strip()
             }
             snapshot_times = sorted({snapshot for _customer_center_id, snapshot in selected_pairs})
+            meta = {
+                "snapshot_time": str(runs[-1].get("snapshot_time") or target_snapshot) if runs else target_snapshot,
+                "status": "partial" if any(str(item.get("status") or "") != "ok" for item in runs) else "ok",
+                "plan_count": sum(int(item.get("plan_count") or 0) for item in runs),
+                "detail_count": sum(int(item.get("detail_count") or 0) for item in runs),
+                "product_count": sum(int(item.get("product_count") or item.get("product_row_count") or 0) for item in runs),
+                "material_count": sum(int(item.get("material_count") or item.get("material_row_count") or 0) for item in runs),
+                "video_count": sum(int(item.get("video_count") or item.get("original_video_row_count") or 0) for item in runs),
+                "error_count": sum(int(item.get("error_count") or 0) for item in runs),
+                "snapshot_dates": sorted(
+                    {
+                        str(item.get("snapshot_time") or "")[:10]
+                        for item in runs
+                        if str(item.get("snapshot_time") or "").strip()
+                    }
+                ),
+                "snapshot_fallback_used": False,
+            }
             placeholders = ",".join("?" for _ in snapshot_times)
 
             rollup_rows = [
@@ -7821,11 +9126,19 @@ class DashboardService:
 
         if items:
             with self.db() as preview_conn:
+                items = self._apply_material_snapshot_context_for_pairs(
+                    preview_conn,
+                    items,
+                    selected_pairs,
+                    allowed_advertiser_ids,
+                )
                 items = self._apply_latest_material_previews(preview_conn, items)
+                items = self._apply_material_top_anchor_names_for_pairs(preview_conn, items, selected_pairs)
 
         payload = {
             "snapshot_time": str(runs[-1].get("snapshot_time") or target_snapshot) if runs else target_snapshot,
             "items": items,
+            "meta": meta,
             "snapshot_count": len(selected_pairs),
             "customer_center_count": len({customer_center_id for customer_center_id, _snapshot in selected_pairs}),
             "range_key": normalized,
@@ -7912,6 +9225,7 @@ class DashboardService:
         end_date: str = "",
         force_refresh: bool = False,
         allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
     ) -> dict[str, Any]:
         normalized = str(range_key or "day").strip().lower()
         if normalized not in PERFORMANCE_RANGES:
@@ -7921,22 +9235,34 @@ class DashboardService:
             start_dt, end_dt, range_label = build_custom_performance_window(start_date, end_date, config["timezone"])
         else:
             start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
-        cache_key = build_performance_cache_key(normalized, start_date, end_date, self._current_customer_center_id())
+        cache_customer_center_id = "__all_customer_centers__" if self._display_scope_uses_all_customer_centers(display_scope) else self._current_customer_center_id()
+        cache_key = build_performance_cache_key(normalized, start_date, end_date, cache_customer_center_id)
         cached = self._performance_cache.get(cache_key)
         now_ts = time.time()
         if not force_refresh and cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
             cached_payload = dict(cached["payload"])
-            if cached_payload.get("history_backfill_pending") and int(cached_payload.get("missing_history_days", 0) or 0) > 0:
+            if (
+                not self._display_scope_uses_all_customer_centers(display_scope)
+                and cached_payload.get("history_backfill_pending")
+                and int(cached_payload.get("missing_history_days", 0) or 0) > 0
+            ):
                 cached_payload["history_backfill_queued"] = self._queue_history_backfill_if_needed(
                     "performance", start_dt, end_dt, int(cached_payload.get("missing_history_days", 0) or 0)
                 )
             return self._apply_account_scope(cached_payload, allowed_advertiser_ids)
         missing_days = 0
-        if normalized in {"week", "month", "custom", "yesterday"}:
+        if normalized in {"week", "month", "custom", "yesterday"} and not self._display_scope_uses_all_customer_centers(display_scope):
             with self.db() as conn:
                 missing_days = len(self._missing_summary_days(conn, start_dt, end_dt))
-        backfill_queued = self._queue_history_backfill_if_needed("performance", start_dt, end_dt, missing_days)
-        payload = self._performance_snapshot_from_db(start_dt, end_dt)
+        backfill_queued = (
+            self._queue_history_backfill_if_needed("performance", start_dt, end_dt, missing_days)
+            if not self._display_scope_uses_all_customer_centers(display_scope)
+            else False
+        )
+        if self._display_scope_uses_all_customer_centers(display_scope):
+            payload = self._performance_snapshot_from_db_all_customer_centers(start_dt, end_dt)
+        else:
+            payload = self._performance_snapshot_from_db(start_dt, end_dt)
         payload["range_key"] = normalized
         payload["range_label"] = range_label
         payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")

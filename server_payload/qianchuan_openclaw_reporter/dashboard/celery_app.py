@@ -36,6 +36,11 @@ celery_app.conf.update(
             "task": "dashboard.dispatch_alerts",
             "schedule": crontab(minute="*"),
         },
+        "dashboard-performance-history-refresh": {
+            "task": "dashboard.performance_refresh_recent",
+            "schedule": crontab(hour=0, minute=5),
+            "args": (HISTORY_BACKFILL_DAYS,),
+        },
         "dashboard-performance-history-backfill": {
             "task": "dashboard.performance_backfill",
             "schedule": crontab(hour=2, minute=10),

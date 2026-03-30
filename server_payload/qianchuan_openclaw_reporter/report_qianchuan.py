@@ -94,6 +94,7 @@ STANDARD_PLAN_REPORT_FIELDS = [
 STANDARD_REPORT_TIME_GRANULARITY = "TIME_GRANULARITY_DAILY"
 
 UNI_PROMOTION_DATA_TOPICS = [
+    "OVERALL_ROI_PRODUCT_PROJECT",
     "ROI2_IMAGE_AGG_MATERIAL_ANALYSIS",
     "SITE_PROMOTION_POST_DATA_LIVE",
     "SITE_PROMOTION_POST_DATA_OTHER",
@@ -106,6 +107,18 @@ UNI_PROMOTION_DATA_TOPICS = [
     "SITE_PROMOTION_PRODUCT_POST_DATA_TITLE",
     "SITE_PROMOTION_PRODUCT_POST_DATA_VIDEO",
     "SITE_PROMOTION_PRODUCT_PRODUCT",
+]
+
+UNI_PLAN_REPORT_FALLBACK_TOPIC = "OVERALL_ROI_PRODUCT_PROJECT"
+UNI_PLAN_REPORT_FALLBACK_DIMENSIONS = [
+    "ad_id",
+    "ad_name",
+]
+UNI_PLAN_REPORT_FALLBACK_METRICS = [
+    "stat_cost_for_roi2",
+    "total_order_settle_amount_for_roi2_1h",
+    "total_order_settle_count_for_roi2_1h",
+    "total_prepay_and_pay_settle_roi2_1h",
 ]
 
 PLAN_PRODUCT_FIELDS = [
@@ -1882,6 +1895,209 @@ class OceanEngineClient:
             )
         return plans
 
+    def _apply_report_plan_detail(self, plan: PlanSummary, detail_data: dict[str, Any]) -> None:
+        def first_text(*values: Any) -> str:
+            for value in values:
+                text = str(value or "").strip()
+                if text:
+                    return text
+            return ""
+
+        def object_list(value: Any) -> list[dict[str, Any]]:
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                return [value]
+            return []
+
+        ad_info = detail_data.get("ad_info") or {}
+        product_items = object_list(detail_data.get("product_infos") or detail_data.get("product_info"))
+        room_items = object_list(detail_data.get("room_info") or detail_data.get("room_infos"))
+        first_product = product_items[0] if product_items else {}
+        first_room = room_items[0] if room_items else {}
+        delivery_setting = detail_data.get("delivery_setting") or {}
+
+        plan.ad_name = first_text(
+            ad_info.get("name"),
+            detail_data.get("name"),
+            detail_data.get("ad_name"),
+            plan.ad_name,
+        ) or plan.ad_name
+        plan.product_id = first_text(
+            first_product.get("product_id"),
+            first_product.get("id"),
+            plan.product_id,
+        )
+        plan.product_name = first_text(
+            first_product.get("product_name"),
+            first_product.get("name"),
+            plan.product_name,
+        )
+        plan.anchor_name = first_text(
+            first_room.get("anchor_name"),
+            first_room.get("name"),
+            plan.anchor_name,
+        )
+        plan.marketing_goal = first_text(
+            ad_info.get("marketing_goal"),
+            detail_data.get("marketing_goal"),
+            plan.marketing_goal,
+        )
+        plan.status = first_text(ad_info.get("status"), detail_data.get("status"), plan.status)
+        plan.opt_status = first_text(ad_info.get("opt_status"), detail_data.get("opt_status"), plan.opt_status)
+        plan.roi_goal = round(
+            float(
+                ad_info.get("roi2_goal")
+                or detail_data.get("roi2_goal")
+                or delivery_setting.get("roi_goal")
+                or delivery_setting.get("target_roi")
+                or plan.roi_goal
+                or 0.0
+            ),
+            2,
+        )
+
+    @staticmethod
+    def _report_cell_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            if value.get("Value") is not None:
+                return value.get("Value")
+            if value.get("ValueStr") is not None:
+                return value.get("ValueStr")
+        return value
+
+    def _list_uni_plan_summaries_from_report(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[PlanSummary]:
+        page = 1
+        page_size = min(normalize_plan_page_size(self.config), 100)
+        plans_by_ad_id: dict[int, PlanSummary] = {}
+        while True:
+            response = self.get_uni_promotion_data(
+                advertiser_id=advertiser_id,
+                data_topic=UNI_PLAN_REPORT_FALLBACK_TOPIC,
+                dimensions=list(UNI_PLAN_REPORT_FALLBACK_DIMENSIONS),
+                metrics=list(UNI_PLAN_REPORT_FALLBACK_METRICS),
+                start_time=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_time=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                filters=[],
+                order_by=[{"field": "stat_cost_for_roi2", "type": 2}],
+                page=page,
+                page_size=page_size,
+            )
+            data = response.get("data") or {}
+            rows = data.get("rows") or []
+            for row in rows:
+                dimensions = row.get("dimensions") or {}
+                metrics = row.get("metrics") or {}
+                ad_id = int(self._report_cell_value(dimensions.get("ad_id")) or 0)
+                if not ad_id or ad_id in plans_by_ad_id:
+                    continue
+
+                stat_cost = normalize_metric(self._report_cell_value(metrics.get("stat_cost_for_roi2")))
+                settled_pay_amount = normalize_metric(
+                    self._report_cell_value(metrics.get("total_order_settle_amount_for_roi2_1h"))
+                )
+                settled_order_count = int(
+                    float(self._report_cell_value(metrics.get("total_order_settle_count_for_roi2_1h")) or 0.0)
+                )
+                settled_roi = normalize_metric(
+                    self._report_cell_value(metrics.get("total_prepay_and_pay_settle_roi2_1h"))
+                )
+                plan = PlanSummary(
+                    advertiser_id=advertiser_id,
+                    advertiser_name=advertiser_name,
+                    ad_id=ad_id,
+                    ad_name=str(self._report_cell_value(dimensions.get("ad_name")) or f"ad_{ad_id}"),
+                    product_id="",
+                    product_name="",
+                    anchor_name="",
+                    marketing_goal="VIDEO_PROM_GOODS",
+                    status="",
+                    opt_status="",
+                    roi_goal=0.0,
+                    stat_cost=stat_cost,
+                    roi=settled_roi,
+                    order_count=settled_order_count,
+                    pay_amount=settled_pay_amount,
+                    total_pay_amount=settled_pay_amount,
+                    settled_pay_amount=settled_pay_amount,
+                    settled_roi=settled_roi,
+                    settled_order_count=settled_order_count,
+                    pay_order_cost=derive_ratio(stat_cost, settled_order_count, 0.0),
+                    settled_amount_rate=100.0 if settled_pay_amount > 0 else 0.0,
+                    refund_rate_1h=0.0,
+                    refund_amount_1h=0.0,
+                    plan_source=PLAN_SOURCE_UNI_PROMOTION,
+                )
+                try:
+                    detail_response = self.get_plan_detail(advertiser_id, ad_id)
+                    self._apply_report_plan_detail(plan, detail_response.get("data") or {})
+                except Exception:  # noqa: BLE001
+                    pass
+                plans_by_ad_id[ad_id] = plan
+
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page:
+                break
+            page += 1
+        return list(plans_by_ad_id.values())
+
+    @staticmethod
+    def _merge_plan_summary(primary: PlanSummary, secondary: PlanSummary) -> PlanSummary:
+        if primary.ad_id != secondary.ad_id:
+            return primary
+
+        text_fields = (
+            "advertiser_name",
+            "product_id",
+            "product_name",
+            "anchor_name",
+            "marketing_goal",
+            "status",
+            "opt_status",
+        )
+        for field in text_fields:
+            if not str(getattr(primary, field) or "").strip() and str(getattr(secondary, field) or "").strip():
+                setattr(primary, field, getattr(secondary, field))
+
+        primary_name = str(primary.ad_name or "").strip()
+        secondary_name = str(secondary.ad_name or "").strip()
+        if (not primary_name or primary_name == f"ad_{primary.ad_id}") and secondary_name:
+            primary.ad_name = secondary_name
+
+        numeric_fields = (
+            "roi_goal",
+            "stat_cost",
+            "roi",
+            "order_count",
+            "pay_amount",
+            "total_pay_amount",
+            "settled_pay_amount",
+            "settled_roi",
+            "settled_order_count",
+            "pay_order_cost",
+            "settled_amount_rate",
+            "refund_rate_1h",
+            "refund_amount_1h",
+        )
+        for field in numeric_fields:
+            primary_value = float(getattr(primary, field) or 0.0)
+            secondary_value = float(getattr(secondary, field) or 0.0)
+            if primary_value == 0.0 and secondary_value != 0.0:
+                setattr(primary, field, getattr(secondary, field))
+
+        if str(secondary.plan_source or "").strip() == PLAN_SOURCE_UNI_PROMOTION:
+            primary.plan_source = PLAN_SOURCE_UNI_PROMOTION
+        elif not str(primary.plan_source or "").strip() and str(secondary.plan_source or "").strip():
+            primary.plan_source = str(secondary.plan_source)
+        return primary
+
     def list_plan_summaries(
         self,
         advertiser_id: int,
@@ -1889,19 +2105,38 @@ class OceanEngineClient:
         start_dt: datetime,
         end_dt: datetime,
     ) -> list[PlanSummary]:
-        plans: list[PlanSummary] = []
+        plans_by_ad_id: dict[int, PlanSummary] = {}
         errors: list[str] = []
+
+        def consume(items: list[PlanSummary]) -> None:
+            for plan in items:
+                ad_id = int(getattr(plan, "ad_id", 0) or 0)
+                if not ad_id:
+                    continue
+                existing = plans_by_ad_id.get(ad_id)
+                if existing is None:
+                    plans_by_ad_id[ad_id] = plan
+                    continue
+                self._merge_plan_summary(existing, plan)
+
         try:
-            plans.extend(self._list_uni_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt))
+            consume(self._list_uni_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"uni_promotion: {exc}")
         try:
-            plans.extend(self._list_standard_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt))
+            consume(self._list_standard_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"standard: {exc}")
-        if not plans and errors:
+        try:
+            consume(self._list_uni_plan_summaries_from_report(advertiser_id, advertiser_name, start_dt, end_dt))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"uni_report: {exc}")
+        if not plans_by_ad_id and errors:
             raise ApiError("; ".join(errors))
-        return plans
+        return sorted(
+            plans_by_ad_id.values(),
+            key=lambda item: (-item.order_count, -item.pay_amount, -item.roi, -item.stat_cost, item.ad_id),
+        )
 
 
 def build_window(mode: str, tz_name: str) -> tuple[datetime, datetime, str, str]:

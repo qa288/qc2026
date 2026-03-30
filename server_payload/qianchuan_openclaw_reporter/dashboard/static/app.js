@@ -6,6 +6,9 @@ const RANGE_LABELS = {
   custom: "指定日期范围",
 };
 
+const DISPLAY_SCOPE_CURRENT = "current";
+const DISPLAY_SCOPE_ALL = "all";
+
 const RULE_ENTITY_CONFIG = {
   account: {
     label: "账户",
@@ -91,6 +94,7 @@ const state = {
   uploadFiles: [],
   uploadRetryingJobId: null,
   uploadDeletingJobId: null,
+  displayScope: loadPreference("dashboard-display-scope", DISPLAY_SCOPE_CURRENT),
   unassignedScope: "all",
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
@@ -363,6 +367,40 @@ function loadPreference(key, fallback) {
 
 function savePreference(key, value) {
   localStorage.setItem(key, value);
+}
+
+function normalizeDisplayScope(value) {
+  return String(value || "").trim().toLowerCase() === DISPLAY_SCOPE_ALL
+    ? DISPLAY_SCOPE_ALL
+    : DISPLAY_SCOPE_CURRENT;
+}
+
+function requestDisplayScope() {
+  if (!isAdmin()) {
+    return DISPLAY_SCOPE_CURRENT;
+  }
+  return normalizeDisplayScope(state.displayScope);
+}
+
+function usingAllCustomerCenters() {
+  return requestDisplayScope() === DISPLAY_SCOPE_ALL;
+}
+
+function setDisplayScope(nextScope, options = {}) {
+  const normalized = normalizeDisplayScope(nextScope);
+  const previous = normalizeDisplayScope(state.displayScope);
+  state.displayScope = normalized;
+  if (options.persist !== false) {
+    savePreference("dashboard-display-scope", normalized);
+  }
+  if (options.clearCaches !== false && previous !== normalized) {
+    clearDashboardDataCaches();
+  }
+}
+
+function appendDisplayScopeParam(params) {
+  params.set("display_scope", requestDisplayScope());
+  return params;
 }
 
 function debounce(callback, waitMs) {
@@ -850,7 +888,7 @@ function planSourceTone(source) {
 
 function renderPlanSourceBadge(row) {
   const source = String(row?.plan_source || "").trim().toUpperCase();
-  const text = row?.plan_source_text || (source === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u5168\u57df\u6295\u653e");
+  const text = row?.plan_source_text || (source === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u4e58\u65b9\u6295\u653e");
   const tone = planSourceTone(source);
   const title = source || text;
   return `<span class="pill plan-source-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
@@ -865,7 +903,7 @@ function enrichPlanRow(row) {
   const refundAmount1h = Number(row?.refund_amount_1h || 0);
   return {
     ...row,
-    plan_source_text: row?.plan_source_text || (String(row?.plan_source || "").trim().toUpperCase() === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u5168\u57df\u6295\u653e"),
+    plan_source_text: row?.plan_source_text || (String(row?.plan_source || "").trim().toUpperCase() === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u4e58\u65b9\u6295\u653e"),
     marketing_goal_text: row?.marketing_goal_text || row?.marketing_goal_label || row?.marketing_goal || "-",
     status_text: row?.status_text || `${row?.status || ""}/${row?.opt_status || ""}`,
     settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
@@ -1457,10 +1495,11 @@ function normalizeRangeKey(value) {
 
 function performanceFilterKey(filter) {
   const normalized = normalizeRangeFilter(filter);
+  const prefix = requestDisplayScope();
   if (normalized.mode === "custom") {
-    return `custom:${normalized.start}:${normalized.end}`;
+    return `${prefix}:custom:${normalized.start}:${normalized.end}`;
   }
-  return normalized.mode;
+  return `${prefix}:${normalized.mode}`;
 }
 
 function sectionFilter(sectionKey) {
@@ -2169,6 +2208,7 @@ function renderSystemCards(latest, extendedSync, tokenInfo) {
 
 function clearDashboardDataCaches() {
   state.rangePayloads = {};
+  state.planAssetCache = {};
   state.materialPayloads = {};
   state.materialPayloadFetchedAt = {};
   state.teamMaterialPayloads = {};
@@ -2176,6 +2216,7 @@ function clearDashboardDataCaches() {
   state.commentPayloads = {};
   state.commentPayloadFetchedAt = {};
   state.materialPreviewCurveCache = {};
+  state.catalogAccounts = [];
 }
 
 function syncOceanEnginePopoverState() {
@@ -2228,10 +2269,61 @@ function oceanEngineBoundCustomerCenters(config) {
   return Array.isArray(config?.bound_customer_centers) ? config.bound_customer_centers : [];
 }
 
+function oceanEngineAllScopeSummary(items) {
+  return (items || []).reduce(
+    (summary, item) => {
+      summary.accountCount += Number(item?.account_count || 0);
+      summary.activeAccountCount += Number(item?.active_account_count || 0);
+      summary.planCount += Number(item?.plan_count || 0);
+      summary.materialCount += Number(item?.detail_material_row_count || 0);
+      const snapshotTime = String(item?.latest_snapshot_time || "").trim();
+      const detailSnapshotTime = String(item?.latest_detail_snapshot_time || "").trim();
+      if (snapshotTime > summary.latestSnapshotTime) {
+        summary.latestSnapshotTime = snapshotTime;
+      }
+      if (detailSnapshotTime > summary.latestDetailSnapshotTime) {
+        summary.latestDetailSnapshotTime = detailSnapshotTime;
+      }
+      return summary;
+    },
+    {
+      accountCount: 0,
+      activeAccountCount: 0,
+      planCount: 0,
+      materialCount: 0,
+      latestSnapshotTime: "",
+      latestDetailSnapshotTime: "",
+    },
+  );
+}
+
+async function switchOceanEngineDisplayScope(nextScope) {
+  const normalizedScope = normalizeDisplayScope(nextScope);
+  if (normalizedScope === requestDisplayScope()) {
+    return;
+  }
+  setDisplayScope(normalizedScope);
+  renderOceanEngineConfig(state.oceanEngineConfig);
+  const currentCc = String(state.oceanEngineConfig?.customer_center_id || "").trim();
+  const message = normalizedScope === DISPLAY_SCOPE_ALL
+    ? "已切换到全部账号视图，正在加载汇总数据。"
+    : `已切回当前账号 CC ${currentCc || "--"} 视图。`;
+  setInlineFeedback(oceanEngineConfigStatus, message, "success");
+  try {
+    await fetchDashboard();
+  } catch (error) {
+    setInlineFeedback(oceanEngineConfigStatus, error.message || "切换展示范围失败。", "error");
+    throw error;
+  }
+}
+
 function renderOceanEngineBoundAccounts(config) {
   if (!oceanEngineBoundAccounts) return;
   const items = oceanEngineBoundCustomerCenters(config);
+  const allScopeSummary = oceanEngineAllScopeSummary(items);
   const hasPendingSwitch = Boolean(state.oceanEnginePendingCustomerCenterId);
+  const allScopeAvailable = items.length > 1;
+  const allScopeActive = allScopeAvailable && usingAllCustomerCenters();
   if (oceanEngineBoundAccountsMeta) {
     oceanEngineBoundAccountsMeta.textContent = items.length
       ? `共 ${formatNumber(items.length)} 个`
@@ -2245,7 +2337,32 @@ function renderOceanEngineBoundAccounts(config) {
     `;
     return;
   }
-  oceanEngineBoundAccounts.innerHTML = items.map((item) => {
+  const cards = [];
+  if (allScopeAvailable) {
+    const snapshotMeta = allScopeSummary.latestSnapshotTime
+      ? `汇总快照 ${escapeHtml(allScopeSummary.latestSnapshotTime)} · 账户 ${formatNumber(allScopeSummary.accountCount)} / 活跃 ${formatNumber(allScopeSummary.activeAccountCount)} · 计划 ${formatNumber(allScopeSummary.planCount)}`
+      : "暂无汇总快照";
+    const detailMeta = allScopeSummary.latestDetailSnapshotTime
+      ? `汇总明细 ${escapeHtml(allScopeSummary.latestDetailSnapshotTime)} · 素材 ${formatNumber(allScopeSummary.materialCount)}`
+      : "暂无汇总明细";
+    cards.push(`
+      <button
+        type="button"
+        class="customer-center-bound-button ${allScopeActive ? "is-active" : ""}"
+        data-action="switch-display-scope-all"
+        ${hasPendingSwitch ? "disabled" : ""}
+      >
+        <div class="customer-center-bound-top">
+          <strong>显示全部</strong>
+          <span class="customer-center-bound-badge subtle">聚合 ${formatNumber(items.length)} 个账号</span>
+        </div>
+        <div class="customer-center-bound-meta">展示所有已授权账号的账户、计划、素材与运营汇总。</div>
+        <div class="customer-center-bound-stats">${snapshotMeta}</div>
+        <div class="customer-center-bound-stats">${detailMeta}</div>
+      </button>
+    `);
+  }
+  cards.push(...items.map((item) => {
     const customerCenterId = String(item.customer_center_id || "").trim();
     const isCurrent = Boolean(item.is_current);
     const isPending = customerCenterId && customerCenterId === state.oceanEnginePendingCustomerCenterId;
@@ -2264,10 +2381,10 @@ function renderOceanEngineBoundAccounts(config) {
     return `
       <button
         type="button"
-        class="customer-center-bound-button ${isCurrent ? "is-active" : ""}"
+        class="customer-center-bound-button ${isCurrent && !allScopeActive ? "is-active" : ""}"
         data-action="switch-bound-customer-center"
         data-customer-center-id="${escapeHtml(customerCenterId)}"
-        ${isCurrent || hasPendingSwitch || isPending ? "disabled" : ""}
+        ${(isCurrent && !allScopeActive) || hasPendingSwitch || isPending ? "disabled" : ""}
       >
         <div class="customer-center-bound-top">
           <strong class="mono">CC ${escapeHtml(customerCenterId || "--")}</strong>
@@ -2278,7 +2395,8 @@ function renderOceanEngineBoundAccounts(config) {
         <div class="customer-center-bound-stats">${detailMeta}</div>
       </button>
     `;
-  }).join("");
+  }));
+  oceanEngineBoundAccounts.innerHTML = cards.join("");
 }
 
 async function switchOceanEngineCustomerCenter(targetCc, sourceLabel = "已授权 token") {
@@ -2291,6 +2409,10 @@ async function switchOceanEngineCustomerCenter(targetCc, sourceLabel = "已授�
     return;
   }
   if (normalizedTargetCc === currentCc) {
+    if (usingAllCustomerCenters()) {
+      await switchOceanEngineDisplayScope(DISPLAY_SCOPE_CURRENT);
+      return;
+    }
     setInlineFeedback(oceanEngineConfigStatus, `CC ${normalizedTargetCc} 已经是当前账号。`, "neutral");
     return;
   }
@@ -2317,6 +2439,7 @@ async function switchOceanEngineCustomerCenter(targetCc, sourceLabel = "已授�
     }
     state.oceanEngineConfig = payload.config || state.oceanEngineConfig;
     state.oceanEnginePreview = payload.preview || null;
+    setDisplayScope(DISPLAY_SCOPE_CURRENT, { clearCaches: false });
     clearDashboardDataCaches();
     renderOceanEngineConfig(state.oceanEngineConfig);
     setInlineFeedback(oceanEngineConfigStatus, `已切换到 CC ${normalizedTargetCc}，正在提交主快照同步。`, "success");
@@ -2346,8 +2469,14 @@ async function switchOceanEngineCustomerCenter(targetCc, sourceLabel = "已授�
 }
 
 function renderOceanEngineConfig(config) {
+  const boundItems = oceanEngineBoundCustomerCenters(config);
+  if (boundItems.length <= 1 && usingAllCustomerCenters()) {
+    setDisplayScope(DISPLAY_SCOPE_CURRENT, { clearCaches: false });
+  }
   if (customerCenterChip) {
-    customerCenterChip.textContent = `CC ${config?.customer_center_id || "--"}`;
+    customerCenterChip.textContent = usingAllCustomerCenters() && boundItems.length > 1
+      ? "鍏ㄩ儴璐﹀彿"
+      : `CC ${config?.customer_center_id || "--"}`;
   }
   if (!oceanEngineConfigCard) return;
   const admin = isAdmin();
@@ -2367,8 +2496,11 @@ function renderOceanEngineConfig(config) {
   const modeText = config?.has_customer_center_override
     ? `当前生效账号：CC ${overrideCc}。服务器默认账号：CC ${baseCc}。`
     : `当前使用服务器默认账号：CC ${baseCc}。`;
+  const effectiveModeText = usingAllCustomerCenters() && boundItems.length > 1
+    ? `当前显示全部已授权账号（${formatNumber(boundItems.length)} 个账号），当前运行账号为 CC ${config?.customer_center_id || "--"}。`
+    : modeText;
   if (oceanEngineConfigMeta) {
-    oceanEngineConfigMeta.textContent = `${modeText} token ${tokenAgeText}${config?.token_source ? ` / ${config.token_source}` : ""}`;
+    oceanEngineConfigMeta.textContent = `${effectiveModeText} token ${tokenAgeText}${config?.token_source ? ` / ${config.token_source}` : ""}`;
   }
   if (!oceanEngineConfigStatus?.textContent) {
     setInlineFeedback(
@@ -4068,7 +4200,7 @@ async function fetchMaterialRankings(force = false) {
       return cachedPayload;
     }
   }
-  const params = new URLSearchParams();
+  const params = appendDisplayScopeParam(new URLSearchParams());
   params.set("range", filter.mode);
   if (filter.mode === "custom") {
     params.set("start_date", filter.start);
@@ -4102,7 +4234,7 @@ async function fetchTeamMaterialRankings(force = false) {
       return cachedPayload;
     }
   }
-  const params = new URLSearchParams();
+  const params = appendDisplayScopeParam(new URLSearchParams());
   params.set("range", filter.mode);
   if (filter.mode === "custom") {
     params.set("start_date", filter.start);
@@ -4178,7 +4310,7 @@ function clearPlanAssetSummary() {
 }
 
 function planAssetCacheKey(adId, snapshotTime) {
-  return `${snapshotTime || "latest"}:${adId}`;
+  return `${requestDisplayScope()}:${snapshotTime || "latest"}:${adId}`;
 }
 
 async function fetchPlanAssets(adId) {
@@ -4187,7 +4319,11 @@ async function fetchPlanAssets(adId) {
   if (state.planAssetCache[cacheKey]) {
     return state.planAssetCache[cacheKey];
   }
-  const query = snapshotTime ? `?snapshot_time=${encodeURIComponent(snapshotTime)}` : "";
+  const params = appendDisplayScopeParam(new URLSearchParams());
+  if (snapshotTime) {
+    params.set("snapshot_time", snapshotTime);
+  }
+  const query = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`/api/plans/${encodeURIComponent(adId)}/assets${query}`);
   if (!response.ok) {
     throw new Error("assets fetch failed");
@@ -4921,6 +5057,7 @@ function materialAwemeLink(row) {
 function materialPreviewCurveCacheKey(row, filter) {
   const normalized = normalizeRangeFilter(filter);
   return [
+    requestDisplayScope(),
     String(row?.material_key || "").trim(),
     normalized.mode,
     normalized.start || "",
@@ -4930,7 +5067,7 @@ function materialPreviewCurveCacheKey(row, filter) {
 
 function materialPreviewCurveRequest(row) {
   const filter = sectionFilter("material");
-  const params = new URLSearchParams();
+  const params = appendDisplayScopeParam(new URLSearchParams());
   params.set("material_key", String(row?.material_key || "").trim());
   params.set("range", filter.mode);
   if (filter.mode === "custom") {
@@ -5763,7 +5900,8 @@ async function fetchUsers(force = false) {
 
 async function fetchCatalogAccounts(force = false) {
   if (!force && state.catalogAccounts.length) return state.catalogAccounts;
-  const response = await fetch("/api/catalog/accounts");
+  const params = appendDisplayScopeParam(new URLSearchParams());
+  const response = await fetch(`/api/catalog/accounts?${params.toString()}`);
   const payload = await response.json();
   state.catalogAccounts = payload.items || [];
   return state.catalogAccounts;
@@ -5839,7 +5977,7 @@ async function fetchPerformance(filter, force = false) {
   if (!force && state.rangePayloads[cacheKey]) {
     return state.rangePayloads[cacheKey];
   }
-  const params = new URLSearchParams();
+  const params = appendDisplayScopeParam(new URLSearchParams());
   params.set("range", normalized.mode);
   if (normalized.mode === "custom") {
     params.set("start_date", normalized.start);
@@ -6094,6 +6232,11 @@ function bindInputs() {
     setOceanEnginePopoverOpen(nextOpen);
     if (nextOpen) {
       window.setTimeout(() => {
+        const allScopeButton = oceanEngineBoundAccounts?.querySelector('[data-action="switch-display-scope-all"]:not(:disabled)');
+        if (allScopeButton) {
+          allScopeButton.focus();
+          return;
+        }
         const firstSavedCcButton = oceanEngineBoundAccounts?.querySelector('[data-action="switch-bound-customer-center"]:not(:disabled)');
         if (firstSavedCcButton) {
           firstSavedCcButton.focus();
@@ -6104,6 +6247,11 @@ function bindInputs() {
     }
   });
   oceanEngineBoundAccounts?.addEventListener("click", async (event) => {
+    const allScopeButton = event.target.closest('[data-action="switch-display-scope-all"]');
+    if (allScopeButton && isAdmin()) {
+      await switchOceanEngineDisplayScope(DISPLAY_SCOPE_ALL);
+      return;
+    }
     const button = event.target.closest('[data-action="switch-bound-customer-center"]');
     if (!button || !isAdmin()) return;
     const targetCc = String(button.dataset.customerCenterId || "").trim();
@@ -6700,7 +6848,8 @@ function bindInputs() {
 }
 
 async function fetchDashboard() {
-  const response = await fetch("/api/dashboard");
+  const params = appendDisplayScopeParam(new URLSearchParams());
+  const response = await fetch(`/api/dashboard?${params.toString()}`);
   const payload = await response.json();
   state.payload = payload;
   state.session = payload.session || null;

@@ -77,14 +77,20 @@ def register_query_routes(
         )
 
     @app.get("/api/catalog/accounts")
-    async def available_accounts(user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    async def available_accounts(
+        display_scope: str = "current",
+        user: dict[str, Any] = Depends(require_auth),
+    ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
-        return JSONResponse({"items": service.latest_account_catalog(allowed)})
+        return JSONResponse({"items": service.latest_account_catalog(allowed, display_scope)})
 
     @app.get("/api/dashboard")
-    async def dashboard_data(user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    async def dashboard_data(
+        display_scope: str = "current",
+        user: dict[str, Any] = Depends(require_auth),
+    ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
-        latest = service.latest_snapshot(allowed)
+        latest = service.latest_snapshot(allowed, display_scope)
         if latest and str(user.get("role") or "") == role_operator:
             latest = service._apply_operator_scope(latest, user)
         is_admin = str(user.get("role") or "") == role_admin
@@ -101,14 +107,15 @@ def register_query_routes(
                     "scope_count": None if allowed is None else len(allowed),
                 },
                 "latest": latest,
-                "extendedSync": service.latest_extended_sync(),
+                "extendedSync": service.latest_extended_sync(display_scope),
                 "tokenInfo": service.latest_token_payload(masked=True) if is_admin else None,
                 "oceanEngineConfig": service.ocean_engine_runtime_config() if is_admin else None,
-                "summaryHistory": service.summary_history(),
+                "summaryHistory": service.summary_history(display_scope=display_scope),
                 "notificationSettings": service.get_notification_settings() if is_admin else {},
                 "alertRules": service.list_alert_rules() if is_admin else [],
                 "alertEvents": service.alert_events() if is_admin else [],
                 "customerCenterId": service.read_config()["customer_center_id"],
+                "displayScope": display_scope,
                 "timezone": timezone,
             }
         )
@@ -118,6 +125,7 @@ def register_query_routes(
         range: str = "day",
         start_date: str = "",
         end_date: str = "",
+        display_scope: str = "current",
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         try:
@@ -129,6 +137,7 @@ def register_query_routes(
                 end_date,
                 False,
                 allowed,
+                display_scope,
             )
             if str(user.get("role") or "") == role_operator:
                 payload = service._apply_operator_scope(payload, user)
@@ -151,11 +160,16 @@ def register_query_routes(
         return JSONResponse({"items": service.plan_history(ad_id, allowed_advertiser_ids=allowed)})
 
     @app.get("/api/plans/{ad_id}/assets")
-    async def plan_assets(ad_id: int, snapshot_time: str = "", user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
+    async def plan_assets(
+        ad_id: int,
+        snapshot_time: str = "",
+        display_scope: str = "current",
+        user: dict[str, Any] = Depends(require_auth),
+    ) -> JSONResponse:
         if str(user.get("role") or "") == role_operator:
             raise HTTPException(status_code=403, detail="operator cannot access plan assets")
         allowed = service.allowed_advertiser_ids_for_user(user)
-        return JSONResponse(service.plan_assets(ad_id, snapshot_time, allowed))
+        return JSONResponse(service.plan_assets(ad_id, snapshot_time, allowed, display_scope))
 
     @app.get("/api/material-rankings")
     async def material_rankings(
@@ -163,12 +177,20 @@ def register_query_routes(
         range: str = "day",
         start_date: str = "",
         end_date: str = "",
+        display_scope: str = "current",
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
         try:
-            payload = service.material_rankings(range, start_date, end_date, snapshot_time, allowed)
-            payload = service._apply_material_scope(payload, user)
+            payload = service.material_rankings_for_user(
+                user,
+                range,
+                start_date,
+                end_date,
+                snapshot_time,
+                allowed,
+                display_scope,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
@@ -179,11 +201,20 @@ def register_query_routes(
         range: str = "day",
         start_date: str = "",
         end_date: str = "",
+        display_scope: str = "current",
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
         try:
-            payload = service.material_rankings(range, start_date, end_date, snapshot_time, allowed)
+            payload = service.team_material_rankings_for_user(
+                user,
+                range,
+                start_date,
+                end_date,
+                snapshot_time,
+                allowed,
+                display_scope,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
@@ -195,6 +226,7 @@ def register_query_routes(
         range: str = "day",
         start_date: str = "",
         end_date: str = "",
+        display_scope: str = "current",
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
@@ -208,6 +240,7 @@ def register_query_routes(
                 snapshot_time,
                 allowed,
                 user,
+                display_scope,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
