@@ -88,6 +88,7 @@ const state = {
   teamMaterialPayloadFetchedAt: {},
   commentPayloads: {},
   commentPayloadFetchedAt: {},
+  commentRequestPromises: {},
   materialPreviewCurveCache: {},
   materialPreviewSourceCache: {},
   users: [],
@@ -2261,6 +2262,7 @@ function clearDashboardDataCaches() {
   state.teamMaterialPayloadFetchedAt = {};
   state.commentPayloads = {};
   state.commentPayloadFetchedAt = {};
+  state.commentRequestPromises = {};
   state.materialPreviewCurveCache = {};
   state.materialPreviewSourceCache = {};
   state.catalogAccounts = [];
@@ -4331,30 +4333,41 @@ async function fetchComments(force = false) {
   if (!force && cachedPayload && cachedAt > 0 && Date.now() - cachedAt < COMMENT_CACHE_TTL_MS) {
     return cachedPayload;
   }
-  const params = new URLSearchParams();
-  params.set("range", filter.mode);
-  if (filter.mode === "custom") {
-    params.set("start_date", filter.start);
-    params.set("end_date", filter.end);
+  if (state.commentRequestPromises[cacheKey]) {
+    return state.commentRequestPromises[cacheKey];
   }
-  if (advertiserId > 0) {
-    params.set("advertiser_id", String(advertiserId));
-  }
-  if (force) {
-    params.set("force", "1");
-  }
-  const response = await fetch(`/api/comments?${params.toString()}`).catch(() => null);
-  if (!response || !response.ok) {
-    const errorPayload = response ? await response.json().catch(() => ({})) : {};
-    if (cachedPayload) {
-      return cachedPayload;
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    params.set("range", filter.mode);
+    if (filter.mode === "custom") {
+      params.set("start_date", filter.start);
+      params.set("end_date", filter.end);
     }
-    throw new Error(errorPayload.detail || "comments fetch failed");
+    if (advertiserId > 0) {
+      params.set("advertiser_id", String(advertiserId));
+    }
+    if (force) {
+      params.set("force", "1");
+    }
+    const response = await fetch(`/api/comments?${params.toString()}`).catch(() => null);
+    if (!response || !response.ok) {
+      const errorPayload = response ? await response.json().catch(() => ({})) : {};
+      if (cachedPayload) {
+        return cachedPayload;
+      }
+      throw new Error(errorPayload.detail || "comments fetch failed");
+    }
+    const payload = await response.json();
+    state.commentPayloads[cacheKey] = payload;
+    state.commentPayloadFetchedAt[cacheKey] = Date.now();
+    return payload;
+  })();
+  state.commentRequestPromises[cacheKey] = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    delete state.commentRequestPromises[cacheKey];
   }
-  const payload = await response.json();
-  state.commentPayloads[cacheKey] = payload;
-  state.commentPayloadFetchedAt[cacheKey] = Date.now();
-  return payload;
 }
 
 function fillPlanAccountFilter(accountNames) {
@@ -6653,7 +6666,9 @@ function bindInputs() {
         }
         const view = button.dataset.view || "overview";
         setActiveView(view);
-        await ensureActiveViewData(false);
+        ensureActiveViewData(false).catch((error) => {
+          console.error("ensureActiveViewData failed", error);
+        });
       });
     });
   }
@@ -7272,12 +7287,10 @@ async function render(payload) {
   syncRuleFormFields();
   lastSnapshotText.textContent = latest.snapshot_time;
   refreshHintText.textContent = "采集 1 分钟 · 明细 10 分钟 · 页面 60 秒";
-  try {
-    await ensureActiveViewData(false);
-  } catch (error) {
-    console.error("ensureActiveViewData failed", error);
-  }
   setActiveView(state.activeView);
+  ensureActiveViewData(false).catch((error) => {
+    console.error("ensureActiveViewData failed", error);
+  });
 }
 
 bindInputs();

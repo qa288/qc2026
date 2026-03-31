@@ -5780,6 +5780,23 @@ class DashboardService:
                 )
         return plans
 
+    def _comment_has_sync_coverage(
+        self,
+        conn: Any,
+        advertiser_ids: set[int],
+        sync_dates: list[str],
+    ) -> bool:
+        normalized_dates = [str(item).strip() for item in sync_dates if str(item).strip()]
+        normalized_advertiser_ids = {int(item) for item in advertiser_ids if int(item or 0)}
+        if not normalized_advertiser_ids or not normalized_dates:
+            return True
+        state_map = self._comment_sync_state_map(conn, normalized_advertiser_ids, normalized_dates)
+        for advertiser_id in normalized_advertiser_ids:
+            for sync_date in normalized_dates:
+                if (advertiser_id, sync_date) not in state_map:
+                    return False
+        return True
+
     def _persist_comment_sync_success(
         self,
         conn: Any,
@@ -6088,14 +6105,20 @@ class DashboardService:
         window_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
         errors: list[dict[str, Any]] = []
         account_ids = {int(account["advertiser_id"]) for account in accounts if int(account.get("advertiser_id", 0) or 0)}
+        requested_dates = self._comment_requested_dates(start_dt, end_dt)
         with self.db() as conn:
-            sync_plans = self._comment_sync_plans(
-                conn,
-                accounts,
-                start_dt,
-                end_dt,
-                config["timezone"],
-                force_refresh=force_refresh,
+            has_sync_coverage = self._comment_has_sync_coverage(conn, account_ids, requested_dates)
+            sync_plans = (
+                self._comment_sync_plans(
+                    conn,
+                    accounts,
+                    start_dt,
+                    end_dt,
+                    config["timezone"],
+                    force_refresh=force_refresh,
+                )
+                if force_refresh or not has_sync_coverage
+                else []
             )
 
         if sync_plans:
