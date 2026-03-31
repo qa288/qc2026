@@ -10504,7 +10504,8 @@ class DashboardService:
             else:
                 notices.append("该素材被多个账户复用，当前仅展示其中一个账户的曲线。")
 
-        client = self.build_client(config)
+        curve_customer_center_id = str((resolved_source or {}).get("customer_center_id") or "").strip() or self._current_customer_center_id()
+        client = self._build_scoped_customer_center_client(curve_customer_center_id)
         response = client.get_video_user_lose(
             advertiser_id=int(response_payload["curve_advertiser_id"]),
             material_id=response_payload["curve_material_id"],

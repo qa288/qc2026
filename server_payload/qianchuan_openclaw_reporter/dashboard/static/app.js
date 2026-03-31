@@ -7441,6 +7441,11 @@ function applyFullRefreshStatus() {
 function scheduleFullRefreshStatusPoll() {
   window.clearTimeout(Number(state.fullRefreshStatusPollTimer || 0));
   state.fullRefreshStatusPollTimer = 0;
+  if (!isAdmin()) {
+    state.fullRefreshStatus = null;
+    applyFullRefreshStatus();
+    return;
+  }
   if (!isPageVisible() || !isFullRefreshActive(state.fullRefreshStatus)) {
     applyFullRefreshStatus();
     return;
@@ -7453,6 +7458,13 @@ function scheduleFullRefreshStatusPoll() {
 }
 
 async function fetchFullRefreshStatus(force = false) {
+  if (!isAdmin()) {
+    window.clearTimeout(Number(state.fullRefreshStatusPollTimer || 0));
+    state.fullRefreshStatusPollTimer = 0;
+    state.fullRefreshStatus = null;
+    applyFullRefreshStatus();
+    return null;
+  }
   if (state.fullRefreshStatusPromise && !force) {
     return state.fullRefreshStatusPromise;
   }
@@ -7490,6 +7502,11 @@ async function render(payload) {
   syncRuleFormFields();
   lastSnapshotText.textContent = latest.snapshot_time;
   applyFullRefreshStatus();
+  if (isAdmin()) {
+    fetchFullRefreshStatus().catch(() => {});
+  } else {
+    state.fullRefreshStatus = null;
+  }
   refreshHintText.textContent = "采集 1 分钟 · 明细 10 分钟 · 页面 60 秒";
   setActiveView(state.activeView);
   ensureActiveViewData(false).catch((error) => {
@@ -7508,7 +7525,9 @@ window.setInterval(() => {
 document.addEventListener("visibilitychange", () => {
   if (!isPageVisible()) return;
   fetchDashboard().catch(() => {});
-  fetchFullRefreshStatus(true).catch(() => {});
+  if (isAdmin()) {
+    fetchFullRefreshStatus(true).catch(() => {});
+  }
 });
 window.setInterval(() => {
   if (!isPageVisible()) return;

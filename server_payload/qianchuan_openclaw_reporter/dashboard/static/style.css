@@ -1223,6 +1223,11 @@ body {
   grid-template-columns: minmax(0, 1fr) minmax(360px, 520px);
 }
 
+.toolbar-inline-breakdown {
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 620px);
+  align-items: center;
+}
+
 .toolbar-inline-comment {
   grid-template-columns: minmax(0, 1fr) minmax(560px, 760px);
   align-items: center;
@@ -1428,6 +1433,22 @@ body {
 
 .toolbar-inline-plan .toolbar-search-actions > .search-input {
   min-width: 0;
+}
+
+.toolbar-inline-breakdown .toolbar-search-actions {
+  grid-column: 2;
+  justify-self: stretch;
+  align-self: center;
+  flex-wrap: nowrap;
+  row-gap: 0;
+  align-content: center;
+  width: 100%;
+  max-width: 620px;
+}
+
+.toolbar-inline-breakdown .toolbar-search-actions > .search-input {
+  flex: 1 1 auto;
+  min-width: 260px;
 }
 
 .toolbar-inline-comment .toolbar-search-actions {
