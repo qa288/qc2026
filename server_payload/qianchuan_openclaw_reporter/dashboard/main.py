@@ -120,6 +120,7 @@ RANGE_CACHE_SECONDS = settings.range_cache_seconds
 COMMENT_SYNC_SUCCESS_TTL_SECONDS = settings.comment_sync_success_ttl_seconds
 COMMENT_SYNC_ERROR_RETRY_SECONDS = settings.comment_sync_error_retry_seconds
 BACKFILL_QUEUE_DEBOUNCE_SECONDS = settings.backfill_queue_debounce_seconds
+COMMENT_SYNC_QUEUE_DEBOUNCE_SECONDS = max(30, min(COMMENT_SYNC_SUCCESS_TTL_SECONDS, 120))
 PERFORMANCE_RANGES = {"day", "yesterday", "week", "month", "custom"}
 RANGE_LABEL_MAP = {
     "day": "今日",
@@ -817,6 +818,68 @@ class DashboardService:
             )
         return False
 
+    @staticmethod
+    def _normalize_allowed_advertiser_ids(
+        allowed_advertiser_ids: set[int] | list[int] | tuple[int, ...] | None,
+    ) -> set[int] | None:
+        if allowed_advertiser_ids is None:
+            return None
+        return {int(item) for item in allowed_advertiser_ids if int(item or 0)}
+
+    def _comment_sync_dedupe_key(
+        self,
+        start_date: str,
+        end_date: str,
+        advertiser_id: int = 0,
+        allowed_advertiser_ids: set[int] | list[int] | tuple[int, ...] | None = None,
+    ) -> str:
+        normalized_allowed = self._normalize_allowed_advertiser_ids(allowed_advertiser_ids)
+        scope_digest = hashlib.sha1(build_scope_cache_key(normalized_allowed).encode("utf-8")).hexdigest()[:16]
+        return (
+            f"comment-sync:{self._current_customer_center_id()}:{str(start_date or '').strip()}:"
+            f"{str(end_date or '').strip()}:{int(advertiser_id or 0)}:{scope_digest}"
+        )
+
+    def _queue_comment_sync_if_needed(
+        self,
+        start_date: str,
+        end_date: str,
+        advertiser_id: int = 0,
+        allowed_advertiser_ids: set[int] | list[int] | tuple[int, ...] | None = None,
+        force_refresh: bool = False,
+    ) -> bool:
+        normalized_allowed = self._normalize_allowed_advertiser_ids(allowed_advertiser_ids)
+        dedupe_key = self._comment_sync_dedupe_key(
+            start_date,
+            end_date,
+            advertiser_id=advertiser_id,
+            allowed_advertiser_ids=normalized_allowed,
+        )
+        now_ts = time.time()
+        last_ts = float(self._backfill_queue_marks.get(dedupe_key, 0.0) or 0.0)
+        if now_ts - last_ts < COMMENT_SYNC_QUEUE_DEBOUNCE_SECONDS:
+            return False
+        from dashboard.celery_app import celery_app
+
+        try:
+            celery_app.send_task(
+                "dashboard.comment_sync_recent",
+                kwargs={
+                    "start_date": str(start_date or "").strip(),
+                    "end_date": str(end_date or "").strip(),
+                    "advertiser_id": int(advertiser_id or 0),
+                    "allowed_advertiser_ids": (
+                        sorted(int(item) for item in normalized_allowed)
+                        if normalized_allowed is not None
+                        else None
+                    ),
+                    "force_refresh": bool(force_refresh),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        self._backfill_queue_marks[dedupe_key] = now_ts
+        return True
     def queue_manual_history_backfill(self, kind: str, days: int = 30) -> dict[str, Any]:
         normalized_kind = "detail" if str(kind or "").strip() == "detail" else "performance"
         normalized_days = max(int(days or 30), 1)
@@ -6261,6 +6324,186 @@ class DashboardService:
                     return False
         return True
 
+    def _execute_comment_sync_plans(
+        self,
+        config: dict[str, Any],
+        sync_plans: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not sync_plans:
+            return {
+                "sync_plan_count": 0,
+                "synced_plan_count": 0,
+                "synced_comment_count": 0,
+                "error_count": 0,
+                "errors": [],
+            }
+
+        client = self.build_client(config)
+        client.get_access_token()
+        max_workers = max(1, min(int(config.get("comment_max_workers", 4) or 4), len(sync_plans)))
+        errors: list[dict[str, Any]] = []
+        sync_results: list[tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {
+                pool.submit(
+                    self._fetch_account_comments,
+                    client,
+                    int(plan["advertiser_id"]),
+                    str(plan["advertiser_name"]),
+                    str(plan["start_date"]),
+                    str(plan["end_date"]),
+                ): plan
+                for plan in sync_plans
+            }
+            for future in as_completed(future_map):
+                plan = future_map[future]
+                account_items, error_payload = future.result()
+                sync_results.append((plan, account_items, error_payload))
+                if error_payload:
+                    errors.append(error_payload)
+
+        with self.db() as conn:
+            for plan, account_items, error_payload in sync_results:
+                attempted_at = now_text(config["timezone"])
+                if error_payload:
+                    self._persist_comment_sync_error(
+                        conn,
+                        int(plan["advertiser_id"]),
+                        str(plan["advertiser_name"]),
+                        str(plan["start_date"]),
+                        str(plan["end_date"]),
+                        str(error_payload.get("error") or ""),
+                        attempted_at,
+                    )
+                    continue
+                records = [
+                    self._comment_record_from_item(item, attempted_at, str(plan["start_date"]))
+                    for item in account_items
+                    if str(item.get("comment_id") or "").strip()
+                ]
+                self._persist_comment_sync_success(
+                    conn,
+                    int(plan["advertiser_id"]),
+                    str(plan["advertiser_name"]),
+                    str(plan["start_date"]),
+                    str(plan["end_date"]),
+                    records,
+                    attempted_at,
+                )
+        self._clear_comment_caches()
+        return {
+            "sync_plan_count": len(sync_plans),
+            "synced_plan_count": sum(1 for _plan, _items, error_payload in sync_results if error_payload is None),
+            "synced_comment_count": sum(
+                len(account_items) for _plan, account_items, error_payload in sync_results if error_payload is None
+            ),
+            "error_count": len(errors),
+            "errors": errors,
+        }
+
+    def sync_comments_for_dates(
+        self,
+        start_date: str,
+        end_date: str,
+        advertiser_id: int | None = None,
+        allowed_advertiser_ids: set[int] | list[int] | tuple[int, ...] | None = None,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        normalized_start_date = str(start_date or "").strip()
+        normalized_end_date = str(end_date or "").strip()
+        if not normalized_start_date or not normalized_end_date:
+            raise ValueError("comment sync start_date and end_date are required")
+        try:
+            start_dt = datetime.strptime(normalized_start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(normalized_end_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("comment sync dates must use YYYY-MM-DD") from exc
+        if start_dt > end_dt:
+            raise ValueError("comment sync start_date must be <= end_date")
+
+        normalized_allowed = self._normalize_allowed_advertiser_ids(allowed_advertiser_ids)
+        selected_advertiser_id = int(advertiser_id or 0)
+        lock_key = self._comment_sync_dedupe_key(
+            normalized_start_date,
+            normalized_end_date,
+            advertiser_id=selected_advertiser_id,
+            allowed_advertiser_ids=normalized_allowed,
+        )
+        with self._distributed_runtime_lock(
+            lock_key,
+            timeout_seconds=max(COMMENT_SYNC_SUCCESS_TTL_SECONDS, 300),
+        ) as acquired:
+            if not acquired:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "comment sync already running",
+                    "start_date": normalized_start_date,
+                    "end_date": normalized_end_date,
+                    "advertiser_id": selected_advertiser_id,
+                    "sync_plan_count": 0,
+                    "synced_plan_count": 0,
+                    "synced_comment_count": 0,
+                    "error_count": 0,
+                    "errors": [],
+                }
+
+            config = self.read_config()
+            all_accounts = self.latest_account_catalog(normalized_allowed)
+            accounts = list(all_accounts)
+            if selected_advertiser_id:
+                accounts = [item for item in accounts if int(item["advertiser_id"]) == selected_advertiser_id]
+            if not accounts:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "no comment accounts available",
+                    "start_date": normalized_start_date,
+                    "end_date": normalized_end_date,
+                    "advertiser_id": selected_advertiser_id,
+                    "sync_plan_count": 0,
+                    "synced_plan_count": 0,
+                    "synced_comment_count": 0,
+                    "error_count": 0,
+                    "errors": [],
+                }
+
+            end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            with self.db() as conn:
+                sync_plans = self._comment_sync_plans(
+                    conn,
+                    accounts,
+                    start_dt,
+                    end_dt,
+                    config["timezone"],
+                    force_refresh=force_refresh,
+                )
+            if not sync_plans:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "comment sync already up to date",
+                    "start_date": normalized_start_date,
+                    "end_date": normalized_end_date,
+                    "advertiser_id": selected_advertiser_id,
+                    "sync_plan_count": 0,
+                    "synced_plan_count": 0,
+                    "synced_comment_count": 0,
+                    "error_count": 0,
+                    "errors": [],
+                }
+
+            sync_result = self._execute_comment_sync_plans(config, sync_plans)
+            return {
+                "ok": True,
+                "skipped": False,
+                "reason": "",
+                "start_date": normalized_start_date,
+                "end_date": normalized_end_date,
+                "advertiser_id": selected_advertiser_id,
+                **sync_result,
+            }
+
     def _persist_comment_sync_success(
         self,
         conn: Any,
@@ -6536,15 +6779,27 @@ class DashboardService:
         if not force_refresh:
             cached_payload = self._local_dict_cache_get(self._comment_cache, versioned_cache_key, RANGE_CACHE_SECONDS)
             if cached_payload is not None:
+                if cached_payload.get("comment_sync_pending"):
+                    cached_payload["comment_sync_queued"] = self._queue_comment_sync_if_needed(
+                        str(cached_payload.get("query_start_date") or start_dt.strftime("%Y-%m-%d")),
+                        str(cached_payload.get("query_end_date") or end_dt.strftime("%Y-%m-%d")),
+                        advertiser_id=selected_advertiser_id,
+                        allowed_advertiser_ids=allowed_advertiser_ids,
+                    )
                 return cached_payload
             shared_payload = self._shared_dict_cache_get("comment", cache_key, cache_version)
             if shared_payload is not None:
+                if shared_payload.get("comment_sync_pending"):
+                    shared_payload["comment_sync_queued"] = self._queue_comment_sync_if_needed(
+                        str(shared_payload.get("query_start_date") or start_dt.strftime("%Y-%m-%d")),
+                        str(shared_payload.get("query_end_date") or end_dt.strftime("%Y-%m-%d")),
+                        advertiser_id=selected_advertiser_id,
+                        allowed_advertiser_ids=allowed_advertiser_ids,
+                    )
                 self._local_dict_cache_set(self._comment_cache, versioned_cache_key, shared_payload)
                 return shared_payload
 
-        client = self.build_client(config)
-        client.get_access_token()
-        all_accounts = self._comment_account_candidates(client, allowed_advertiser_ids)
+        all_accounts = self.latest_account_catalog(allowed_advertiser_ids)
         accounts = list(all_accounts)
         if selected_advertiser_id:
             accounts = [item for item in accounts if int(item["advertiser_id"]) == selected_advertiser_id]
@@ -6565,6 +6820,8 @@ class DashboardService:
                 "window_start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "window_end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "selected_advertiser_id": selected_advertiser_id,
+                "comment_sync_pending": False,
+                "comment_sync_queued": False,
                 "fetched_at": now_text(config["timezone"]),
             }
             self._local_dict_cache_set(self._comment_cache, versioned_cache_key, payload)
@@ -6577,73 +6834,31 @@ class DashboardService:
         window_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
         errors: list[dict[str, Any]] = []
         account_ids = {int(account["advertiser_id"]) for account in accounts if int(account.get("advertiser_id", 0) or 0)}
-        requested_dates = self._comment_requested_dates(start_dt, end_dt)
+        sync_plans: list[dict[str, Any]] = []
         with self.db() as conn:
-            has_sync_coverage = self._comment_has_sync_coverage(conn, account_ids, requested_dates)
-            sync_plans = (
-                self._comment_sync_plans(
-                    conn,
-                    accounts,
-                    start_dt,
-                    end_dt,
-                    config["timezone"],
-                    force_refresh=force_refresh,
-                )
-                if force_refresh or not has_sync_coverage
-                else []
+            sync_plans = self._comment_sync_plans(
+                conn,
+                accounts,
+                start_dt,
+                end_dt,
+                config["timezone"],
+                force_refresh=force_refresh,
             )
 
+        comment_sync_pending = bool(sync_plans)
+        comment_sync_queued = False
         if sync_plans:
-            max_workers = max(1, min(int(config.get("comment_max_workers", 4) or 4), len(sync_plans)))
-            sync_results: list[tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]] = []
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                future_map = {
-                    pool.submit(
-                        self._fetch_account_comments,
-                        client,
-                        int(plan["advertiser_id"]),
-                        str(plan["advertiser_name"]),
-                        str(plan["start_date"]),
-                        str(plan["end_date"]),
-                    ): plan
-                    for plan in sync_plans
-                }
-                for future in as_completed(future_map):
-                    plan = future_map[future]
-                    account_items, error_payload = future.result()
-                    sync_results.append((plan, account_items, error_payload))
-                    if error_payload:
-                        errors.append(error_payload)
-
-            with self.db() as conn:
-                for plan, account_items, error_payload in sync_results:
-                    attempted_at = now_text(config["timezone"])
-                    if error_payload:
-                        self._persist_comment_sync_error(
-                            conn,
-                            int(plan["advertiser_id"]),
-                            str(plan["advertiser_name"]),
-                            str(plan["start_date"]),
-                            str(plan["end_date"]),
-                            str(error_payload.get("error") or ""),
-                            attempted_at,
-                        )
-                        continue
-                    records = [
-                        self._comment_record_from_item(item, attempted_at, str(plan["start_date"]))
-                        for item in account_items
-                        if str(item.get("comment_id") or "").strip()
-                    ]
-                    self._persist_comment_sync_success(
-                        conn,
-                        int(plan["advertiser_id"]),
-                        str(plan["advertiser_name"]),
-                        str(plan["start_date"]),
-                        str(plan["end_date"]),
-                        records,
-                        attempted_at,
-                    )
-            self._clear_comment_caches()
+            if force_refresh:
+                sync_result = self._execute_comment_sync_plans(config, sync_plans)
+                errors = list(sync_result.get("errors") or [])
+                comment_sync_pending = False
+            else:
+                comment_sync_queued = self._queue_comment_sync_if_needed(
+                    comment_start_date,
+                    comment_end_date,
+                    advertiser_id=selected_advertiser_id,
+                    allowed_advertiser_ids=allowed_advertiser_ids,
+                )
 
         items: list[dict[str, Any]] = []
         advertiser_ids: set[int] = set()
@@ -6711,6 +6926,8 @@ class DashboardService:
             "window_start": window_start,
             "window_end": window_end,
             "selected_advertiser_id": selected_advertiser_id,
+            "comment_sync_pending": comment_sync_pending,
+            "comment_sync_queued": comment_sync_queued,
             "fetched_at": now_text(config["timezone"]),
         }
         self._local_dict_cache_set(self._comment_cache, versioned_cache_key, payload)
@@ -9325,8 +9542,8 @@ class DashboardService:
             "top_account_name": str(row.get("top_account_name") or ""),
             "supported": material_type == "VIDEO",
             "t_plus_one_only": True,
-            "range_key": str(rankings_payload.get("range_key") or range_key or "day"),
-            "range_label": str(rankings_payload.get("range_label") or requested_range_label or ""),
+            "range_key": str(range_key or "day"),
+            "range_label": str(requested_range_label or ""),
             "requested_start_date": requested_start_dt.strftime("%Y-%m-%d"),
             "requested_end_date": requested_end_dt.strftime("%Y-%m-%d"),
             "query_start_date": "",

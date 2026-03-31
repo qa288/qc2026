@@ -5118,7 +5118,8 @@ function materialPreviewTriggerMarkup(row) {
   const materialKey = escapeHtml(row.material_key);
   const materialName = escapeHtml(row.material_name || "素材预览");
   const coverUrl = String(row.cover_url || "").trim();
-  if (coverUrl) {
+  const thumbnailUrl = isLikelyDirectPreviewCoverUrl(coverUrl) ? coverUrl : "";
+  if (thumbnailUrl) {
     return `
       <button
         type="button"
@@ -5127,7 +5128,7 @@ function materialPreviewTriggerMarkup(row) {
         data-material-key="${materialKey}"
         title="预览 ${materialName}"
       >
-        <img class="material-preview-thumb" src="${escapeHtml(coverUrl)}" alt="${materialName}" loading="lazy" />
+        <img class="material-preview-thumb" src="${escapeHtml(thumbnailUrl)}" alt="${materialName}" loading="lazy" />
         <span class="material-preview-badge">预览</span>
       </button>
     `;
@@ -5155,6 +5156,21 @@ function downgradeMaterialPreviewTrigger(button) {
 function materialAwemeLink(row) {
   const awemeId = String(row?.aweme_item_id || "").trim();
   return awemeId ? `https://www.douyin.com/video/${encodeURIComponent(awemeId)}` : "";
+}
+
+function isLikelyDirectPreviewCoverUrl(url) {
+  const text = String(url || "").trim();
+  if (!text) return false;
+  try {
+    const parsed = new URL(text, window.location.origin);
+    const protocol = String(parsed.protocol || "").trim().toLowerCase();
+    const host = String(parsed.hostname || "").trim().toLowerCase();
+    if (!host) return false;
+    if (protocol !== "http:" && protocol !== "https:") return false;
+    return !host.endsWith("creativityeco.com");
+  } catch {
+    return false;
+  }
 }
 
 function isLikelyPublicVideoUrl(url) {
@@ -5263,16 +5279,17 @@ async function fetchMaterialPreviewSource(row, force = false) {
 function materialPreviewMediaStageMarkup(row, options = {}) {
   const directVideoUrl = String(options.videoUrl ?? row?.video_url ?? "").trim();
   const coverUrl = String(options.coverUrl ?? row?.cover_url ?? "").trim();
+  const safeCoverUrl = isLikelyDirectPreviewCoverUrl(coverUrl) ? coverUrl : "";
   const message = String(options.message || "").trim();
   const canDirectPlay = isLikelyPublicVideoUrl(directVideoUrl);
   if (canDirectPlay) {
     return `
       <div class="preview-media-stage">
-        <video class="preview-video" data-original-src="${escapeHtml(directVideoUrl)}" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>
+        <video class="preview-video" data-original-src="${escapeHtml(directVideoUrl)}" src="${escapeHtml(directVideoUrl)}" ${safeCoverUrl ? `poster="${escapeHtml(safeCoverUrl)}"` : ""} controls playsinline preload="metadata"></video>
       </div>
     `;
   }
-  if (coverUrl) {
+  if (safeCoverUrl) {
     return `
       <div class="preview-media-stage">
         <img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row?.material_name || "素材封面")}" />
@@ -5576,10 +5593,6 @@ function openMaterialPreviewFromRow(row) {
   const directVideoUrl = String(row.video_url || "").trim();
   const coverUrl = String(row.cover_url || "").trim();
   const awemeLink = materialAwemeLink(row);
-  const waitForResolvedVideoUrl = needsResolvedPreviewVideoUrl(directVideoUrl);
-  const previewMessage = waitForResolvedVideoUrl
-    ? "正在解析稳定视频直链..."
-    : undefined;
   if (materialPreviewTitle) {
     materialPreviewTitle.textContent = row.material_name || "素材预览";
   }
@@ -5592,7 +5605,7 @@ function openMaterialPreviewFromRow(row) {
   const previewBlock = materialPreviewMediaStageMarkup(
     row,
     {
-      videoUrl: isLikelyPublicVideoUrl(directVideoUrl) && !waitForResolvedVideoUrl ? directVideoUrl : "",
+      videoUrl: isLikelyPublicVideoUrl(directVideoUrl) ? directVideoUrl : "",
       coverUrl,
       message: isLikelyPublicVideoUrl(directVideoUrl)
         ? ""
@@ -6471,7 +6484,12 @@ async function refreshCommentSection(force = false) {
   const accountCount = Array.isArray(payload?.accounts) ? payload.accounts.length : Number(meta.account_count || 0);
   const visibleCount = Number(meta.visible_count || 0);
   const visibleSuffix = visibleCount > 0 && visibleCount !== commentCount ? ` · 可见 ${formatNumber(visibleCount)} 条` : "";
-  commentSyncMeta.textContent = `${rangeText} · 评论 ${formatNumber(commentCount)} 条 · 账户 ${formatNumber(accountCount)} 个 · 错误 ${formatNumber(meta.error_count || 0)}${visibleSuffix}`;
+  const syncSuffix = payload?.comment_sync_pending
+    ? payload?.comment_sync_queued
+      ? " · 后台补同步已入队"
+      : " · 后台补同步进行中"
+    : "";
+  commentSyncMeta.textContent = `${rangeText} · 评论 ${formatNumber(commentCount)} 条 · 账户 ${formatNumber(accountCount)} 个 · 错误 ${formatNumber(meta.error_count || 0)}${visibleSuffix}${syncSuffix}`;
 }
 
 async function applyQuickRange(sectionKey, mode) {
@@ -6964,21 +6982,35 @@ function bindInputs() {
   });
 
   syncButton?.addEventListener("click", async () => {
+    const confirmed = window.confirm(
+      [
+        "将执行全量刷新。",
+        "这会重新拉取今日、昨日、近7天、近30天相关数据并覆盖本地快照。",
+        "任务耗时较长，并会占用接口额度。",
+        "",
+        "确认继续吗？",
+      ].join("\n"),
+    );
+    if (!confirmed) {
+      return;
+    }
     syncButton.disabled = true;
-    syncButton.textContent = "刷新中...";
+    syncButton.textContent = "全量刷新中...";
     try {
-      const response = await fetch("/api/sync", { method: "POST" });
+      const response = await fetch("/api/sync/full-refresh", { method: "POST" });
       if (!response.ok) {
-        throw new Error("刷新任务提交失败");
+        throw new Error("全量刷新任务提交失败");
       }
       syncButton.textContent = "已加入队列";
       window.setTimeout(() => {
         fetchDashboard(true).catch(() => {});
       }, 1500);
+    } catch (error) {
+      window.alert(error.message || "全量刷新任务提交失败");
     } finally {
       window.setTimeout(() => {
         syncButton.disabled = false;
-        syncButton.textContent = "立即刷新";
+        syncButton.textContent = "全量刷新";
       }, 1200);
     }
   });

@@ -18,6 +18,21 @@ def register_system_routes(app: Any, service: Any, require_admin: Any) -> None:
         task = celery_app.send_task("dashboard.sync")
         return api_response({"ok": True, "queued": True, "task_id": task.id, "task_name": "dashboard.sync"}, status_code=202)
 
+    @app.post("/api/sync/full-refresh")
+    async def manual_full_refresh(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+        from dashboard.celery_app import celery_app
+
+        task = celery_app.send_task("dashboard.full_refresh")
+        return api_response(
+            {
+                "ok": True,
+                "queued": True,
+                "task_id": task.id,
+                "task_name": "dashboard.full_refresh",
+            },
+            status_code=202,
+        )
+
     @app.post("/api/sync/extended")
     async def manual_extended_sync(
         force_refresh: bool = False,
