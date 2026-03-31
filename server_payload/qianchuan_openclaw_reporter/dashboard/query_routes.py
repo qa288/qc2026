@@ -90,10 +90,49 @@ def register_query_routes(
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
-        latest = service.latest_snapshot(allowed, display_scope)
+        is_admin = str(user.get("role") or "") == role_admin
+        latest_task = asyncio.create_task(asyncio.to_thread(service.latest_snapshot, allowed, display_scope))
+        extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, display_scope))
+        summary_history_task = asyncio.create_task(asyncio.to_thread(lambda: service.summary_history(display_scope=display_scope)))
+        config_task = asyncio.create_task(asyncio.to_thread(service.read_config))
+        token_task = (
+            asyncio.create_task(asyncio.to_thread(lambda: service.latest_token_payload(masked=True)))
+            if is_admin
+            else None
+        )
+        ocean_config_task = (
+            asyncio.create_task(asyncio.to_thread(service.ocean_engine_runtime_config))
+            if is_admin
+            else None
+        )
+        notification_settings_task = (
+            asyncio.create_task(asyncio.to_thread(service.get_notification_settings))
+            if is_admin
+            else None
+        )
+        alert_rules_task = (
+            asyncio.create_task(asyncio.to_thread(service.list_alert_rules))
+            if is_admin
+            else None
+        )
+        alert_events_task = (
+            asyncio.create_task(asyncio.to_thread(service.alert_events))
+            if is_admin
+            else None
+        )
+        latest, extended_sync, summary_history, current_config = await asyncio.gather(
+            latest_task,
+            extended_sync_task,
+            summary_history_task,
+            config_task,
+        )
+        token_info = await token_task if token_task else None
+        ocean_engine_config = await ocean_config_task if ocean_config_task else None
+        notification_settings = await notification_settings_task if notification_settings_task else {}
+        alert_rules = await alert_rules_task if alert_rules_task else []
+        alert_events = await alert_events_task if alert_events_task else []
         if latest and str(user.get("role") or "") == role_operator:
             latest = service._apply_operator_scope(latest, user)
-        is_admin = str(user.get("role") or "") == role_admin
         return JSONResponse(
             {
                 "session": {
@@ -107,14 +146,14 @@ def register_query_routes(
                     "scope_count": None if allowed is None else len(allowed),
                 },
                 "latest": latest,
-                "extendedSync": service.latest_extended_sync(display_scope),
-                "tokenInfo": service.latest_token_payload(masked=True) if is_admin else None,
-                "oceanEngineConfig": service.ocean_engine_runtime_config() if is_admin else None,
-                "summaryHistory": service.summary_history(display_scope=display_scope),
-                "notificationSettings": service.get_notification_settings() if is_admin else {},
-                "alertRules": service.list_alert_rules() if is_admin else [],
-                "alertEvents": service.alert_events() if is_admin else [],
-                "customerCenterId": service.read_config()["customer_center_id"],
+                "extendedSync": extended_sync,
+                "tokenInfo": token_info,
+                "oceanEngineConfig": ocean_engine_config,
+                "summaryHistory": summary_history,
+                "notificationSettings": notification_settings,
+                "alertRules": alert_rules,
+                "alertEvents": alert_events,
+                "customerCenterId": current_config["customer_center_id"],
                 "displayScope": display_scope,
                 "timezone": timezone,
             }

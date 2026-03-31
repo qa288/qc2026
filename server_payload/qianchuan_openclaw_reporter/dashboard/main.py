@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -167,6 +168,8 @@ MATERIAL_REPORT_TITLE_METRICS = MATERIAL_REPORT_CORE_METRICS + [
 ]
 MATERIAL_PREVIEW_REFRESH_CACHE_SECONDS = 600
 PREVIEW_VIDEO_RESOLVE_CACHE_SECONDS = 300
+LATEST_SNAPSHOT_CACHE_SECONDS = max(RANGE_CACHE_SECONDS, 300)
+LATEST_SNAPSHOT_STALE_SECONDS = max(LATEST_SNAPSHOT_CACHE_SECONDS * 3, 900)
 INIT_DB_LOCK_NAMESPACE = 20260330
 INIT_DB_LOCK_KEY = 1
 MATERIAL_REPORT_TOPIC_CONFIGS = {
@@ -300,6 +303,17 @@ def build_comment_cache_key(
     )
 
 
+def build_latest_snapshot_cache_key(
+    allowed_advertiser_ids: set[int] | None = None,
+    display_scope: str = DISPLAY_SCOPE_CURRENT,
+    customer_center_id: str = "",
+) -> str:
+    return (
+        f"latest:{str(display_scope or DISPLAY_SCOPE_CURRENT).strip().lower()}:"
+        f"{str(customer_center_id or '').strip()}:{build_scope_cache_key(allowed_advertiser_ids)}"
+    )
+
+
 class DashboardService:
     def __init__(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -313,6 +327,9 @@ class DashboardService:
         self._material_preview_refresh_cache: dict[str, dict[str, Any]] = {}
         self._preview_video_resolve_cache: dict[str, dict[str, Any]] = {}
         self._comment_cache: dict[str, dict[str, Any]] = {}
+        self._latest_snapshot_cache: dict[str, dict[str, Any]] = {}
+        self._latest_snapshot_refreshing: set[str] = set()
+        self._latest_snapshot_cache_lock = threading.Lock()
         self._backfill_queue_marks: dict[str, float] = {}
         self.user_access = UserAccess(
             self.db,
@@ -1301,9 +1318,7 @@ class DashboardService:
             target_customer_center_id,
             refresh_token=next_refresh_token,
         )
-        self._performance_cache.clear()
-        self._material_cache.clear()
-        self._comment_cache.clear()
+        self.clear_runtime_caches()
         return {
             "config": self.ocean_engine_runtime_config(),
             "preview": preview,
@@ -2110,7 +2125,7 @@ class DashboardService:
         }
         return self._apply_account_scope(payload, allowed_advertiser_ids)
 
-    def latest_snapshot(
+    def _compute_latest_snapshot(
         self,
         allowed_advertiser_ids: set[int] | None = None,
         display_scope: str = DISPLAY_SCOPE_CURRENT,
@@ -2131,6 +2146,79 @@ class DashboardService:
             payload,
             allowed_advertiser_ids=allowed_advertiser_ids,
         )
+
+    def _store_latest_snapshot_cache(self, cache_key: str, payload: dict[str, Any] | None) -> None:
+        with self._latest_snapshot_cache_lock:
+            self._latest_snapshot_cache[cache_key] = {
+                "_cached_at": time.time(),
+                "payload": copy.deepcopy(payload),
+            }
+
+    def _refresh_latest_snapshot_cache(
+        self,
+        cache_key: str,
+        allowed_advertiser_ids: set[int] | None,
+        display_scope: str,
+    ) -> None:
+        try:
+            payload = self._compute_latest_snapshot(allowed_advertiser_ids, display_scope)
+            self._store_latest_snapshot_cache(cache_key, payload)
+        except Exception:
+            pass
+        finally:
+            with self._latest_snapshot_cache_lock:
+                self._latest_snapshot_refreshing.discard(cache_key)
+
+    def _schedule_latest_snapshot_refresh(
+        self,
+        cache_key: str,
+        allowed_advertiser_ids: set[int] | None,
+        display_scope: str,
+    ) -> None:
+        with self._latest_snapshot_cache_lock:
+            if cache_key in self._latest_snapshot_refreshing:
+                return
+            self._latest_snapshot_refreshing.add(cache_key)
+        threading.Thread(
+            target=self._refresh_latest_snapshot_cache,
+            args=(cache_key, allowed_advertiser_ids, display_scope),
+            daemon=True,
+            name=f"latest-snapshot-refresh-{display_scope}",
+        ).start()
+
+    def latest_snapshot(
+        self,
+        allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+    ) -> dict[str, Any] | None:
+        cache_key = build_latest_snapshot_cache_key(
+            allowed_advertiser_ids,
+            display_scope,
+            self._current_customer_center_id(),
+        )
+        now_ts = time.time()
+        with self._latest_snapshot_cache_lock:
+            cached = copy.deepcopy(self._latest_snapshot_cache.get(cache_key))
+        if cached:
+            cached_payload = cached.get("payload")
+            cached_at = float(cached.get("_cached_at", 0.0) or 0.0)
+            age = max(now_ts - cached_at, 0.0)
+            if age < LATEST_SNAPSHOT_CACHE_SECONDS:
+                return cached_payload
+            if age < LATEST_SNAPSHOT_STALE_SECONDS:
+                self._schedule_latest_snapshot_refresh(cache_key, allowed_advertiser_ids, display_scope)
+                return cached_payload
+        payload = self._compute_latest_snapshot(allowed_advertiser_ids, display_scope)
+        self._store_latest_snapshot_cache(cache_key, payload)
+        return copy.deepcopy(payload)
+
+    def clear_runtime_caches(self) -> None:
+        self._performance_cache.clear()
+        self._material_cache.clear()
+        self._comment_cache.clear()
+        with self._latest_snapshot_cache_lock:
+            self._latest_snapshot_cache.clear()
+            self._latest_snapshot_refreshing.clear()
 
     def _performance_snapshot_from_db_all_customer_centers(
         self,
@@ -7044,7 +7132,7 @@ class DashboardService:
             self.persist_snapshot(payload)
             backfilled += 1
         if backfilled:
-            self._performance_cache.clear()
+            self.clear_runtime_caches()
         return {"backfilled_days": backfilled, "skipped_current_day": skipped_current_day}
 
     def backfill_extended_history(self, start_dt: datetime, end_dt: datetime) -> dict[str, Any]:
@@ -7072,7 +7160,7 @@ class DashboardService:
             self.persist_extended_snapshot(payload, replace_same_day=True)
             backfilled += 1
         if backfilled:
-            self._material_cache.clear()
+            self.clear_runtime_caches()
         return {
             "backfilled_days": backfilled,
             "skipped_current_day": skipped_current_day,
@@ -7124,7 +7212,7 @@ class DashboardService:
             self.persist_snapshot(payload)
             refreshed += 1
         if refreshed:
-            self._performance_cache.clear()
+            self.clear_runtime_caches()
         return {
             "refresh_days": refresh_days,
             "refreshed_days": refreshed,
@@ -7176,7 +7264,7 @@ class DashboardService:
             self.persist_extended_snapshot(payload, replace_same_day=True)
             refreshed += 1
         if refreshed:
-            self._material_cache.clear()
+            self.clear_runtime_caches()
         return {
             "refresh_days": refresh_days,
             "refreshed_days": refreshed,
@@ -10025,7 +10113,7 @@ class DashboardService:
         self.persist_snapshot(payload)
         self.evaluate_alerts(payload)
         self.cleanup_history()
-        self._performance_cache.clear()
+        self.clear_runtime_caches()
         return payload
 
     def collect_extended_and_store(self, force_refresh: bool = False) -> dict[str, Any]:
@@ -10034,7 +10122,7 @@ class DashboardService:
             return payload
         self.persist_extended_snapshot(payload, replace_same_day=True)
         self.cleanup_history()
-        self._material_cache.clear()
+        self.clear_runtime_caches()
         try:
             self.material_rankings("day")
         except Exception:
