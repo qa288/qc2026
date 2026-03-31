@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
+from dashboard.api_response import api_response
 
 def register_upload_routes(app: Any, service: Any, require_material_uploader: Any) -> None:
     def queue_upload_job(payload: dict[str, Any], note: str) -> dict[str, Any]:
@@ -24,11 +25,11 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         q: str = "",
         user: dict[str, Any] = Depends(require_material_uploader),
     ) -> JSONResponse:
-        return JSONResponse(service._visible_upload_targets(user, scope, q))
+        return api_response(service._visible_upload_targets(user, scope, q))
 
     @app.get("/api/upload/jobs")
     async def upload_jobs(user: dict[str, Any] = Depends(require_material_uploader)) -> JSONResponse:
-        return JSONResponse({"items": service.list_material_upload_jobs(user)})
+        return api_response({"items": service.list_material_upload_jobs(user)})
 
     @app.post("/api/upload/jobs")
     async def create_upload_job(
@@ -43,7 +44,7 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         except Exception as exc:
             raise HTTPException(status_code=400, detail="target_plan_ids format is invalid") from exc
         payload = await service.create_material_upload_job(user, scope, query_text, plan_ids, files)
-        return JSONResponse(
+        return api_response(
             queue_upload_job(payload, "Upload job has been queued and is waiting for the worker."),
             status_code=202,
         )
@@ -54,7 +55,7 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         user: dict[str, Any] = Depends(require_material_uploader),
     ) -> JSONResponse:
         payload = service.retry_material_upload_job(user, int(job_id))
-        return JSONResponse(
+        return api_response(
             queue_upload_job(payload, "Retry job has been queued and is waiting for the worker."),
             status_code=202,
         )
@@ -65,4 +66,4 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         user: dict[str, Any] = Depends(require_material_uploader),
     ) -> JSONResponse:
         payload = service.delete_material_upload_job(user, int(job_id))
-        return JSONResponse({"ok": True, **payload})
+        return api_response({"ok": True, **payload})

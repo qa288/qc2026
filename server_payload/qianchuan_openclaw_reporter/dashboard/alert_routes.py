@@ -5,17 +5,18 @@ from typing import Any
 from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse
 
+from dashboard.api_response import api_response
 from dashboard.alert_schemas import AlertRulePayload, NotificationSettingsPayload
 
 
 def register_alert_routes(app: Any, service: Any, require_admin: Any) -> None:
     @app.get("/api/alert-rules")
     async def alert_rules(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
-        return JSONResponse({"items": service.list_alert_rules()})
+        return api_response({"items": service.list_alert_rules()})
 
     @app.get("/api/notification-settings")
     async def notification_settings(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
-        return JSONResponse(service.get_notification_settings())
+        return api_response(service.get_notification_settings())
 
     @app.put("/api/notification-settings")
     async def update_notification_settings(
@@ -26,7 +27,7 @@ def register_alert_routes(app: Any, service: Any, require_admin: Any) -> None:
             service.update_notification_settings(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse({"ok": True})
+        return api_response({"ok": True})
 
     @app.post("/api/alert-rules")
     async def create_alert_rule(
@@ -37,7 +38,7 @@ def register_alert_routes(app: Any, service: Any, require_admin: Any) -> None:
             service.create_alert_rule(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse({"ok": True})
+        return api_response({"ok": True})
 
     @app.put("/api/alert-rules/{rule_id}")
     async def update_alert_rule(
@@ -49,9 +50,9 @@ def register_alert_routes(app: Any, service: Any, require_admin: Any) -> None:
             service.update_alert_rule(rule_id, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse({"ok": True})
+        return api_response({"ok": True})
 
     @app.delete("/api/alert-rules/{rule_id}")
     async def delete_alert_rule(rule_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
         service.delete_alert_rule(rule_id)
-        return JSONResponse({"ok": True})
+        return api_response({"ok": True})
