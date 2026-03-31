@@ -3428,7 +3428,7 @@ function renderMaterialInteractions(rows) {
       button.outerHTML = replacement;
       return;
     }
-    if (String(row.cover_url || "").trim()) {
+    if (replacement.includes("material-preview-thumb")) {
       button.outerHTML = replacement;
     }
   });
@@ -3762,7 +3762,7 @@ function renderTeamMaterialInteractions(rows) {
       button.outerHTML = replacement;
       return;
     }
-    if (String(row.cover_url || "").trim()) {
+    if (replacement.includes("material-preview-thumb")) {
       button.outerHTML = replacement;
     }
   });
@@ -5166,8 +5166,7 @@ function isLikelyDirectPreviewCoverUrl(url) {
     const protocol = String(parsed.protocol || "").trim().toLowerCase();
     const host = String(parsed.hostname || "").trim().toLowerCase();
     if (!host) return false;
-    if (protocol !== "http:" && protocol !== "https:") return false;
-    return !host.endsWith("creativityeco.com");
+    return protocol === "http:" || protocol === "https:";
   } catch {
     return false;
   }
@@ -6412,6 +6411,7 @@ async function refreshPerformanceSection(sectionKey, force = false) {
   const normalizedSectionKey = String(sectionKey || "").trim();
   if (!PERFORMANCE_SECTION_CONFIG[normalizedSectionKey]) return;
   await fetchPerformance(sectionFilter(normalizedSectionKey), force);
+  schedulePerformanceRangeWarmup(normalizedSectionKey);
   renderPerformanceSections();
 }
 
@@ -6513,7 +6513,7 @@ async function applyQuickRange(sectionKey, mode) {
       await refreshCommentSection(false);
       return;
     }
-    await refreshPerformanceSection(sectionKey, true);
+    await refreshPerformanceSection(sectionKey, false);
   } catch (error) {
     window.alert(error.message || "切换时间范围失败");
   }
@@ -6550,10 +6550,24 @@ async function applyCustomRange(sectionKey) {
       await refreshCommentSection(false);
       return;
     }
-    await refreshPerformanceSection(sectionKey, true);
+    await refreshPerformanceSection(sectionKey, false);
   } catch (error) {
     window.alert(error.message || "查询时间段失败");
   }
+}
+
+function schedulePerformanceRangeWarmup(sectionKey = "") {
+  const normalizedSectionKey = String(sectionKey || "").trim();
+  if (!["account", "plan", "breakdown"].includes(normalizedSectionKey)) return;
+  const activeFilter = sectionFilter(normalizedSectionKey);
+  const warmupModes = ["day", "yesterday", "week", "month"].filter((mode) => mode !== activeFilter.mode);
+  window.setTimeout(() => {
+    warmupModes.forEach((mode, index) => {
+      window.setTimeout(() => {
+        fetchPerformance({ mode }, false).catch(() => {});
+      }, index * 180);
+    });
+  }, 0);
 }
 
 function bindRangeFilterControls(sectionKey) {
