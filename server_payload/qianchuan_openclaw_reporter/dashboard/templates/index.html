@@ -143,7 +143,10 @@
                     </div>
                   </div>
                 </div>
-                <input id="accountSearch" class="search-input" type="search" placeholder="搜索账户" />
+                <div class="toolbar-search-actions">
+                  <input id="accountSearch" class="search-input" type="search" placeholder="搜索账户" />
+                  <button id="accountRefreshButton" class="button ghost compact" type="button">刷新今日</button>
+                </div>
               </div>
             </div>
           </div>
@@ -178,7 +181,10 @@
                     </div>
                   </div>
                 </div>
-                <input id="employeeSearch" class="search-input" type="search" placeholder="搜索运营" />
+                <div class="toolbar-search-actions">
+                  <input id="employeeSearch" class="search-input" type="search" placeholder="搜索运营" />
+                  <button id="breakdownRefreshButton" class="button ghost compact" type="button">刷新今日</button>
+                </div>
               </div>
             </div>
           </div>
@@ -227,6 +233,7 @@
                   <select id="planAccountFilter" class="select-input">
                     <option value="">全部账户</option>
                   </select>
+                  <button id="planRefreshButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>
@@ -264,7 +271,7 @@
                 </div>
                 <div class="toolbar-search-actions">
                   <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材" />
-                  <button id="syncExtendedButton" class="button ghost compact" type="button">刷新素材</button>
+                  <button id="syncExtendedButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>
@@ -303,6 +310,7 @@
                 </div>
                 <div class="toolbar-search-actions">
                   <input id="teamMaterialSearch" class="search-input" type="search" placeholder="搜索归属账户 / 计划 / 达人" />
+                  <button id="teamMaterialRefreshButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>
@@ -344,7 +352,7 @@
                   <select id="commentAccountFilter" class="select-input">
                     <option value="">全部账户</option>
                   </select>
-                  <button id="commentRefreshButton" class="button ghost compact" type="button">刷新</button>
+                  <button id="commentRefreshButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>

@@ -22,7 +22,6 @@ verified_date：`2026-03-30`
 ## 2. 当前运行事实
 
 - 当前正式运行栈：`FastAPI + PostgreSQL + Redis + Celery + Celery Beat + Docker Compose`
-- 运行时数据库约束：`PostgreSQL only`，`SQLite` 仅保留给离线迁移烟测
 - 当前前端形态：`Jinja2 + 原生 JS/CSS`
 - 当前站点运维入口：`1Panel`
 - 当前主入口域名：`qc.tyos.cc`

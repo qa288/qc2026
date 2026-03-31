@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import Body, Depends, HTTPException
-from fastapi.responses import JSONResponse
+import requests
+from fastapi import Body, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from dashboard.api_response import api_response
 
@@ -299,7 +300,7 @@ def register_query_routes(
         allowed = service.allowed_advertiser_ids_for_user(user)
         try:
             payload = await asyncio.to_thread(
-                service.material_preview_source,
+                service.material_preview_source_v2,
                 preview_row,
                 range,
                 start_date,
@@ -314,6 +315,90 @@ def register_query_routes(
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return api_response(payload)
+
+    @app.get("/api/material-preview-stream")
+    async def material_preview_stream(
+        request: Request,
+        target: str,
+        expires: int,
+        sig: str,
+        _user: dict[str, Any] = Depends(require_auth),
+    ) -> StreamingResponse:
+        try:
+            target_url = service.resolve_material_preview_proxy_target(target, expires, sig)
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+        range_header = str(request.headers.get("range") or "").strip()
+
+        def open_remote_stream() -> Any:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/134.0.0.0 Safari/537.36"
+                ),
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            }
+            if range_header:
+                headers["Range"] = range_header
+            response = requests.get(
+                target_url,
+                headers=headers,
+                timeout=30,
+                stream=True,
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+            return response
+
+        try:
+            remote_response = await asyncio.to_thread(open_remote_stream)
+        except requests.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            detail = str(exc)
+            if response is not None:
+                try:
+                    error_body = str(response.text or "")[:512].strip()
+                    if error_body:
+                        detail = f"{detail}: {error_body}"
+                except Exception:
+                    pass
+            raise HTTPException(status_code=502, detail=detail) from exc
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        status_code = int(getattr(remote_response, "status_code", 0) or 200)
+        passthrough_headers: dict[str, str] = {
+            "Cache-Control": "private, max-age=300",
+            "Accept-Ranges": "bytes",
+        }
+        for header_name in ("Content-Type", "Content-Length", "Content-Range", "Last-Modified", "ETag"):
+            value = str(remote_response.headers.get(header_name) or "").strip()
+            if value:
+                passthrough_headers[header_name] = value
+
+        async def stream_chunks() -> Any:
+            try:
+                for chunk in remote_response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                try:
+                    remote_response.close()
+                except Exception:
+                    pass
+
+        return StreamingResponse(
+            stream_chunks(),
+            status_code=status_code,
+            headers=passthrough_headers,
+            media_type=str(remote_response.headers.get("Content-Type") or "video/mp4"),
+        )
 
     @app.get("/api/comments")
     async def comments(

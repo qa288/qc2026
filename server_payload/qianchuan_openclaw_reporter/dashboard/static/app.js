@@ -135,6 +135,9 @@ const state = {
   dashboardFetchPromise: null,
   dashboardFetchQueued: false,
   dashboardFetchedAt: 0,
+  fullRefreshStatus: null,
+  fullRefreshStatusPromise: null,
+  fullRefreshStatusPollTimer: 0,
   selectedUserId: null,
   selectedUserScopeIds: [],
   editingRuleId: null,
@@ -190,7 +193,11 @@ const ruleStatusFilter = document.getElementById("ruleStatusFilter");
 const ruleSearchInput = document.getElementById("ruleSearchInput");
 const ruleListMeta = document.getElementById("ruleListMeta");
 const syncButton = document.getElementById("syncButton");
+const accountRefreshButton = document.getElementById("accountRefreshButton");
+const breakdownRefreshButton = document.getElementById("breakdownRefreshButton");
+const planRefreshButton = document.getElementById("planRefreshButton");
 const syncExtendedButton = document.getElementById("syncExtendedButton");
+const teamMaterialRefreshButton = document.getElementById("teamMaterialRefreshButton");
 const customerCenterChip = document.getElementById("customerCenterChip");
 const heroStatusText = document.getElementById("heroStatusText");
 const heroStatusHint = document.getElementById("heroStatusHint");
@@ -5107,6 +5114,9 @@ function canPreviewMaterial(row) {
   return Boolean(
     String(row.video_url || "").trim()
     || String(row.cover_url || "").trim()
+    || String(row.video_id || "").trim()
+    || String(row.material_id || "").trim()
+    || String(row.material_key || "").trim()
     || materialAwemeLink(row)
   );
 }
@@ -5166,6 +5176,7 @@ function isLikelyDirectPreviewCoverUrl(url) {
     const protocol = String(parsed.protocol || "").trim().toLowerCase();
     const host = String(parsed.hostname || "").trim().toLowerCase();
     if (!host) return false;
+    if (host.endsWith("creativityeco.com")) return false;
     return protocol === "http:" || protocol === "https:";
   } catch {
     return false;
@@ -5180,6 +5191,7 @@ function isLikelyPublicVideoUrl(url) {
     const protocol = String(parsed.protocol || "").trim().toLowerCase();
     const host = String(parsed.hostname || "").trim().toLowerCase();
     if (!host) return false;
+    if (host.endsWith("cc.oceanengine.com")) return false;
     return protocol === "http:" || protocol === "https:";
   } catch {
     return false;
@@ -5591,6 +5603,14 @@ function openMaterialPreviewFromRow(row) {
   row = enrichMaterialRow(row);
   const directVideoUrl = String(row.video_url || "").trim();
   const coverUrl = String(row.cover_url || "").trim();
+  const safeDirectVideoUrl = isLikelyPublicVideoUrl(directVideoUrl) ? directVideoUrl : "";
+  const safeCoverUrl = isLikelyDirectPreviewCoverUrl(coverUrl) ? coverUrl : "";
+  const canResolvePreview = Boolean(
+    String(row.material_key || "").trim()
+    || String(row.material_id || "").trim()
+    || String(row.video_id || "").trim()
+    || String(row.aweme_item_id || "").trim()
+  );
   const awemeLink = materialAwemeLink(row);
   if (materialPreviewTitle) {
     materialPreviewTitle.textContent = row.material_name || "素材预览";
@@ -5604,16 +5624,16 @@ function openMaterialPreviewFromRow(row) {
   const previewBlock = materialPreviewMediaStageMarkup(
     row,
     {
-      videoUrl: isLikelyPublicVideoUrl(directVideoUrl) ? directVideoUrl : "",
-      coverUrl,
-      message: isLikelyPublicVideoUrl(directVideoUrl)
+      videoUrl: safeDirectVideoUrl,
+      coverUrl: safeCoverUrl,
+      message: safeDirectVideoUrl || safeCoverUrl
         ? ""
         : (coverUrl ? "正在优先解析公网直链..." : "当前素材没有可直接预览的地址。"),
     },
   );
   const extraActions = [
     awemeLink ? `<a class="button ghost compact" href="${escapeHtml(awemeLink)}" target="_blank" rel="noreferrer">打开抖音作品</a>` : "",
-    isLikelyPublicVideoUrl(directVideoUrl) ? `<a class="button ghost compact" href="${escapeHtml(directVideoUrl)}" target="_blank" rel="noreferrer">打开原始视频</a>` : "",
+    safeDirectVideoUrl ? `<a class="button ghost compact" href="${escapeHtml(safeDirectVideoUrl)}" target="_blank" rel="noreferrer">打开原始视频</a>` : "",
   ].filter(Boolean).join("");
   const detailStatsMarkup = operatorMode
     ? `
@@ -5654,7 +5674,7 @@ function openMaterialPreviewFromRow(row) {
     previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
       row,
       {
-        coverUrl,
+        coverUrl: safeCoverUrl,
         message: "当前视频地址无法直接播放，已降级为封面预览。",
       },
     );
@@ -5938,8 +5958,23 @@ function applyRoleViewPolicy() {
   if (syncButton) {
     syncButton.classList.toggle("hidden", !admin);
   }
+  if (accountRefreshButton) {
+    accountRefreshButton.classList.toggle("hidden", !admin);
+  }
+  if (breakdownRefreshButton) {
+    breakdownRefreshButton.classList.toggle("hidden", !admin);
+  }
+  if (planRefreshButton) {
+    planRefreshButton.classList.toggle("hidden", !admin);
+  }
   if (syncExtendedButton) {
     syncExtendedButton.classList.toggle("hidden", !admin);
+  }
+  if (teamMaterialRefreshButton) {
+    teamMaterialRefreshButton.classList.toggle("hidden", !admin);
+  }
+  if (commentRefreshButton) {
+    commentRefreshButton.classList.toggle("hidden", !admin);
   }
   if (productRankPanel) {
     productRankPanel.classList.add("hidden");
@@ -6492,6 +6527,41 @@ async function refreshCommentSection(force = false) {
   commentSyncMeta.textContent = `${rangeText} · 评论 ${formatNumber(commentCount)} 条 · 账户 ${formatNumber(accountCount)} 个 · 错误 ${formatNumber(meta.error_count || 0)}${visibleSuffix}${syncSuffix}`;
 }
 
+async function queueTodaySummaryRefresh() {
+  const response = await fetch("/api/sync", { method: "POST" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.detail || payload?.message || "今日汇总刷新提交失败");
+  }
+  return payload;
+}
+
+async function queueTodayDetailRefresh() {
+  const response = await fetch("/api/sync/extended?force_refresh=1", { method: "POST" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.detail || payload?.message || "今日明细刷新提交失败");
+  }
+  return payload;
+}
+
+async function runTodayPageRefresh(button, loadingText, callback) {
+  if (button) {
+    button.disabled = true;
+    button.textContent = loadingText;
+  }
+  try {
+    await callback();
+  } finally {
+    window.setTimeout(() => {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "刷新今日";
+      }
+    }, 1200);
+  }
+}
+
 async function applyQuickRange(sectionKey, mode) {
   const current = sectionFilter(sectionKey);
   if (current.mode === mode) return;
@@ -6726,9 +6796,36 @@ function bindInputs() {
     state.commentPage = 1;
     await refreshCommentSection(false);
   });
+  accountRefreshButton?.addEventListener("click", async () => {
+    await runTodayPageRefresh(accountRefreshButton, "刷新中...", async () => {
+      await queueTodaySummaryRefresh();
+      setSectionFilter("account", { mode: "day" });
+      await fetchDashboard(true);
+      await refreshPerformanceSection("account", true);
+    });
+  });
+  breakdownRefreshButton?.addEventListener("click", async () => {
+    await runTodayPageRefresh(breakdownRefreshButton, "刷新中...", async () => {
+      await queueTodaySummaryRefresh();
+      setSectionFilter("breakdown", { mode: "day" });
+      await fetchDashboard(true);
+      await refreshPerformanceSection("breakdown", true);
+    });
+  });
+  planRefreshButton?.addEventListener("click", async () => {
+    await runTodayPageRefresh(planRefreshButton, "刷新中...", async () => {
+      await queueTodaySummaryRefresh();
+      setSectionFilter("plan", { mode: "day" });
+      await fetchDashboard(true);
+      await refreshPerformanceSection("plan", true);
+    });
+  });
   commentRefreshButton?.addEventListener("click", async () => {
-    state.commentPage = 1;
-    await refreshCommentSection(true);
+    await runTodayPageRefresh(commentRefreshButton, "刷新中...", async () => {
+      state.commentPage = 1;
+      setSectionFilter("comment", { mode: "day" });
+      await refreshCommentSection(true);
+    });
   });
   commentReplySubmit?.addEventListener("click", async () => {
     await submitCommentReply();
@@ -6999,7 +7096,8 @@ function bindInputs() {
     const confirmed = window.confirm(
       [
         "将执行全量刷新。",
-        "这会重新拉取今日、昨日、近7天、近30天相关数据并覆盖本地快照。",
+        "这会刷新全部页面的全部数据，并覆盖本地快照。",
+        "页面内的“刷新今日”按钮只会刷新当前页面今天的数据。",
         "任务耗时较长，并会占用接口额度。",
         "",
         "确认继续吗？",
@@ -7008,49 +7106,48 @@ function bindInputs() {
     if (!confirmed) {
       return;
     }
-    syncButton.disabled = true;
-    syncButton.textContent = "全量刷新中...";
     try {
       const response = await fetch("/api/sync/full-refresh", { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error("全量刷新任务提交失败");
+        throw new Error(payload?.detail || payload?.message || "全量刷新任务提交失败");
       }
-      syncButton.textContent = "已加入队列";
+      state.fullRefreshStatus = payload?.status || state.fullRefreshStatus;
+      applyFullRefreshStatus();
+      scheduleFullRefreshStatusPoll();
+      if (payload?.running) {
+        window.alert(payload?.status?.message || "已有全量刷新任务正在执行，请等待当前任务完成。");
+        return;
+      }
       window.setTimeout(() => {
         fetchDashboard(true).catch(() => {});
+        fetchFullRefreshStatus(true).catch(() => {});
       }, 1500);
     } catch (error) {
       window.alert(error.message || "全量刷新任务提交失败");
-    } finally {
-      window.setTimeout(() => {
-        syncButton.disabled = false;
-        syncButton.textContent = "全量刷新";
-      }, 1200);
     }
   });
 
   if (syncExtendedButton) {
     syncExtendedButton.addEventListener("click", async () => {
-      syncExtendedButton.disabled = true;
-      syncExtendedButton.textContent = "同步中...";
-      try {
-        const response = await fetch("/api/sync/extended?force_refresh=1", { method: "POST" });
-        if (!response.ok) {
-          throw new Error("明细同步任务提交失败");
-        }
-        syncExtendedButton.textContent = "已加入队列";
-        window.setTimeout(() => {
-          fetchDashboard(true).catch(() => {});
-          refreshMaterialSection(true).catch(() => {});
-        }, 2000);
-      } finally {
-        window.setTimeout(() => {
-          syncExtendedButton.disabled = false;
-          syncExtendedButton.textContent = "刷新素材";
-        }, 1200);
-      }
+      await runTodayPageRefresh(syncExtendedButton, "同步中...", async () => {
+        await queueTodayDetailRefresh();
+        state.materialPage = 1;
+        setSectionFilter("material", { mode: "day" });
+        await fetchDashboard(true);
+        await refreshMaterialSection(true);
+      });
     });
   }
+  teamMaterialRefreshButton?.addEventListener("click", async () => {
+    await runTodayPageRefresh(teamMaterialRefreshButton, "同步中...", async () => {
+      await queueTodayDetailRefresh();
+      state.teamMaterialPage = 1;
+      setSectionFilter("teamMaterial", { mode: "day" });
+      await fetchDashboard(true);
+      await refreshTeamMaterialSection(true);
+    });
+  });
 
   userForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -7318,6 +7415,66 @@ async function fetchDashboard(force = false) {
   }
 }
 
+function isFullRefreshActive(status) {
+  const value = String(status?.status || "").trim().toLowerCase();
+  return value === "queued" || value === "running";
+}
+
+function fullRefreshButtonLabel(status) {
+  const value = String(status?.status || "").trim().toLowerCase();
+  if (value === "queued") return "全量刷新排队中";
+  if (value === "running") return "全量刷新中";
+  return "全量刷新";
+}
+
+function applyFullRefreshStatus() {
+  if (!syncButton) return;
+  const status = state.fullRefreshStatus || null;
+  syncButton.textContent = fullRefreshButtonLabel(status);
+  syncButton.disabled = isFullRefreshActive(status);
+  const titleParts = [];
+  if (status?.stage_label) titleParts.push(String(status.stage_label));
+  if (status?.message) titleParts.push(String(status.message));
+  syncButton.title = titleParts.join(" · ");
+}
+
+function scheduleFullRefreshStatusPoll() {
+  window.clearTimeout(Number(state.fullRefreshStatusPollTimer || 0));
+  state.fullRefreshStatusPollTimer = 0;
+  if (!isPageVisible() || !isFullRefreshActive(state.fullRefreshStatus)) {
+    applyFullRefreshStatus();
+    return;
+  }
+  state.fullRefreshStatusPollTimer = window.setTimeout(() => {
+    fetchFullRefreshStatus(true).catch(() => {
+      scheduleFullRefreshStatusPoll();
+    });
+  }, 5000);
+}
+
+async function fetchFullRefreshStatus(force = false) {
+  if (state.fullRefreshStatusPromise && !force) {
+    return state.fullRefreshStatusPromise;
+  }
+  const requestPromise = (async () => {
+    const response = await fetch("/api/sync/full-refresh/status");
+    if (!response.ok) {
+      throw new Error("全量刷新状态获取失败");
+    }
+    const payload = await response.json();
+    state.fullRefreshStatus = payload || null;
+    applyFullRefreshStatus();
+    scheduleFullRefreshStatusPoll();
+    return payload;
+  })();
+  state.fullRefreshStatusPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    state.fullRefreshStatusPromise = null;
+  }
+}
+
 async function render(payload) {
   const latest = payload.latest;
   state.alertRules = payload.alertRules || [];
@@ -7332,6 +7489,7 @@ async function render(payload) {
   renderRuleTable(state.alertRules);
   syncRuleFormFields();
   lastSnapshotText.textContent = latest.snapshot_time;
+  applyFullRefreshStatus();
   refreshHintText.textContent = "采集 1 分钟 · 明细 10 分钟 · 页面 60 秒";
   setActiveView(state.activeView);
   ensureActiveViewData(false).catch((error) => {
@@ -7342,6 +7500,7 @@ async function render(payload) {
 bindInputs();
 setActiveView(state.activeView);
 fetchDashboard().catch(() => {});
+fetchFullRefreshStatus().catch(() => {});
 window.setInterval(() => {
   if (!isPageVisible()) return;
   fetchDashboard().catch(() => {});
@@ -7349,6 +7508,7 @@ window.setInterval(() => {
 document.addEventListener("visibilitychange", () => {
   if (!isPageVisible()) return;
   fetchDashboard().catch(() => {});
+  fetchFullRefreshStatus(true).catch(() => {});
 });
 window.setInterval(() => {
   if (!isPageVisible()) return;

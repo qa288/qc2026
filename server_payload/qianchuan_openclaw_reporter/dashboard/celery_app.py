@@ -56,5 +56,10 @@ celery_app.conf.update(
             "schedule": crontab(hour=0, minute=20),
             "args": (EXTENDED_HISTORY_REFRESH_DAYS,),
         },
+        "dashboard-oauth-authorization-audit": {
+            "task": "dashboard.oauth_authorization_audit",
+            "schedule": crontab(hour="*/12", minute=15),
+            "args": (12,),
+        },
     },
 )

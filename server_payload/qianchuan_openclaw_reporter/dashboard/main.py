@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import hmac
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -21,7 +23,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 try:
@@ -178,6 +180,16 @@ MATERIAL_PREVIEW_REFRESH_CACHE_SECONDS = 600
 PREVIEW_VIDEO_RESOLVE_CACHE_SECONDS = 300
 LATEST_SNAPSHOT_CACHE_SECONDS = max(RANGE_CACHE_SECONDS, 300)
 LATEST_SNAPSHOT_STALE_SECONDS = max(LATEST_SNAPSHOT_CACHE_SECONDS * 3, 900)
+AUTH_AUDIT_STALE_HOURS = 12
+FULL_REFRESH_STATUS_CACHE_KEY = "dashboard:full-refresh:status"
+FULL_REFRESH_STATUS_TTL_SECONDS = 86400
+FULL_REFRESH_STAGE_SEQUENCE = ("summary", "performance", "detail_sync", "detail_history")
+FULL_REFRESH_STAGE_LABELS = {
+    "summary": "今日汇总",
+    "performance": "历史表现",
+    "detail_sync": "今日明细",
+    "detail_history": "历史明细",
+}
 INIT_DB_LOCK_NAMESPACE = 20260330
 INIT_DB_LOCK_KEY = 1
 MATERIAL_REPORT_TOPIC_CONFIGS = {
@@ -355,6 +367,7 @@ class DashboardService:
         self._latest_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._latest_snapshot_refreshing: set[str] = set()
         self._latest_snapshot_cache_lock = threading.Lock()
+        self._full_refresh_status_local: dict[str, Any] = {}
         self._redis_client: Any | None = None
         self._backfill_queue_marks: dict[str, float] = {}
         self.user_access = UserAccess(
@@ -478,6 +491,146 @@ class DashboardService:
             pass
 
     @staticmethod
+    def _runtime_lock_key(lock_name: str) -> str:
+        return f"dashboard:runtime-lock:{str(lock_name or '').strip()}"
+
+    def runtime_lock_active(self, lock_name: str) -> bool:
+        client = self._redis()
+        if client is None:
+            return False
+        try:
+            return bool(client.exists(self._runtime_lock_key(lock_name)))
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _default_full_refresh_status() -> dict[str, Any]:
+        return {
+            "task_id": "",
+            "status": "idle",
+            "stage": "",
+            "stage_label": "",
+            "message": "",
+            "queued_at": "",
+            "started_at": "",
+            "updated_at": "",
+            "finished_at": "",
+            "progress": {
+                "completed_steps": 0,
+                "total_steps": len(FULL_REFRESH_STAGE_SEQUENCE),
+                "stage_completed_steps": 0,
+                "stage_total_steps": 0,
+            },
+            "stages": {},
+            "result": {},
+        }
+
+    def _normalize_full_refresh_status(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        baseline = self._default_full_refresh_status()
+        if not isinstance(payload, dict):
+            return baseline
+        normalized = dict(baseline)
+        normalized.update(
+            {
+                "task_id": str(payload.get("task_id") or "").strip(),
+                "status": str(payload.get("status") or "idle").strip().lower() or "idle",
+                "stage": str(payload.get("stage") or "").strip(),
+                "stage_label": str(payload.get("stage_label") or "").strip(),
+                "message": str(payload.get("message") or "").strip(),
+                "queued_at": str(payload.get("queued_at") or "").strip(),
+                "started_at": str(payload.get("started_at") or "").strip(),
+                "updated_at": str(payload.get("updated_at") or "").strip(),
+                "finished_at": str(payload.get("finished_at") or "").strip(),
+                "stages": copy.deepcopy(payload.get("stages") or {}),
+                "result": copy.deepcopy(payload.get("result") or {}),
+            }
+        )
+        if normalized["stage"] and not normalized["stage_label"]:
+            normalized["stage_label"] = FULL_REFRESH_STAGE_LABELS.get(normalized["stage"], normalized["stage"])
+        progress_payload = payload.get("progress") if isinstance(payload.get("progress"), dict) else {}
+        total_steps = max(
+            int(progress_payload.get("total_steps", len(FULL_REFRESH_STAGE_SEQUENCE)) or len(FULL_REFRESH_STAGE_SEQUENCE)),
+            1,
+        )
+        completed_steps = max(min(int(progress_payload.get("completed_steps", 0) or 0), total_steps), 0)
+        stage_total_steps = max(int(progress_payload.get("stage_total_steps", 0) or 0), 0)
+        stage_completed_steps = max(min(int(progress_payload.get("stage_completed_steps", 0) or 0), stage_total_steps), 0)
+        normalized["progress"] = {
+            "completed_steps": completed_steps,
+            "total_steps": total_steps,
+            "stage_completed_steps": stage_completed_steps,
+            "stage_total_steps": stage_total_steps,
+        }
+        return normalized
+
+    def full_refresh_status(self) -> dict[str, Any]:
+        client = self._redis()
+        payload: dict[str, Any] | None = None
+        if client is None:
+            payload = copy.deepcopy(self._full_refresh_status_local) if self._full_refresh_status_local else None
+        else:
+            cached = self._shared_json_cache_get(FULL_REFRESH_STATUS_CACHE_KEY)
+            payload = cached if isinstance(cached, dict) else None
+        normalized = self._normalize_full_refresh_status(payload)
+        if normalized["status"] in {"queued", "running"} and not self.runtime_lock_active("full-refresh"):
+            if not normalized["finished_at"]:
+                normalized["finished_at"] = now_text()
+            if normalized["status"] == "running":
+                normalized["status"] = "unknown"
+                if not normalized["message"]:
+                    normalized["message"] = "任务锁已释放，但未写入完成状态。"
+        return normalized
+
+    def _set_full_refresh_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = self._normalize_full_refresh_status(payload)
+        client = self._redis()
+        if client is None:
+            self._full_refresh_status_local = copy.deepcopy(normalized)
+            return normalized
+        self._shared_json_cache_set(FULL_REFRESH_STATUS_CACHE_KEY, normalized, FULL_REFRESH_STATUS_TTL_SECONDS)
+        return normalized
+
+    def update_full_refresh_status(self, **fields: Any) -> dict[str, Any]:
+        current = self.full_refresh_status()
+        merged = dict(current)
+        for key, value in fields.items():
+            if key == "stages" and isinstance(value, dict):
+                next_stages = dict(merged.get("stages") or {})
+                for stage_key, stage_payload in value.items():
+                    next_stages[str(stage_key)] = copy.deepcopy(stage_payload)
+                merged["stages"] = next_stages
+                continue
+            if key in {"progress", "result"} and isinstance(value, dict):
+                merged[key] = copy.deepcopy(value)
+                continue
+            merged[key] = value
+        return self._set_full_refresh_status(merged)
+
+    def mark_full_refresh_queued(self, task_id: str) -> dict[str, Any]:
+        queued_at = now_text()
+        return self._set_full_refresh_status(
+            {
+                "task_id": str(task_id or "").strip(),
+                "status": "queued",
+                "stage": "",
+                "stage_label": "",
+                "message": "任务已进入队列，等待开始执行。",
+                "queued_at": queued_at,
+                "started_at": "",
+                "updated_at": queued_at,
+                "finished_at": "",
+                "progress": {
+                    "completed_steps": 0,
+                    "total_steps": len(FULL_REFRESH_STAGE_SEQUENCE),
+                    "stage_completed_steps": 0,
+                    "stage_total_steps": 0,
+                },
+                "stages": {},
+                "result": {},
+            }
+        )
+
+    @staticmethod
     def _versioned_cache_key(version: str, raw_key: str) -> str:
         return f"v{str(version or '1').strip()}:{str(raw_key or '').strip()}"
 
@@ -540,7 +693,7 @@ class DashboardService:
             yield True
             return
         lock = client.lock(
-            f"dashboard:runtime-lock:{str(lock_name or '').strip()}",
+            self._runtime_lock_key(lock_name),
             timeout=max(int(timeout_seconds or 0), 1),
             blocking_timeout=max(int(blocking_timeout_seconds or 0), 0),
         )
@@ -880,6 +1033,7 @@ class DashboardService:
             return False
         self._backfill_queue_marks[dedupe_key] = now_ts
         return True
+
     def queue_manual_history_backfill(self, kind: str, days: int = 30) -> dict[str, Any]:
         normalized_kind = "detail" if str(kind or "").strip() == "detail" else "performance"
         normalized_days = max(int(days or 30), 1)
@@ -1474,6 +1628,133 @@ class DashboardService:
             "token_source": str(token_payload.get("source") or ""),
             "bound_customer_centers": self.list_bound_customer_centers(),
         }
+
+    @staticmethod
+    def _classify_customer_center_auth_error(message: str) -> tuple[str, str]:
+        normalized = str(message or "").strip()
+        lowered = normalized.lower()
+        if "40002" in normalized or "no permission to operate account" in lowered:
+            return (
+                "permission_denied",
+                "千川侧已取消当前应用/主体对该客群中心的操作权限，需要重新授权。",
+            )
+        if "refresh token failed" in lowered or "40103" in normalized or "已过期" in normalized:
+            return (
+                "token_invalid",
+                "保存的 refresh_token 已失效，需要重新授权。",
+            )
+        if "no refresh token is available" in lowered:
+            return (
+                "token_missing",
+                "系统内没有该客群中心可用的 refresh_token，需要重新授权。",
+            )
+        return ("error", normalized or "unknown error")
+
+    @staticmethod
+    def _parse_snapshot_time_text(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    def audit_customer_center_authorizations(
+        self,
+        stale_hours: int = AUTH_AUDIT_STALE_HOURS,
+    ) -> dict[str, Any]:
+        stale_seconds = max(int(stale_hours or AUTH_AUDIT_STALE_HOURS), 1) * 3600
+        with self._distributed_runtime_lock("oauth-audit", timeout_seconds=1800) as acquired:
+            if not acquired:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "oauth audit already running",
+                    "stale_hours": stale_hours,
+                    "customer_center_count": 0,
+                    "checked_count": 0,
+                    "ok_count": 0,
+                    "repaired_count": 0,
+                    "error_count": 0,
+                    "items": [],
+                }
+
+            items: list[dict[str, Any]] = []
+            repaired_count = 0
+            error_count = 0
+            now_dt = datetime.now(ZoneInfo(str(self.read_config().get("timezone") or TIMEZONE)))
+            customer_center_ids = self.bound_customer_center_ids()
+
+            for customer_center_id in customer_center_ids:
+                latest_snapshot_time = ""
+                latest_snapshot_age_hours = 0.0
+                with self.db() as conn:
+                    latest_meta = self._latest_summary_meta(conn, customer_center_id)
+                if latest_meta:
+                    latest_snapshot_time = str(latest_meta["snapshot_time"] or "").strip()
+                    latest_snapshot_dt = self._parse_snapshot_time_text(latest_snapshot_time)
+                    if latest_snapshot_dt:
+                        latest_snapshot_age_hours = round(
+                            max((now_dt.replace(tzinfo=None) - latest_snapshot_dt).total_seconds(), 0.0) / 3600.0,
+                            2,
+                        )
+                item = {
+                    "customer_center_id": customer_center_id,
+                    "latest_snapshot_time": latest_snapshot_time,
+                    "latest_snapshot_age_hours": latest_snapshot_age_hours,
+                    "status": "ok",
+                    "reason": "",
+                    "account_count": 0,
+                    "repaired": False,
+                    "repair_summary_snapshot_time": "",
+                    "repair_detail_snapshot_time": "",
+                }
+                try:
+                    client = self._build_scoped_customer_center_client(customer_center_id)
+                    accounts = client.list_accounts()
+                    item["account_count"] = len(accounts)
+                    snapshot_dt = self._parse_snapshot_time_text(latest_snapshot_time)
+                    needs_repair = (
+                        not latest_snapshot_time
+                        or snapshot_dt is None
+                        or (now_dt.replace(tzinfo=None) - snapshot_dt).total_seconds() >= stale_seconds
+                    )
+                    if needs_repair:
+                        summary_payload = self.collect_snapshot_for_customer_center(customer_center_id)
+                        self.persist_snapshot(summary_payload)
+                        item["repaired"] = True
+                        item["repair_summary_snapshot_time"] = str(summary_payload.get("snapshot_time") or "").strip()
+                        detail_payload = self.collect_extended_snapshot(force_refresh=True, customer_center_id=customer_center_id)
+                        if not detail_payload.get("skipped"):
+                            self.persist_extended_snapshot(detail_payload, replace_same_day=True)
+                            item["repair_detail_snapshot_time"] = str(detail_payload.get("snapshot_time") or "").strip()
+                        repaired_count += 1
+                except Exception as exc:  # noqa: BLE001
+                    error_count += 1
+                    status_text, reason_text = self._classify_customer_center_auth_error(str(exc))
+                    item["status"] = status_text
+                    item["reason"] = reason_text
+                    item["error"] = str(exc)
+                items.append(item)
+
+            if repaired_count:
+                self.cleanup_history()
+                self.clear_runtime_caches()
+
+            ok_count = sum(1 for item in items if str(item.get("status") or "") == "ok")
+            return {
+                "ok": error_count == 0,
+                "skipped": False,
+                "reason": "" if error_count == 0 else f"{error_count} customer center authorization checks failed",
+                "stale_hours": stale_hours,
+                "customer_center_count": len(customer_center_ids),
+                "checked_count": len(items),
+                "ok_count": ok_count,
+                "repaired_count": repaired_count,
+                "error_count": error_count,
+                "items": items,
+            }
 
     def update_ocean_engine_runtime_config(self, payload: Any) -> dict[str, Any]:
         target_customer_center_id = str(getattr(payload, "customer_center_id", "") or "").strip()
@@ -2887,6 +3168,30 @@ class DashboardService:
     def _summary_meta_for_day(self, conn: Any, target_day: datetime) -> dict[str, Any] | None:
         return self.history_access.summary_meta_for_day(conn, target_day)
 
+    def _summary_meta_for_customer_center_day(
+        self,
+        conn: Any,
+        target_day: datetime,
+        customer_center_id: str,
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
+            """
+            SELECT snapshot_time, window_start, window_end
+            FROM summary_snapshots
+            WHERE customer_center_id = ?
+              AND snapshot_time >= ?
+              AND snapshot_time <= ?
+            ORDER BY snapshot_time DESC
+            LIMIT 1
+            """,
+            (
+                str(customer_center_id or "").strip(),
+                target_day.strftime("%Y-%m-%d 00:00:00"),
+                target_day.strftime("%Y-%m-%d 23:59:59"),
+            ),
+        ).fetchone()
+        return dict(row) if row else None
+
     def _missing_extended_days(self, conn: Any, start_dt: datetime, end_dt: datetime) -> list[datetime]:
         return self.history_access.missing_extended_days(conn, start_dt, end_dt)
 
@@ -3233,6 +3538,39 @@ class DashboardService:
         token_dir.mkdir(parents=True, exist_ok=True)
         token_cache_path = token_dir / f"{target_customer_center_id}.json"
         latest_token_path = token_dir / f"{target_customer_center_id}.latest.json"
+        stored_payload = self._stored_token_payload_for_config(config) or {}
+        if stored_payload.get("access_token") or stored_payload.get("refresh_token"):
+            existing_payload: dict[str, Any] = {}
+            try:
+                if latest_token_path.exists():
+                    existing_payload = load_json(latest_token_path)
+                elif token_cache_path.exists():
+                    existing_payload = load_json(token_cache_path)
+            except Exception:
+                existing_payload = {}
+            stored_updated_at = int(stored_payload.get("updated_at") or 0)
+            existing_updated_at = int(existing_payload.get("updated_at") or 0)
+            stored_refresh_token = str(stored_payload.get("refresh_token") or "").strip()
+            existing_refresh_token = str(existing_payload.get("refresh_token") or "").strip()
+            if (
+                not existing_payload
+                or stored_updated_at > existing_updated_at
+                or (stored_refresh_token and stored_refresh_token != existing_refresh_token)
+            ):
+                normalized_payload = dict(stored_payload)
+                normalized_payload["app_id"] = str(config.get("app_id") or "")
+                normalized_payload["customer_center_id"] = target_customer_center_id
+                dump_json(token_cache_path, normalized_payload)
+                try:
+                    os.chmod(token_cache_path, 0o600)
+                except OSError:
+                    pass
+                if latest_token_path != token_cache_path:
+                    dump_json(latest_token_path, normalized_payload)
+                    try:
+                        os.chmod(latest_token_path, 0o600)
+                    except OSError:
+                        pass
         return OceanEngineClient(
             config=config,
             token_cache_path=token_cache_path,
@@ -5147,6 +5485,31 @@ class DashboardService:
                     item[field] = text
         return items
 
+    def _sanitize_material_preview_fields_for_payload(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not items:
+            return items
+        sanitized_items: list[dict[str, Any]] = []
+        for raw_item in items:
+            item = dict(raw_item)
+            cover_url = self._normalize_media_url(item.get("cover_url"))
+            video_url = self._normalize_media_url(item.get("video_url"))
+            item["cover_url"] = self._coerce_public_preview_cover_url(cover_url)
+            item["video_url"] = (
+                video_url
+                if self._is_public_preview_video_url(video_url) and not self._needs_preview_video_redirect_resolution(video_url)
+                else ""
+            )
+            item["preview_available"] = bool(
+                item["cover_url"]
+                or item["video_url"]
+                or str(item.get("aweme_item_id") or "").strip()
+                or str(item.get("video_id") or "").strip()
+                or str(item.get("material_id") or "").strip()
+                or str(item.get("material_key") or "").strip()
+            )
+            sanitized_items.append(item)
+        return sanitized_items
+
     @staticmethod
     def _preview_url_expires_at(url: str) -> int:
         text = str(url or "").strip()
@@ -5180,6 +5543,64 @@ class DashboardService:
         return text
 
     @classmethod
+    def _coerce_public_preview_cover_url(cls, url: Any) -> str:
+        text = cls._normalize_media_url(url)
+        if not text:
+            return ""
+        if cls._is_public_preview_cover_url(text):
+            return text
+        try:
+            parsed = urlsplit(text)
+        except ValueError:
+            return ""
+        host = str(parsed.netloc or "").strip().lower()
+        if not host.endswith("creativityeco.com"):
+            return ""
+        host_prefix = host.split(".", 1)[0]
+        cdn_prefix = host_prefix.split("-", 1)[0] if host_prefix.startswith("p") else "p3"
+        path = str(parsed.path or "").strip()
+        if not path:
+            return ""
+        path = re.sub(r"~tplv-[^.]+\.image$", "~tplv-noop.image", path)
+        if "~tplv-" not in path and path.endswith(".image"):
+            path = f"{path[:-6]}~tplv-noop.image"
+        converted = urlunsplit(("https", f"{cdn_prefix}.douyinpic.com", path, "", ""))
+        return converted if cls._is_public_preview_cover_url(converted) else ""
+
+    @staticmethod
+    def _preview_proxy_signature(target_url: str, expires_at: int) -> str:
+        payload = f"{int(expires_at)}:{str(target_url or '').strip()}".encode("utf-8")
+        return hmac.new(str(SESSION_SECRET or "preview-proxy").encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+    @classmethod
+    def _preview_proxy_allowed(cls, target_url: Any) -> bool:
+        text = cls._normalize_media_url(target_url)
+        if not text:
+            return False
+        return cls._needs_preview_video_redirect_resolution(text) or cls._is_internal_preview_video_url(text)
+
+    def build_material_preview_proxy_url(self, target_url: Any, expires_in_seconds: int = 3600) -> str:
+        normalized_url = self._normalize_media_url(target_url)
+        if not self._preview_proxy_allowed(normalized_url):
+            return ""
+        expires_at = int(time.time()) + max(int(expires_in_seconds or 0), 60)
+        signature = self._preview_proxy_signature(normalized_url, expires_at)
+        encoded_target = quote(normalized_url, safe="")
+        return f"/api/material-preview-stream?target={encoded_target}&expires={expires_at}&sig={signature}"
+
+    def resolve_material_preview_proxy_target(self, target: str, expires: int, sig: str) -> str:
+        normalized_target = self._normalize_media_url(unquote(str(target or "").strip()))
+        if not normalized_target or not self._preview_proxy_allowed(normalized_target):
+            raise ValueError("preview proxy target is not allowed")
+        expires_at = int(expires or 0)
+        if expires_at <= int(time.time()):
+            raise ValueError("preview proxy url expired")
+        expected_sig = self._preview_proxy_signature(normalized_target, expires_at)
+        if not secrets.compare_digest(str(sig or "").strip(), expected_sig):
+            raise ValueError("preview proxy signature invalid")
+        return normalized_target
+
+    @classmethod
     def _is_internal_preview_video_url(cls, url: Any) -> bool:
         text = cls._normalize_media_url(url)
         if not text:
@@ -5192,6 +5613,21 @@ class DashboardService:
         return host in {"localhost", "127.0.0.1"} or host.endswith(".local")
 
     @classmethod
+    def _is_public_preview_cover_url(cls, url: Any) -> bool:
+        text = cls._normalize_media_url(url)
+        if not text:
+            return False
+        try:
+            parsed = urlsplit(text)
+        except ValueError:
+            return False
+        host = str(parsed.netloc or "").strip().lower()
+        if parsed.scheme not in {"http", "https"} or not host:
+            return False
+        # creativityeco signed cover URLs are blocked for direct browser access.
+        return not host.endswith("creativityeco.com")
+
+    @classmethod
     def _is_public_preview_video_url(cls, url: Any) -> bool:
         text = cls._normalize_media_url(url)
         if not text:
@@ -5200,12 +5636,13 @@ class DashboardService:
             parsed = urlsplit(text)
         except ValueError:
             return False
-        if parsed.scheme not in {"http", "https"} or not str(parsed.netloc or "").strip():
+        host = str(parsed.netloc or "").strip().lower()
+        if parsed.scheme not in {"http", "https"} or not host:
             return False
-        # OceanEngine preview URLs often use cc.oceanengine.com and then redirect to
-        # a playable CDN file. Do not block them up front; let the browser attempt
-        # playback and fall back to the cover image on error.
-        return not cls._is_internal_preview_video_url(text)
+        if cls._is_internal_preview_video_url(text):
+            return False
+        # cc.oceanengine.com is only a platform preview address, not a direct public file.
+        return not host.endswith("cc.oceanengine.com")
 
     @classmethod
     def _needs_preview_video_redirect_resolution(cls, url: Any) -> bool:
@@ -7533,8 +7970,8 @@ class DashboardService:
             burst_rows.append(item)
         return burst_rows
 
-    def _latest_summary_meta(self, conn: Any) -> Any:
-        customer_center_id = self._current_customer_center_id()
+    def _latest_summary_meta(self, conn: Any, customer_center_id: str | None = None) -> Any:
+        target_customer_center_id = str(customer_center_id or self._current_customer_center_id() or "").strip()
         return conn.execute(
             """
             SELECT snapshot_time, window_start, window_end
@@ -7543,11 +7980,11 @@ class DashboardService:
             ORDER BY snapshot_time DESC
             LIMIT 1
             """,
-            (customer_center_id,),
+            (target_customer_center_id,),
         ).fetchone()
 
-    def _snapshot_plans(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:
-        customer_center_id = self._current_customer_center_id()
+    def _snapshot_plans(self, conn: Any, snapshot_time: str, customer_center_id: str | None = None) -> list[dict[str, Any]]:
+        target_customer_center_id = str(customer_center_id or self._current_customer_center_id() or "").strip()
         rows = conn.execute(
             """
             SELECT *
@@ -7556,7 +7993,7 @@ class DashboardService:
               AND customer_center_id = ?
             ORDER BY order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
             """,
-            (snapshot_time, customer_center_id),
+            (snapshot_time, target_customer_center_id),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -7705,15 +8142,27 @@ class DashboardService:
         start_dt, end_dt, _title, _label = build_window("intraday", config["timezone"])
         return self._collect_window_snapshot(start_dt, end_dt)
 
-    def collect_snapshot_for_customer_center(self, customer_center_id: str) -> dict[str, Any]:
+    def _collect_window_snapshot_for_customer_center(
+        self,
+        customer_center_id: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        *,
+        include_balances: bool = True,
+    ) -> dict[str, Any]:
         scoped_config = self._scoped_config_for_customer_center(customer_center_id)
-        start_dt, end_dt, _title, _label = build_window("intraday", str(scoped_config.get("timezone") or TIMEZONE))
         return self._collect_window_snapshot(
             start_dt,
             end_dt,
             config=scoped_config,
             client=self._build_scoped_customer_center_client(customer_center_id),
+            include_balances=include_balances,
         )
+
+    def collect_snapshot_for_customer_center(self, customer_center_id: str) -> dict[str, Any]:
+        scoped_config = self._scoped_config_for_customer_center(customer_center_id)
+        start_dt, end_dt, _title, _label = build_window("intraday", str(scoped_config.get("timezone") or TIMEZONE))
+        return self._collect_window_snapshot_for_customer_center(customer_center_id, start_dt, end_dt)
 
     def bound_customer_center_ids(self) -> list[str]:
         current_customer_center_id = self._current_customer_center_id()
@@ -7902,35 +8351,90 @@ class DashboardService:
         )
         return result
 
-    def refresh_recent_performance_history(self, days: int = HISTORY_BACKFILL_DAYS) -> dict[str, Any]:
+    def refresh_recent_performance_history(
+        self,
+        days: int = HISTORY_BACKFILL_DAYS,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
         tz = ZoneInfo(self.read_config()["timezone"])
         refresh_days = max(int(days or HISTORY_BACKFILL_DAYS), 1)
         today = datetime.now(tz).date()
         start_day = today - timedelta(days=refresh_days)
         refreshed = 0
         error_count = 0
-        for offset in range(refresh_days, 0, -1):
-            target_day = today - timedelta(days=offset)
-            day_start = datetime(target_day.year, target_day.month, target_day.day, 0, 0, 0, tzinfo=tz)
-            day_end = datetime(target_day.year, target_day.month, target_day.day, 23, 59, 59, tzinfo=tz)
-            payload = self._collect_window_snapshot(day_start, day_end, include_balances=False)
-            payload["snapshot_time"] = self._scoped_day_snapshot_time(
-                day_end,
-                str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip(),
+        errors: list[dict[str, Any]] = []
+        customer_center_ids = self.bound_customer_center_ids() or [self._current_customer_center_id()]
+        total_steps = len(customer_center_ids) * refresh_days
+        completed_steps = 0
+        customer_center_results: list[dict[str, Any]] = []
+        for customer_center_id in customer_center_ids:
+            center_refreshed = 0
+            center_error_count = 0
+            for offset in range(refresh_days, 0, -1):
+                target_day = today - timedelta(days=offset)
+                day_start = datetime(target_day.year, target_day.month, target_day.day, 0, 0, 0, tzinfo=tz)
+                day_end = datetime(target_day.year, target_day.month, target_day.day, 23, 59, 59, tzinfo=tz)
+                if callable(progress_callback):
+                    progress_callback(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_day.strftime("%Y-%m-%d"),
+                            "completed_steps": completed_steps,
+                            "total_steps": total_steps,
+                        }
+                    )
+                try:
+                    payload = self._collect_window_snapshot_for_customer_center(
+                        customer_center_id,
+                        day_start,
+                        day_end,
+                        include_balances=False,
+                    )
+                    payload["snapshot_time"] = self._scoped_day_snapshot_time(day_end, customer_center_id)
+                    payload["window_start"] = day_start.strftime("%Y-%m-%d %H:%M:%S")
+                    payload["window_end"] = day_end.strftime("%Y-%m-%d %H:%M:%S")
+                    payload["accountBalances"] = []
+                    payload["sharedWallets"] = []
+                    payload["walletRelations"] = []
+                    if "errors" not in payload or not isinstance(payload["errors"], dict):
+                        payload["errors"] = {"accounts": [], "plans": [], "balances": []}
+                    else:
+                        payload["errors"]["balances"] = []
+                    account_error_count = len(payload["errors"].get("accounts") or [])
+                    plan_error_count = len(payload["errors"].get("plans") or [])
+                    error_count += account_error_count + plan_error_count
+                    center_error_count += account_error_count + plan_error_count
+                    self.persist_snapshot(payload)
+                    refreshed += 1
+                    center_refreshed += 1
+                except Exception as exc:  # noqa: BLE001
+                    error_count += 1
+                    center_error_count += 1
+                    errors.append(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_day.strftime("%Y-%m-%d"),
+                            "stage": "performance_refresh",
+                            "error": str(exc),
+                        }
+                    )
+                completed_steps += 1
+                if callable(progress_callback):
+                    progress_callback(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_day.strftime("%Y-%m-%d"),
+                            "completed_steps": completed_steps,
+                            "total_steps": total_steps,
+                        }
+                    )
+            customer_center_results.append(
+                {
+                    "customer_center_id": customer_center_id,
+                    "refreshed_days": center_refreshed,
+                    "error_count": center_error_count,
+                }
             )
-            payload["window_start"] = day_start.strftime("%Y-%m-%d %H:%M:%S")
-            payload["window_end"] = day_end.strftime("%Y-%m-%d %H:%M:%S")
-            payload["accountBalances"] = []
-            payload["sharedWallets"] = []
-            payload["walletRelations"] = []
-            if "errors" not in payload or not isinstance(payload["errors"], dict):
-                payload["errors"] = {"accounts": [], "plans": [], "balances": []}
-            else:
-                payload["errors"]["balances"] = []
-            error_count += len(payload["errors"].get("accounts") or [])
-            error_count += len(payload["errors"].get("plans") or [])
-            self.persist_snapshot(payload)
-            refreshed += 1
         if refreshed:
             self.clear_runtime_caches()
         return {
@@ -7938,6 +8442,9 @@ class DashboardService:
             "refreshed_days": refreshed,
             "skipped_current_day": 1,
             "error_count": error_count,
+            "customer_center_count": len(customer_center_ids),
+            "customer_centers": customer_center_results,
+            "errors": errors,
             "range_start": start_day.strftime("%Y-%m-%d"),
             "range_end": (today - timedelta(days=1)).strftime("%Y-%m-%d"),
         }
@@ -7957,7 +8464,11 @@ class DashboardService:
         )
         return result
 
-    def refresh_recent_extended_history(self, days: int = EXTENDED_HISTORY_REFRESH_DAYS) -> dict[str, Any]:
+    def refresh_recent_extended_history(
+        self,
+        days: int = EXTENDED_HISTORY_REFRESH_DAYS,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
         tz = ZoneInfo(self.read_config()["timezone"])
         refresh_days = max(int(days or EXTENDED_HISTORY_REFRESH_DAYS), 1)
         today = datetime.now(tz).date()
@@ -7966,23 +8477,95 @@ class DashboardService:
         skipped_current_day = 0
         missing_summary_days = 0
         detail_errors = 0
-        for offset in range(refresh_days):
-            target_day = start_day + timedelta(days=offset)
-            if target_day >= today:
-                skipped_current_day += 1
-                continue
-            day_marker = datetime(target_day.year, target_day.month, target_day.day)
-            with self.db() as conn:
-                meta = self._summary_meta_for_day(conn, day_marker)
-            if not meta:
-                missing_summary_days += 1
-                continue
-            payload = self._collect_extended_snapshot_for_meta(meta)
-            if payload.get("skipped"):
-                continue
-            detail_errors += len(payload.get("errors") or [])
-            self.persist_extended_snapshot(payload, replace_same_day=True)
-            refreshed += 1
+        customer_center_ids = self.bound_customer_center_ids() or [self._current_customer_center_id()]
+        total_steps = len(customer_center_ids) * refresh_days
+        completed_steps = 0
+        errors: list[dict[str, Any]] = []
+        customer_center_results: list[dict[str, Any]] = []
+        for customer_center_id in customer_center_ids:
+            center_refreshed = 0
+            center_missing_summary_days = 0
+            center_error_count = 0
+            for offset in range(refresh_days):
+                target_day = start_day + timedelta(days=offset)
+                if target_day >= today:
+                    skipped_current_day += 1
+                    continue
+                if callable(progress_callback):
+                    progress_callback(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_day.strftime("%Y-%m-%d"),
+                            "completed_steps": completed_steps,
+                            "total_steps": total_steps,
+                        }
+                    )
+                day_marker = datetime(target_day.year, target_day.month, target_day.day)
+                with self.db() as conn:
+                    meta = self._summary_meta_for_customer_center_day(conn, day_marker, customer_center_id)
+                if not meta:
+                    missing_summary_days += 1
+                    center_missing_summary_days += 1
+                    completed_steps += 1
+                    if callable(progress_callback):
+                        progress_callback(
+                            {
+                                "customer_center_id": customer_center_id,
+                                "target_day": target_day.strftime("%Y-%m-%d"),
+                                "completed_steps": completed_steps,
+                                "total_steps": total_steps,
+                            }
+                        )
+                    continue
+                try:
+                    payload = self._collect_extended_snapshot_for_meta(meta, customer_center_id)
+                    if payload.get("skipped"):
+                        completed_steps += 1
+                        if callable(progress_callback):
+                            progress_callback(
+                                {
+                                    "customer_center_id": customer_center_id,
+                                    "target_day": target_day.strftime("%Y-%m-%d"),
+                                    "completed_steps": completed_steps,
+                                    "total_steps": total_steps,
+                                }
+                            )
+                        continue
+                    payload_errors = len(payload.get("errors") or [])
+                    detail_errors += payload_errors
+                    center_error_count += payload_errors
+                    self.persist_extended_snapshot(payload, replace_same_day=True)
+                    refreshed += 1
+                    center_refreshed += 1
+                except Exception as exc:  # noqa: BLE001
+                    detail_errors += 1
+                    center_error_count += 1
+                    errors.append(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_day.strftime("%Y-%m-%d"),
+                            "stage": "detail_history_refresh",
+                            "error": str(exc),
+                        }
+                    )
+                completed_steps += 1
+                if callable(progress_callback):
+                    progress_callback(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_day.strftime("%Y-%m-%d"),
+                            "completed_steps": completed_steps,
+                            "total_steps": total_steps,
+                        }
+                    )
+            customer_center_results.append(
+                {
+                    "customer_center_id": customer_center_id,
+                    "refreshed_days": center_refreshed,
+                    "missing_summary_days": center_missing_summary_days,
+                    "error_count": center_error_count,
+                }
+            )
         if refreshed:
             self.clear_runtime_caches()
         return {
@@ -7991,6 +8574,9 @@ class DashboardService:
             "skipped_current_day": skipped_current_day,
             "missing_summary_days": missing_summary_days,
             "error_count": detail_errors,
+            "customer_center_count": len(customer_center_ids),
+            "customer_centers": customer_center_results,
+            "errors": errors,
             "range_start": start_day.strftime("%Y-%m-%d"),
             "range_end": today.strftime("%Y-%m-%d"),
         }
@@ -8348,6 +8934,15 @@ class DashboardService:
                 if not current or normalized < current:
                     mutable_rows[row_index][11] = normalized
 
+        def apply_cover_url(indexes: list[int], value: Any) -> None:
+            normalized = self._normalize_media_url(value)
+            if not self._is_public_preview_cover_url(normalized):
+                return
+            for row_index in indexes:
+                current = self._normalize_media_url(mutable_rows[row_index][13])
+                if not self._is_public_preview_cover_url(current):
+                    mutable_rows[row_index][13] = normalized
+
         for advertiser_id, id_map in video_ids_by_advertiser.items():
             material_id_map = video_material_ids_by_advertiser.get(advertiser_id, {})
             ids = sorted(id_map)
@@ -8363,10 +8958,13 @@ class DashboardService:
                         resolved_video_id = str(item.get("id") or "").strip()
                         resolved_material_id = self._numeric_material_id_text(item.get("material_id"))
                         create_time = item.get("create_time")
+                        poster_url = item.get("poster_url") or item.get("posterUrl")
                         if resolved_video_id:
                             apply_create_time(id_map.get(resolved_video_id, []), create_time)
+                            apply_cover_url(id_map.get(resolved_video_id, []), poster_url)
                         if resolved_material_id:
                             apply_create_time(material_id_map.get(resolved_material_id, []), create_time)
+                            apply_cover_url(material_id_map.get(resolved_material_id, []), poster_url)
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         {
@@ -8463,10 +9061,15 @@ class DashboardService:
 
         return [tuple(row) for row in mutable_rows], errors
 
-    def _collect_extended_snapshot_for_meta(self, meta: dict[str, Any]) -> dict[str, Any]:
-        config = self.read_config()
+    def _collect_extended_snapshot_for_meta(
+        self,
+        meta: dict[str, Any],
+        customer_center_id: str | None = None,
+    ) -> dict[str, Any]:
+        target_customer_center_id = str(customer_center_id or self._current_customer_center_id() or "").strip()
+        config = self.read_config() if not customer_center_id else self._scoped_config_for_customer_center(target_customer_center_id)
         with self.db() as conn:
-            plans = self._snapshot_plans(conn, str(meta["snapshot_time"]))
+            plans = self._snapshot_plans(conn, str(meta["snapshot_time"]), target_customer_center_id)
         plans = [
             row
             for row in plans
@@ -8484,7 +9087,7 @@ class DashboardService:
         window_start = str(meta["window_start"])
         window_end = str(meta["window_end"])
 
-        client = self.build_client(config)
+        client = self.build_client(config) if not customer_center_id else self._build_scoped_customer_center_client(target_customer_center_id)
         detail_rows: list[tuple[Any, ...]] = []
         product_rows: list[tuple[Any, ...]] = []
         material_rows: list[tuple[Any, ...]] = []
@@ -8584,7 +9187,7 @@ class DashboardService:
         return {
             "ok": True,
             "skipped": False,
-            "customer_center_id": str(config.get("customer_center_id") or "").strip(),
+            "customer_center_id": target_customer_center_id,
             "snapshot_time": snapshot_time,
             "window_start": window_start,
             "window_end": window_end,
@@ -8597,10 +9200,14 @@ class DashboardService:
             "errors": errors,
         }
 
-    def collect_extended_snapshot(self, force_refresh: bool = False) -> dict[str, Any]:
-        customer_center_id = self._current_customer_center_id()
+    def collect_extended_snapshot(
+        self,
+        force_refresh: bool = False,
+        customer_center_id: str | None = None,
+    ) -> dict[str, Any]:
+        target_customer_center_id = str(customer_center_id or self._current_customer_center_id() or "").strip()
         with self.db() as conn:
-            meta = self._latest_summary_meta(conn)
+            meta = self._latest_summary_meta(conn, target_customer_center_id)
             if not meta:
                 return {
                     "ok": False,
@@ -8609,7 +9216,7 @@ class DashboardService:
                 }
             existing = conn.execute(
                 "SELECT status FROM extended_sync_runs WHERE snapshot_time = ? AND customer_center_id = ?",
-                (meta["snapshot_time"], customer_center_id),
+                (meta["snapshot_time"], target_customer_center_id),
             ).fetchone()
             if not force_refresh and existing and str(existing["status"]) == "ok":
                 return {
@@ -8618,7 +9225,7 @@ class DashboardService:
                     "snapshot_time": meta["snapshot_time"],
                     "reason": "already synced",
                 }
-        return self._collect_extended_snapshot_for_meta(dict(meta))
+        return self._collect_extended_snapshot_for_meta(dict(meta), target_customer_center_id)
 
     def persist_extended_snapshot(self, payload: dict[str, Any], replace_same_day: bool = False) -> None:
         if payload.get("skipped"):
@@ -9165,7 +9772,7 @@ class DashboardService:
             "source": "material_snapshots.raw_json",
         }
 
-    def _resolve_material_curve_source(
+    def _material_curve_source_candidates(
         self,
         row: dict[str, Any],
         start_date: str,
@@ -9174,7 +9781,7 @@ class DashboardService:
         allowed_advertiser_ids: set[int] | None = None,
         *,
         search_all_customer_centers: bool = False,
-    ) -> dict[str, Any] | None:
+    ) -> list[dict[str, Any]]:
         ranking_material_id = self._numeric_material_id_text(row.get("material_id"))
         ranking_video_id = str(row.get("video_id") or "").strip()
         ranking_aweme_item_id = str(row.get("aweme_item_id") or "").strip()
@@ -9216,12 +9823,12 @@ class DashboardService:
 
         if candidates:
             candidates.sort(key=lambda item: item[0])
-            return dict(candidates[0][1])
+            return [dict(item[1]) for item in candidates]
 
         advertiser_ids = [int(item) for item in row.get("advertiser_ids", []) if int(item or 0)]
         advertiser_id = advertiser_ids[0] if advertiser_ids else 0
         if ranking_material_id and advertiser_id:
-            return {
+            return [{
                 "snapshot_time": "",
                 "customer_center_id": self._current_customer_center_id(),
                 "advertiser_id": advertiser_id,
@@ -9237,8 +9844,28 @@ class DashboardService:
                 "pay_amount": round(float(row.get("pay_amount", 0.0) or 0.0), 2),
                 "stat_cost": round(float(row.get("stat_cost", 0.0) or 0.0), 2),
                 "source": "material_rankings.material_id",
-            }
-        return None
+            }]
+        return []
+
+    def _resolve_material_curve_source(
+        self,
+        row: dict[str, Any],
+        start_date: str,
+        end_date: str,
+        snapshot_time: str,
+        allowed_advertiser_ids: set[int] | None = None,
+        *,
+        search_all_customer_centers: bool = False,
+    ) -> dict[str, Any] | None:
+        candidates = self._material_curve_source_candidates(
+            row,
+            start_date,
+            end_date,
+            snapshot_time,
+            allowed_advertiser_ids,
+            search_all_customer_centers=search_all_customer_centers,
+        )
+        return dict(candidates[0]) if candidates else None
 
     def _material_preview_row_for_request(
         self,
@@ -9369,6 +9996,7 @@ class DashboardService:
         current_video_url = self._normalize_media_url(merged_row.get("video_url"))
         resolved_current_video_url = self._resolve_preview_video_url(current_video_url)
         cover_url = self._normalize_media_url(merged_row.get("cover_url"))
+        public_cover_url = self._coerce_public_preview_cover_url(cover_url)
         aweme_item_id = str(merged_row.get("aweme_item_id") or "").strip()
         video_id = str(merged_row.get("video_id") or "").strip()
         material_id = str(merged_row.get("material_id") or "").strip()
@@ -9376,9 +10004,13 @@ class DashboardService:
             "material_key": str(merged_row.get("material_key") or "").strip(),
             "material_id": material_id,
             "video_id": video_id,
-            "cover_url": cover_url,
+            "cover_url": public_cover_url,
             "aweme_item_id": aweme_item_id,
-            "video_url": resolved_current_video_url or current_video_url,
+            "video_url": (
+                resolved_current_video_url or current_video_url
+                if self._is_public_preview_video_url(resolved_current_video_url or current_video_url)
+                else ""
+            ),
             "public_video_url": (resolved_current_video_url or current_video_url)
             if self._is_public_preview_video_url(resolved_current_video_url or current_video_url)
             else "",
@@ -9387,6 +10019,13 @@ class DashboardService:
             "reason": "",
         }
         if result["is_public_video_url"]:
+            return result
+        current_proxy_video_url = self.build_material_preview_proxy_url(public_video_url)
+        if current_proxy_video_url:
+            result["video_url"] = current_proxy_video_url
+            result["public_video_url"] = current_proxy_video_url
+            result["is_public_video_url"] = True
+            result["source"] = "current_material_payload_proxy"
             return result
 
         start_text = str(start_date or "").strip()
@@ -9471,6 +10110,249 @@ class DashboardService:
             result["source"] = "cover_only"
         elif source_material_id:
             result["reason"] = result["reason"] or "已尝试解析公网直链，但当前接口未返回可外部直连的视频文件地址。"
+        return result
+
+    def material_preview_source_v2(
+        self,
+        row: dict[str, Any] | None,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+        user: dict[str, Any] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+    ) -> dict[str, Any]:
+        seed_row = dict(row or {})
+        material_key_text = str(seed_row.get("material_key") or "").strip()
+        search_all_customer_centers = (
+            self._display_scope_uses_all_customer_centers(display_scope)
+            or str((user or {}).get("role") or "") == ROLE_OPERATOR
+        )
+        if material_key_text:
+            try:
+                resolved_row, search_all_customer_centers = self._material_preview_row_for_request(
+                    material_key_text,
+                    range_key,
+                    start_date,
+                    end_date,
+                    snapshot_time,
+                    allowed_advertiser_ids,
+                    user,
+                    display_scope,
+                )
+            except ValueError:
+                if not seed_row:
+                    raise
+                resolved_row = seed_row
+        elif seed_row:
+            resolved_row = seed_row
+        else:
+            raise ValueError("material_key is required")
+
+        merged_row = dict(resolved_row)
+        for key, value in seed_row.items():
+            if key not in merged_row or merged_row.get(key) in (None, ""):
+                merged_row[key] = value
+
+        current_video_url = self._normalize_media_url(merged_row.get("video_url"))
+        resolved_current_video_url = self._resolve_preview_video_url(current_video_url)
+        cover_url = self._normalize_media_url(merged_row.get("cover_url"))
+        aweme_item_id = str(merged_row.get("aweme_item_id") or "").strip()
+        video_id = str(merged_row.get("video_id") or "").strip()
+        material_id = str(merged_row.get("material_id") or "").strip()
+        public_video_url = resolved_current_video_url or current_video_url
+        result = {
+            "material_key": str(merged_row.get("material_key") or "").strip(),
+            "material_id": material_id,
+            "video_id": video_id,
+            "cover_url": cover_url if self._is_public_preview_cover_url(cover_url) else "",
+            "aweme_item_id": aweme_item_id,
+            "video_url": public_video_url if self._is_public_preview_video_url(public_video_url) else "",
+            "public_video_url": public_video_url if self._is_public_preview_video_url(public_video_url) else "",
+            "is_public_video_url": self._is_public_preview_video_url(public_video_url),
+            "source": "current_material_payload",
+            "reason": "",
+        }
+        if result["is_public_video_url"]:
+            return result
+
+        start_text = str(start_date or "").strip()
+        end_text = str(end_date or "").strip()
+        if not snapshot_time and (not start_text or not end_text):
+            if str(range_key or "").strip().lower() == "custom":
+                start_text = start_text or str(merged_row.get("create_time") or "")[:10]
+                end_text = end_text or str(merged_row.get("create_time") or "")[:10]
+            else:
+                requested_start_dt, requested_end_dt, _label = self._material_preview_requested_window(
+                    range_key,
+                    start_date,
+                    end_date,
+                    snapshot_time,
+                )
+                start_text = requested_start_dt.strftime("%Y-%m-%d")
+                end_text = requested_end_dt.strftime("%Y-%m-%d")
+
+        resolved_sources = self._material_curve_source_candidates(
+            merged_row,
+            start_text,
+            end_text,
+            snapshot_time,
+            allowed_advertiser_ids,
+            search_all_customer_centers=search_all_customer_centers,
+        )
+        if not resolved_sources:
+            result["reason"] = "当前素材未定位到可解析的预览来源。"
+            if current_video_url and self._needs_preview_video_redirect_resolution(current_video_url):
+                result["reason"] = "当前素材返回的是千川中转预览地址，无法直接在浏览器中播放。"
+                result["source"] = "redirect_preview_video_url"
+            elif current_video_url and self._is_internal_preview_video_url(current_video_url):
+                result["reason"] = "当前素材只返回站内预览地址，无法在外部页面直接播放。"
+                result["source"] = "internal_video_url"
+            elif cover_url and not self._is_public_preview_cover_url(cover_url):
+                result["reason"] = "当前素材仅返回受限封面图地址，浏览器无法直接加载。"
+                result["source"] = "restricted_cover_url"
+            elif not current_video_url and cover_url:
+                result["reason"] = "当前素材仅返回封面图，未返回可直接播放的视频地址。"
+                result["source"] = "cover_only"
+            return result
+
+        attempted_sources = 0
+        any_source_material_id = False
+        for resolved_source in resolved_sources:
+            customer_center_id = str(resolved_source.get("customer_center_id") or "").strip()
+            advertiser_id = int(resolved_source.get("advertiser_id", 0) or 0)
+            source_video_id = str(resolved_source.get("video_id") or video_id).strip()
+            source_material_id = str(resolved_source.get("material_id") or material_id).strip()
+            if source_material_id:
+                any_source_material_id = True
+            if not customer_center_id or advertiser_id <= 0:
+                continue
+            attempted_sources += 1
+            client = self._build_scoped_customer_center_client(customer_center_id)
+            if source_video_id:
+                try:
+                    uploaded_video = client.get_uploaded_video(advertiser_id, source_video_id)
+                    candidate_video_url = self._preferred_video_url_from_values(
+                        uploaded_video.get("url"),
+                        uploaded_video.get("video_url"),
+                        uploaded_video.get("videoUrl"),
+                        uploaded_video.get("play_url"),
+                        uploaded_video.get("playUrl"),
+                        uploaded_video.get("download_url"),
+                        uploaded_video.get("downloadUrl"),
+                        uploaded_video.get("download_url_https"),
+                        uploaded_video.get("downloadUrlHttps"),
+                        uploaded_video.get("material_url"),
+                        uploaded_video.get("materialUrl"),
+                        current_video_url,
+                    )
+                    resolved_public_video_url = self._resolve_preview_video_url(candidate_video_url)
+                    if self._is_public_preview_video_url(resolved_public_video_url):
+                        result["video_url"] = resolved_public_video_url
+                        result["public_video_url"] = resolved_public_video_url
+                        result["is_public_video_url"] = True
+                        result["source"] = "file_video_ad_get"
+                        result["reason"] = ""
+                        poster_url = self._coerce_public_preview_cover_url(
+                            uploaded_video.get("poster_url") or uploaded_video.get("posterUrl")
+                        )
+                        if poster_url:
+                            result["cover_url"] = poster_url
+                        return result
+                    proxy_video_url = self.build_material_preview_proxy_url(candidate_video_url)
+                    if proxy_video_url:
+                        result["video_url"] = proxy_video_url
+                        result["public_video_url"] = proxy_video_url
+                        result["is_public_video_url"] = True
+                        result["source"] = "file_video_ad_get_proxy"
+                        result["reason"] = ""
+                        poster_url = self._coerce_public_preview_cover_url(
+                            uploaded_video.get("poster_url") or uploaded_video.get("posterUrl")
+                        )
+                        if poster_url:
+                            result["cover_url"] = poster_url
+                        return result
+                except Exception as exc:  # noqa: BLE001
+                    message = str(exc)
+                    lowered = message.lower()
+                    if "permission" in lowered and not result["reason"]:
+                        result["reason"] = "当前账号未授权公开视频接口，无法优先返回公网直链。"
+                        result["source"] = "file_video_ad_get_permission_denied"
+                    elif ("refresh_token" in lowered or "40103" in message or "已过期" in message) and not result["reason"]:
+                        result["reason"] = "素材所属客服中心授权已过期，当前无法解析可外部访问的预览地址。"
+                        result["source"] = "file_video_ad_get_token_expired"
+                try:
+                    video_rows = client.list_qianchuan_videos(
+                        advertiser_id=advertiser_id,
+                        filtering={"video_ids": [source_video_id]},
+                        page_size=20,
+                        max_pages=1,
+                    )
+                    for item in video_rows:
+                        resolved_library_video_id = str(item.get("id") or item.get("video_id") or item.get("videoId") or "").strip()
+                        if resolved_library_video_id and resolved_library_video_id != source_video_id:
+                            continue
+                        candidate_video_url = self._preferred_video_url_from_values(
+                            item.get("url"),
+                            item.get("video_url"),
+                            item.get("videoUrl"),
+                            item.get("play_url"),
+                            item.get("playUrl"),
+                            current_video_url,
+                        )
+                        resolved_library_video_url = self._resolve_preview_video_url(candidate_video_url)
+                        if self._is_public_preview_video_url(resolved_library_video_url):
+                            result["video_url"] = resolved_library_video_url
+                            result["public_video_url"] = resolved_library_video_url
+                            result["is_public_video_url"] = True
+                            result["source"] = "qianchuan_video_get"
+                            result["reason"] = ""
+                            poster_url = self._coerce_public_preview_cover_url(
+                                item.get("poster_url") or item.get("posterUrl") or cover_url
+                            )
+                            if poster_url:
+                                result["cover_url"] = poster_url
+                            return result
+                        proxy_video_url = self.build_material_preview_proxy_url(candidate_video_url)
+                        if proxy_video_url:
+                            result["video_url"] = proxy_video_url
+                            result["public_video_url"] = proxy_video_url
+                            result["is_public_video_url"] = True
+                            result["source"] = "qianchuan_video_get_proxy"
+                            result["reason"] = ""
+                            poster_url = self._coerce_public_preview_cover_url(
+                                item.get("poster_url") or item.get("posterUrl") or cover_url
+                            )
+                            if poster_url:
+                                result["cover_url"] = poster_url
+                            return result
+                        poster_url = self._coerce_public_preview_cover_url(
+                            item.get("poster_url") or item.get("posterUrl") or cover_url
+                        )
+                        if poster_url and not result["cover_url"]:
+                            result["cover_url"] = poster_url
+                except Exception:
+                    pass
+
+        if attempted_sources <= 0:
+            result["reason"] = "当前素材缺少可解析的预览来源配置。"
+            return result
+
+        if current_video_url and self._needs_preview_video_redirect_resolution(current_video_url):
+            result["reason"] = result["reason"] or "当前素材返回的是千川中转预览地址，无法直接在浏览器中播放。"
+            result["source"] = "redirect_preview_video_url"
+        elif current_video_url and self._is_internal_preview_video_url(current_video_url):
+            result["reason"] = result["reason"] or "当前素材只返回站内预览地址，无法在外部页面直接播放。"
+            result["source"] = "internal_video_url"
+        elif cover_url and not self._is_public_preview_cover_url(cover_url):
+            result["reason"] = result["reason"] or "当前素材仅返回受限封面图地址，浏览器无法直接加载。"
+            result["source"] = "restricted_cover_url"
+        elif not current_video_url and cover_url:
+            result["reason"] = result["reason"] or "当前素材仅返回封面图，未返回可直接播放的视频地址。"
+            result["source"] = "cover_only"
+        elif any_source_material_id:
+            result["reason"] = result["reason"] or "已尝试解析公网直链，但当前接口未返回可外部访问的视频文件地址。"
         return result
 
     def material_preview_curve(
@@ -9865,13 +10747,7 @@ class DashboardService:
                 items = self._apply_material_snapshot_context(preview_conn, items, snapshot_times, allowed_advertiser_ids)
                 items = self._apply_latest_material_previews(preview_conn, items)
                 items = self._apply_material_top_anchor_names(preview_conn, items, snapshot_times)
-            items = self._refresh_stale_material_previews(
-                items,
-                start_dt.strftime("%Y-%m-%d") if start_dt is not None else str(target_snapshot or "")[:10],
-                end_dt.strftime("%Y-%m-%d") if end_dt is not None else str(target_snapshot or "")[:10],
-                target_snapshot,
-                allowed_advertiser_ids,
-            )
+            items = self._sanitize_material_preview_fields_for_payload(items)
         payload = {
             "snapshot_time": str(latest_meta.get("snapshot_time") or "") if latest_meta else target_snapshot,
             "items": items,
@@ -10319,14 +11195,7 @@ class DashboardService:
                 )
                 items = self._apply_latest_material_previews(preview_conn, items)
                 items = self._apply_material_top_anchor_names_for_pairs(preview_conn, items, selected_pairs)
-            items = self._refresh_stale_material_previews(
-                items,
-                start_dt.strftime("%Y-%m-%d"),
-                end_dt.strftime("%Y-%m-%d"),
-                target_snapshot,
-                allowed_advertiser_ids,
-                search_all_customer_centers=True,
-            )
+            items = self._sanitize_material_preview_fields_for_payload(items)
 
         payload = {
             "snapshot_time": str(runs[-1].get("snapshot_time") or target_snapshot) if runs else target_snapshot,
@@ -10884,6 +11753,128 @@ class DashboardService:
         self.cleanup_history()
         self.clear_runtime_caches()
         return payload
+
+    def collect_extended_and_store_all_customer_centers(
+        self,
+        force_refresh: bool = False,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        with self._distributed_runtime_lock(
+            "detail-sync",
+            timeout_seconds=max(int(DETAIL_SYNC_INTERVAL_MINUTES or 1) * 120, 300),
+        ) as acquired:
+            if not acquired:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "detail sync already running",
+                    "snapshot_time": "",
+                    "synced_customer_center_count": 0,
+                    "errors": [],
+                }
+            customer_center_ids = self.bound_customer_center_ids()
+            if not customer_center_ids:
+                payload = self.collect_extended_and_store(force_refresh=force_refresh)
+                return {
+                    "ok": bool(payload.get("ok", True)),
+                    "skipped": bool(payload.get("skipped", False)),
+                    "reason": str(payload.get("reason") or ""),
+                    "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
+                    "synced_customer_center_count": 0 if payload.get("skipped") else 1,
+                    "synced_customer_centers": [] if payload.get("skipped") else [payload],
+                    "skipped_customer_center_count": 0 if not payload.get("skipped") else 1,
+                    "skipped_customer_centers": [] if not payload.get("skipped") else [payload],
+                    "error_count": len(payload.get("errors") or []),
+                    "errors": list(payload.get("errors") or []),
+                }
+
+            synced_customer_centers: list[dict[str, Any]] = []
+            skipped_customer_centers: list[dict[str, Any]] = []
+            errors: list[dict[str, Any]] = []
+            snapshot_times: list[str] = []
+            total_centers = len(customer_center_ids)
+
+            for index, customer_center_id in enumerate(customer_center_ids, start=1):
+                if callable(progress_callback):
+                    progress_callback(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "completed_steps": index - 1,
+                            "total_steps": total_centers,
+                            "message": f"{customer_center_id} ({index}/{total_centers})",
+                        }
+                    )
+                try:
+                    payload = self.collect_extended_snapshot(
+                        force_refresh=force_refresh,
+                        customer_center_id=customer_center_id,
+                    )
+                    if payload.get("skipped"):
+                        skipped_customer_centers.append(
+                            {
+                                "customer_center_id": customer_center_id,
+                                "reason": str(payload.get("reason") or ""),
+                                "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
+                            }
+                        )
+                        continue
+                    self.persist_extended_snapshot(payload, replace_same_day=True)
+                    snapshot_time = str(payload.get("snapshot_time") or "").strip()
+                    if snapshot_time:
+                        snapshot_times.append(snapshot_time)
+                    synced_customer_centers.append(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "snapshot_time": snapshot_time,
+                            "plan_count": int(payload.get("plan_count", 0) or 0),
+                            "material_row_count": len(payload.get("material_rows") or []),
+                            "error_count": len(payload.get("errors") or []),
+                        }
+                    )
+                    for item in payload.get("errors") or []:
+                        errors.append(
+                            {
+                                "customer_center_id": customer_center_id,
+                                **dict(item),
+                            }
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "stage": "detail_sync",
+                            "error": str(exc),
+                        }
+                    )
+                finally:
+                    if callable(progress_callback):
+                        progress_callback(
+                            {
+                                "customer_center_id": customer_center_id,
+                                "completed_steps": index,
+                                "total_steps": total_centers,
+                                "message": f"{customer_center_id} ({index}/{total_centers})",
+                            }
+                        )
+
+            self.cleanup_history()
+            self.clear_runtime_caches()
+            try:
+                self.material_rankings("day")
+            except Exception:
+                pass
+            return {
+                "ok": not errors,
+                "skipped": False,
+                "reason": "" if not errors else f"{len(errors)} detail sync errors",
+                "snapshot_time": max(snapshot_times) if snapshot_times else "",
+                "synced_customer_center_count": len(synced_customer_centers),
+                "synced_customer_centers": synced_customer_centers,
+                "skipped_customer_center_count": len(skipped_customer_centers),
+                "skipped_customer_centers": skipped_customer_centers,
+                "error_count": len(errors),
+                "errors": errors,
+            }
 
     def collect_extended_and_store(self, force_refresh: bool = False) -> dict[str, Any]:
         with self._distributed_runtime_lock(
