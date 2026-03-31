@@ -85,6 +85,7 @@ const state = {
   commentPayloads: {},
   commentPayloadFetchedAt: {},
   materialPreviewCurveCache: {},
+  materialPreviewSourceCache: {},
   users: [],
   catalogAccounts: [],
   userScopes: {},
@@ -125,6 +126,7 @@ const state = {
   selectedMaterialKey: null,
   commentReplyTarget: null,
   materialPreviewRequestToken: 0,
+  materialPreviewMediaRequestToken: 0,
   selectedUserId: null,
   selectedUserScopeIds: [],
   editingRuleId: null,
@@ -2237,6 +2239,7 @@ function clearDashboardDataCaches() {
   state.commentPayloads = {};
   state.commentPayloadFetchedAt = {};
   state.materialPreviewCurveCache = {};
+  state.materialPreviewSourceCache = {};
   state.catalogAccounts = [];
 }
 
@@ -5116,6 +5119,161 @@ function materialAwemeLink(row) {
   return awemeId ? `https://www.douyin.com/video/${encodeURIComponent(awemeId)}` : "";
 }
 
+function isLikelyPublicVideoUrl(url) {
+  const text = String(url || "").trim();
+  if (!text) return false;
+  try {
+    const parsed = new URL(text, window.location.origin);
+    const host = String(parsed.hostname || "").trim().toLowerCase();
+    if (!host) return false;
+    return !host.endsWith("cc.oceanengine.com") && !host.endsWith("ad.oceanengine.com");
+  } catch {
+    return false;
+  }
+}
+
+function materialPreviewSourceSectionKey() {
+  return state.activeView === "team-materials" ? "teamMaterial" : "material";
+}
+
+function materialPreviewSourceCacheKey(row, filter) {
+  const normalized = normalizeRangeFilter(filter);
+  return [
+    requestDisplayScope(),
+    String(row?.material_key || "").trim(),
+    normalized.mode,
+    normalized.start || "",
+    normalized.end || "",
+  ].join(":");
+}
+
+async function fetchMaterialPreviewSource(row, force = false) {
+  const filter = sectionFilter(materialPreviewSourceSectionKey());
+  const cacheKey = materialPreviewSourceCacheKey(row, filter);
+  if (!force && state.materialPreviewSourceCache[cacheKey]) {
+    return state.materialPreviewSourceCache[cacheKey];
+  }
+  const params = appendDisplayScopeParam(new URLSearchParams());
+  params.set("range", filter.mode);
+  if (filter.mode === "custom") {
+    params.set("start_date", filter.start);
+    params.set("end_date", filter.end);
+  }
+  const payload = {
+    material_key: String(row?.material_key || "").trim(),
+    material_id: String(row?.material_id || "").trim(),
+    video_id: String(row?.video_id || "").trim(),
+    aweme_item_id: String(row?.aweme_item_id || "").trim(),
+    video_url: String(row?.video_url || "").trim(),
+    cover_url: String(row?.cover_url || "").trim(),
+    material_type: String(row?.material_type || "").trim(),
+    top_account_name: String(row?.top_account_name || "").trim(),
+    top_plan_name: String(row?.top_plan_name || "").trim(),
+  };
+  const response = await fetch(`/api/material-preview-source?${params.toString()}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => null);
+  if (!response || !response.ok) {
+    const errorPayload = response ? await response.json().catch(() => ({})) : {};
+    throw new Error(errorPayload.detail || "preview source fetch failed");
+  }
+  const resolved = await response.json();
+  state.materialPreviewSourceCache[cacheKey] = resolved;
+  return resolved;
+}
+
+function materialPreviewMediaStageMarkup(row, options = {}) {
+  const directVideoUrl = String(options.videoUrl ?? row?.video_url ?? "").trim();
+  const coverUrl = String(options.coverUrl ?? row?.cover_url ?? "").trim();
+  const message = String(options.message || "").trim();
+  const canDirectPlay = isLikelyPublicVideoUrl(directVideoUrl);
+  if (canDirectPlay) {
+    return `
+      <div class="preview-media-stage">
+        <video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>
+      </div>
+    `;
+  }
+  if (coverUrl) {
+    return `
+      <div class="preview-media-stage">
+        <img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row?.material_name || "素材封面")}" />
+        ${message ? `<div class="preview-empty">${escapeHtml(message)}</div>` : ""}
+      </div>
+    `;
+  }
+  return `
+    <div class="preview-media-stage">
+      <div class="preview-empty">${escapeHtml(message || "当前素材没有可直接预览的地址。")}</div>
+    </div>
+  `;
+}
+
+async function hydrateMaterialPreviewSource(row) {
+  if (!materialPreviewBody) return;
+  const materialKey = String(row?.material_key || "").trim();
+  if (!materialKey) return;
+  const requestToken = ++state.materialPreviewMediaRequestToken;
+  try {
+    const resolved = await fetchMaterialPreviewSource(row);
+    if (!materialPreviewBody || materialPreviewBody.dataset.materialKey !== materialKey) return;
+    if (state.materialPreviewMediaRequestToken !== requestToken) return;
+    const previewMediaShell = materialPreviewBody.querySelector(".preview-media-shell");
+    const previewCurvePanel = materialPreviewBody.querySelector('[data-role="preview-curve-panel"]');
+    if (!previewMediaShell) return;
+    const mergedRow = {
+      ...row,
+      video_url: String(resolved.public_video_url || resolved.video_url || row.video_url || "").trim(),
+      cover_url: String(resolved.cover_url || row.cover_url || "").trim(),
+      aweme_item_id: String(resolved.aweme_item_id || row.aweme_item_id || "").trim(),
+    };
+    previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
+      mergedRow,
+      {
+        videoUrl: mergedRow.video_url,
+        coverUrl: mergedRow.cover_url,
+        message: resolved.is_public_video_url
+          ? ""
+          : (resolved.reason || "当前素材只返回站内预览地址，无法在本页面直连播放。"),
+      },
+    );
+    if (previewCurvePanel) {
+      previewMediaShell.appendChild(previewCurvePanel);
+    }
+    const previewVideo = previewMediaShell.querySelector(".preview-video");
+    const previewCover = previewMediaShell.querySelector(".preview-cover");
+    previewVideo?.addEventListener("error", () => {
+      if (!previewMediaShell) return;
+      previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
+        mergedRow,
+        {
+          coverUrl: mergedRow.cover_url,
+          message: resolved.reason || "已解析到视频地址，但当前浏览器仍无法直接播放。",
+        },
+      );
+      if (previewCurvePanel) {
+        previewMediaShell.appendChild(previewCurvePanel);
+      }
+    }, { once: true });
+    previewCover?.addEventListener("error", () => {
+      if (!previewMediaShell) return;
+      previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
+        mergedRow,
+        {
+          message: resolved.reason || "当前素材没有可站外访问的预览地址，请尝试打开抖音作品。",
+        },
+      );
+      if (previewCurvePanel) {
+        previewMediaShell.appendChild(previewCurvePanel);
+      }
+    }, { once: true });
+  } catch {
+    if (!materialPreviewBody || materialPreviewBody.dataset.materialKey !== materialKey) return;
+  }
+}
+
 function materialPreviewCurveCacheKey(row, filter) {
   const normalized = normalizeRangeFilter(filter);
   return [
@@ -5320,6 +5478,7 @@ async function loadMaterialPreviewCurve(row) {
 function closeMaterialPreview() {
   if (!materialPreviewModal) return;
   state.materialPreviewRequestToken += 1;
+  state.materialPreviewMediaRequestToken += 1;
   materialPreviewModal.classList.add("hidden");
   materialPreviewModal.setAttribute("aria-hidden", "true");
   if (materialPreviewBody) {
@@ -5344,14 +5503,19 @@ function openMaterialPreviewFromRow(row) {
       row.top_anchor_name || "",
     ].filter(Boolean).join(" / ") || "素材预览";
   }
-  const previewBlock = directVideoUrl
-    ? `<video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>`
-    : coverUrl
-      ? `<img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row.material_name || "素材封面")}" />`
-      : '<div class="preview-empty">当前素材没有可直接预览的地址。</div>';
+  const previewBlock = materialPreviewMediaStageMarkup(
+    row,
+    {
+      videoUrl: isLikelyPublicVideoUrl(directVideoUrl) ? directVideoUrl : "",
+      coverUrl,
+      message: isLikelyPublicVideoUrl(directVideoUrl)
+        ? ""
+        : (coverUrl ? "正在优先解析公网直链..." : "当前素材没有可直接预览的地址。"),
+    },
+  );
   const extraActions = [
     awemeLink ? `<a class="button ghost compact" href="${escapeHtml(awemeLink)}" target="_blank" rel="noreferrer">打开抖音作品</a>` : "",
-    directVideoUrl ? `<a class="button ghost compact" href="${escapeHtml(directVideoUrl)}" target="_blank" rel="noreferrer">打开原始视频</a>` : "",
+    isLikelyPublicVideoUrl(directVideoUrl) ? `<a class="button ghost compact" href="${escapeHtml(directVideoUrl)}" target="_blank" rel="noreferrer">打开原始视频</a>` : "",
   ].filter(Boolean).join("");
   const detailStatsMarkup = operatorMode
     ? `
@@ -5375,7 +5539,7 @@ function openMaterialPreviewFromRow(row) {
     `;
   materialPreviewBody.innerHTML = `
     <div class="preview-media-shell">
-      <div class="preview-media-stage">${previewBlock}</div>
+      ${previewBlock}
       <div class="preview-curve-panel" data-role="preview-curve-panel">${materialPreviewCurveLoadingMarkup()}</div>
     </div>
     <div class="preview-detail-grid">
@@ -5389,14 +5553,13 @@ function openMaterialPreviewFromRow(row) {
   const previewCover = materialPreviewBody.querySelector(".preview-cover");
   previewVideo?.addEventListener("error", () => {
     if (!previewMediaShell) return;
-    previewMediaShell.innerHTML = coverUrl
-      ? `
-        <div class="preview-media-stage">
-          <img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row.material_name || "素材封面")}" />
-          <div class="preview-empty">当前视频地址无法直接播放，已降级为封面预览。</div>
-        </div>
-      `
-      : '<div class="preview-media-stage"><div class="preview-empty">当前视频地址无法直接播放，请尝试下方入口。</div></div>';
+    previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
+      row,
+      {
+        coverUrl,
+        message: "当前视频地址无法直接播放，已降级为封面预览。",
+      },
+    );
     if (previewCurvePanel) {
       previewMediaShell.appendChild(previewCurvePanel);
     }
@@ -5417,6 +5580,8 @@ function openMaterialPreviewFromRow(row) {
   }, { once: true });
   materialPreviewModal.classList.remove("hidden");
   materialPreviewModal.setAttribute("aria-hidden", "false");
+  materialPreviewBody.dataset.materialKey = String(row.material_key || "").trim();
+  void hydrateMaterialPreviewSource(row);
   void loadMaterialPreviewCurve(row);
 }
 

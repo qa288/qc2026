@@ -4642,6 +4642,84 @@ class DashboardService:
         return expires_at <= int(time.time()) + max(leeway_seconds, 0)
 
     @staticmethod
+    def _normalize_media_url(url: Any) -> str:
+        text = str(url or "").strip()
+        if text.startswith("//"):
+            return f"https:{text}"
+        return text
+
+    @classmethod
+    def _is_internal_preview_video_url(cls, url: Any) -> bool:
+        text = cls._normalize_media_url(url)
+        if not text:
+            return False
+        try:
+            parsed = urlsplit(text)
+        except ValueError:
+            return False
+        host = str(parsed.netloc or "").strip().lower()
+        return host.endswith("cc.oceanengine.com") or host.endswith("ad.oceanengine.com")
+
+    @classmethod
+    def _is_public_preview_video_url(cls, url: Any) -> bool:
+        text = cls._normalize_media_url(url)
+        if not text:
+            return False
+        try:
+            parsed = urlsplit(text)
+        except ValueError:
+            return False
+        if parsed.scheme not in {"http", "https"} or not str(parsed.netloc or "").strip():
+            return False
+        return not cls._is_internal_preview_video_url(text)
+
+    @classmethod
+    def _preferred_video_url_from_values(cls, *values: Any) -> str:
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if isinstance(value, (list, tuple, set)):
+                nested = list(value)
+            else:
+                nested = [value]
+            for item in nested:
+                text = cls._normalize_media_url(item)
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                candidates.append(text)
+        for text in candidates:
+            if cls._is_public_preview_video_url(text):
+                return text
+        return candidates[0] if candidates else ""
+
+    @classmethod
+    def _video_url_candidates_from_payload(cls, payload: Any) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        values: list[Any] = []
+        for key in (
+            "video_url",
+            "videoUrl",
+            "url",
+            "play_url",
+            "playUrl",
+            "download_url",
+            "downloadUrl",
+            "download_url_https",
+            "downloadUrlHttps",
+            "material_url",
+            "materialUrl",
+            "origin_url",
+            "originUrl",
+            "file_url",
+            "fileUrl",
+        ):
+            if payload.get(key) not in (None, ""):
+                values.append(payload.get(key))
+        return [text for text in [cls._preferred_video_url_from_values(values)] if text]
+
+    @staticmethod
     def _material_preview_refresh_cache_key(
         customer_center_id: str,
         advertiser_id: int,
@@ -8257,7 +8335,7 @@ class DashboardService:
             }
         return None
 
-    def material_preview_curve(
+    def _material_preview_row_for_request(
         self,
         material_key: str,
         range_key: str = "day",
@@ -8267,7 +8345,7 @@ class DashboardService:
         allowed_advertiser_ids: set[int] | None = None,
         user: dict[str, Any] | None = None,
         display_scope: str = DISPLAY_SCOPE_CURRENT,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         material_key_text = str(material_key or "").strip()
         if not material_key_text:
             raise ValueError("material_key is required")
@@ -8340,6 +8418,174 @@ class DashboardService:
                 )
         if row is None:
             raise ValueError("material not found in current material rankings")
+        return row, search_all_customer_centers
+
+    def material_preview_source(
+        self,
+        row: dict[str, Any] | None,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+        user: dict[str, Any] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+    ) -> dict[str, Any]:
+        seed_row = dict(row or {})
+        material_key_text = str(seed_row.get("material_key") or "").strip()
+        resolved_row: dict[str, Any]
+        search_all_customer_centers = self._display_scope_uses_all_customer_centers(display_scope) or str((user or {}).get("role") or "") == ROLE_OPERATOR
+        if material_key_text:
+            try:
+                resolved_row, search_all_customer_centers = self._material_preview_row_for_request(
+                    material_key_text,
+                    range_key,
+                    start_date,
+                    end_date,
+                    snapshot_time,
+                    allowed_advertiser_ids,
+                    user,
+                    display_scope,
+                )
+            except ValueError:
+                if not seed_row:
+                    raise
+                resolved_row = seed_row
+        elif seed_row:
+            resolved_row = seed_row
+        else:
+            raise ValueError("material_key is required")
+
+        merged_row = dict(resolved_row)
+        for key, value in seed_row.items():
+            if key not in merged_row or merged_row.get(key) in (None, ""):
+                merged_row[key] = value
+
+        current_video_url = self._normalize_media_url(merged_row.get("video_url"))
+        cover_url = self._normalize_media_url(merged_row.get("cover_url"))
+        aweme_item_id = str(merged_row.get("aweme_item_id") or "").strip()
+        video_id = str(merged_row.get("video_id") or "").strip()
+        material_id = str(merged_row.get("material_id") or "").strip()
+        result = {
+            "material_key": str(merged_row.get("material_key") or "").strip(),
+            "material_id": material_id,
+            "video_id": video_id,
+            "cover_url": cover_url,
+            "aweme_item_id": aweme_item_id,
+            "video_url": current_video_url,
+            "public_video_url": current_video_url if self._is_public_preview_video_url(current_video_url) else "",
+            "is_public_video_url": self._is_public_preview_video_url(current_video_url),
+            "source": "current_material_payload",
+            "reason": "",
+        }
+        if result["is_public_video_url"]:
+            return result
+
+        start_text = str(start_date or "").strip()
+        end_text = str(end_date or "").strip()
+        if not snapshot_time and (not start_text or not end_text):
+            if str(range_key or "").strip().lower() == "custom":
+                start_text = start_text or str(merged_row.get("create_time") or "")[:10]
+                end_text = end_text or str(merged_row.get("create_time") or "")[:10]
+            else:
+                requested_start_dt, requested_end_dt, _label = self._material_preview_requested_window(
+                    range_key,
+                    start_date,
+                    end_date,
+                    snapshot_time,
+                )
+                start_text = requested_start_dt.strftime("%Y-%m-%d")
+                end_text = requested_end_dt.strftime("%Y-%m-%d")
+        resolved_source = self._resolve_material_curve_source(
+            merged_row,
+            start_text,
+            end_text,
+            snapshot_time,
+            allowed_advertiser_ids,
+            search_all_customer_centers=search_all_customer_centers,
+        )
+        if not resolved_source:
+            result["reason"] = "当前素材未定位到可解析的视频来源。"
+            if current_video_url and self._is_internal_preview_video_url(current_video_url):
+                result["reason"] = "当前素材只返回千川站内预览地址，无法在外部页面直连播放。"
+                result["source"] = "internal_video_url"
+            elif not current_video_url and cover_url:
+                result["reason"] = "当前素材仅返回封面图，未返回可直连视频地址。"
+                result["source"] = "cover_only"
+            return result
+
+        customer_center_id = str(resolved_source.get("customer_center_id") or "").strip()
+        advertiser_id = int(resolved_source.get("advertiser_id", 0) or 0)
+        source_video_id = str(resolved_source.get("video_id") or video_id).strip()
+        source_material_id = str(resolved_source.get("material_id") or material_id).strip()
+        if not customer_center_id or advertiser_id <= 0:
+            result["reason"] = "当前素材缺少可解析的视频来源配置。"
+            return result
+
+        client = self._build_scoped_customer_center_client(customer_center_id)
+        if source_video_id:
+            try:
+                uploaded_video = client.get_uploaded_video(advertiser_id, source_video_id)
+                public_video_url = self._preferred_video_url_from_values(
+                    uploaded_video.get("url"),
+                    uploaded_video.get("video_url"),
+                    uploaded_video.get("videoUrl"),
+                    uploaded_video.get("play_url"),
+                    uploaded_video.get("playUrl"),
+                    uploaded_video.get("download_url"),
+                    uploaded_video.get("downloadUrl"),
+                    uploaded_video.get("download_url_https"),
+                    uploaded_video.get("downloadUrlHttps"),
+                    uploaded_video.get("material_url"),
+                    uploaded_video.get("materialUrl"),
+                    current_video_url,
+                )
+                if self._is_public_preview_video_url(public_video_url):
+                    result["video_url"] = public_video_url
+                    result["public_video_url"] = public_video_url
+                    result["is_public_video_url"] = True
+                    result["source"] = "file_video_ad_get"
+                    poster_url = self._normalize_media_url(uploaded_video.get("poster_url") or uploaded_video.get("posterUrl"))
+                    if poster_url:
+                        result["cover_url"] = poster_url
+                    return result
+            except Exception as exc:  # noqa: BLE001
+                if "permission" in str(exc).lower():
+                    result["reason"] = "当前账号未授权公开视频文件接口，无法优先返回公网直链。"
+                    result["source"] = "file_video_ad_get_permission_denied"
+
+        if current_video_url and self._is_internal_preview_video_url(current_video_url):
+            result["reason"] = result["reason"] or "当前素材只返回千川站内预览地址，无法在外部页面直连播放。"
+            result["source"] = "internal_video_url"
+        elif not current_video_url and cover_url:
+            result["reason"] = result["reason"] or "当前素材仅返回封面图，未返回可直连视频地址。"
+            result["source"] = "cover_only"
+        elif source_material_id:
+            result["reason"] = result["reason"] or "已尝试解析公网直链，但当前接口未返回可外部直连的视频文件地址。"
+        return result
+
+    def material_preview_curve(
+        self,
+        material_key: str,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+        allowed_advertiser_ids: set[int] | None = None,
+        user: dict[str, Any] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+    ) -> dict[str, Any]:
+        material_key_text = str(material_key or "").strip()
+        row, search_all_customer_centers = self._material_preview_row_for_request(
+            material_key_text,
+            range_key,
+            start_date,
+            end_date,
+            snapshot_time,
+            allowed_advertiser_ids,
+            user,
+            display_scope,
+        )
 
         material_type = str(row.get("material_type") or "").strip().upper()
         advertiser_ids = [int(item) for item in row.get("advertiser_ids", []) if int(item or 0)]

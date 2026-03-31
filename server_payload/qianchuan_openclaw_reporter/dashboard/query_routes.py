@@ -248,6 +248,35 @@ def register_query_routes(
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return JSONResponse(payload)
 
+    @app.post("/api/material-preview-source")
+    async def material_preview_source(
+        preview_row: dict[str, Any] = Body(...),
+        snapshot_time: str = "",
+        range: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        display_scope: str = "current",
+        user: dict[str, Any] = Depends(require_auth),
+    ) -> JSONResponse:
+        allowed = service.allowed_advertiser_ids_for_user(user)
+        try:
+            payload = await asyncio.to_thread(
+                service.material_preview_source,
+                preview_row,
+                range,
+                start_date,
+                end_date,
+                snapshot_time,
+                allowed,
+                user,
+                display_scope,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
     @app.get("/api/comments")
     async def comments(
         range: str = "day",
