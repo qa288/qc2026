@@ -13,6 +13,7 @@ services:
       DATABASE_PATH: /app/data/dashboard.db
       TOKEN_CACHE_PATH: /app/data/token_cache.json
       LATEST_TOKEN_PATH: /app/data/qianchuan_latest_token.json
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
       DATABASE_URL: postgresql://${POSTGRES_USER:-qianchuan}:${POSTGRES_PASSWORD:-qianchuan}@postgres:5432/${POSTGRES_DB:-qianchuan}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1

@@ -60,11 +60,13 @@ const RULE_ENTITY_CONFIG = {
 };
 
 const MATERIAL_PAGE_SIZE = 100;
+const PERFORMANCE_CACHE_TTL_MS = 55 * 1000;
 const MATERIAL_CACHE_TTL_MS = 55 * 1000;
 const MATERIAL_SEARCH_DEBOUNCE_MS = 180;
 const COMMENT_PAGE_SIZE = 50;
 const COMMENT_CACHE_TTL_MS = 30 * 1000;
 const COMMENT_SEARCH_DEBOUNCE_MS = 180;
+const DASHBOARD_FETCH_DEDUPE_MS = 1500;
 const MATERIAL_TOTAL_PAY_TYPES = new Set(["VIDEO", "IMAGE", "TITLE"]);
 const MATERIAL_SETTLED_TYPES = new Set(["VIDEO", "IMAGE"]);
 
@@ -77,6 +79,8 @@ const state = {
   oceanEnginePopoverOpen: false,
   oceanEnginePendingCustomerCenterId: "",
   rangePayloads: {},
+  rangePayloadFetchedAt: {},
+  rangeRequestPromises: {},
   planAssetCache: {},
   materialPayloads: {},
   materialPayloadFetchedAt: {},
@@ -127,6 +131,9 @@ const state = {
   commentReplyTarget: null,
   materialPreviewRequestToken: 0,
   materialPreviewMediaRequestToken: 0,
+  dashboardFetchPromise: null,
+  dashboardFetchQueued: false,
+  dashboardFetchedAt: 0,
   selectedUserId: null,
   selectedUserScopeIds: [],
   editingRuleId: null,
@@ -343,6 +350,12 @@ const PERFORMANCE_SECTION_CONFIG = {
     endEl: commentDateEnd,
     applyEl: commentDateApply,
   },
+};
+
+const PERFORMANCE_VIEW_SECTION_MAP = {
+  accounts: "account",
+  plans: "plan",
+  breakdown: "breakdown",
 };
 
 Object.entries(state.performanceFilters).forEach(([sectionKey, filter]) => {
@@ -1630,6 +1643,14 @@ function commentRangePayload(filter, advertiserId = commentRequestAdvertiserId()
   return state.commentPayloads[commentCacheKey(filter, advertiserId)] || null;
 }
 
+function performanceSectionForView(view = state.activeView) {
+  return PERFORMANCE_VIEW_SECTION_MAP[String(view || "").trim()] || "";
+}
+
+function isPageVisible() {
+  return document.visibilityState !== "hidden";
+}
+
 function latestMaterialSnapshotToken() {
   return String(state.payload?.extendedSync?.snapshot_time || state.payload?.latest?.extendedSync?.snapshot_time || "").trim();
 }
@@ -2231,6 +2252,8 @@ function renderSystemCards(latest, extendedSync, tokenInfo) {
 
 function clearDashboardDataCaches() {
   state.rangePayloads = {};
+  state.rangePayloadFetchedAt = {};
+  state.rangeRequestPromises = {};
   state.planAssetCache = {};
   state.materialPayloads = {};
   state.materialPayloadFetchedAt = {};
@@ -2241,6 +2264,8 @@ function clearDashboardDataCaches() {
   state.materialPreviewCurveCache = {};
   state.materialPreviewSourceCache = {};
   state.catalogAccounts = [];
+  state.dashboardFetchedAt = 0;
+  state.dashboardFetchQueued = false;
 }
 
 function syncOceanEnginePopoverState() {
@@ -2334,7 +2359,7 @@ async function switchOceanEngineDisplayScope(nextScope) {
     : `已切回当前账号 CC ${currentCc || "--"} 视图。`;
   setInlineFeedback(oceanEngineConfigStatus, message, "success");
   try {
-    await fetchDashboard();
+    await fetchDashboard(true);
   } catch (error) {
     setInlineFeedback(oceanEngineConfigStatus, error.message || "切换展示范围失败。", "error");
     throw error;
@@ -2480,9 +2505,9 @@ async function switchOceanEngineCustomerCenter(targetCc, sourceLabel = "已授�
       `已切换到 CC ${normalizedTargetCc}，主快照同步已入队。新快照完成前，页面可能短暂显示旧数据。`,
       "success",
     );
-    await fetchDashboard();
+    await fetchDashboard(true);
     window.setTimeout(() => {
-      fetchDashboard().catch(() => {});
+      fetchDashboard(true).catch(() => {});
     }, 1800);
   } catch (error) {
     setInlineFeedback(oceanEngineConfigStatus, error.message || "切换授权账号失败。", "error");
@@ -4870,7 +4895,7 @@ function renderRuleTable(rules) {
         button.disabled = false;
         return;
       }
-      await fetchDashboard();
+      await fetchDashboard(true);
     });
   });
 
@@ -4891,7 +4916,7 @@ function renderRuleTable(rules) {
       if (Number(state.editingRuleId || 0) === id) {
         resetRuleFormState();
       }
-      await fetchDashboard();
+      await fetchDashboard(true);
     });
   });
 }
@@ -5124,12 +5149,50 @@ function isLikelyPublicVideoUrl(url) {
   if (!text) return false;
   try {
     const parsed = new URL(text, window.location.origin);
+    const protocol = String(parsed.protocol || "").trim().toLowerCase();
     const host = String(parsed.hostname || "").trim().toLowerCase();
     if (!host) return false;
-    return !host.endsWith("cc.oceanengine.com") && !host.endsWith("ad.oceanengine.com");
+    return protocol === "http:" || protocol === "https:";
   } catch {
     return false;
   }
+}
+
+function needsResolvedPreviewVideoUrl(url) {
+  const text = String(url || "").trim();
+  if (!text) return false;
+  try {
+    const parsed = new URL(text, window.location.origin);
+    const host = String(parsed.hostname || "").trim().toLowerCase();
+    return host.endsWith("cc.oceanengine.com");
+  } catch {
+    return false;
+  }
+}
+
+function stabilizePreviewVideoElement(video) {
+  if (!video) return;
+  const originalSrc = String(video.dataset.originalSrc || video.getAttribute("src") || "").trim();
+  if (!needsResolvedPreviewVideoUrl(originalSrc)) return;
+  if (video.dataset.stableSrcApplied === "1") return;
+  const currentSrc = String(video.currentSrc || "").trim();
+  if (!currentSrc || currentSrc === originalSrc) return;
+  if (!isLikelyPublicVideoUrl(currentSrc) || needsResolvedPreviewVideoUrl(currentSrc)) return;
+  const resumeTime = Number.isFinite(video.currentTime) ? Number(video.currentTime) : 0;
+  const shouldResume = !video.paused && !video.ended;
+  video.dataset.stableSrcApplied = "1";
+  video.src = currentSrc;
+  video.load();
+  video.addEventListener("loadedmetadata", () => {
+    if (resumeTime > 0) {
+      try {
+        video.currentTime = resumeTime;
+      } catch {}
+    }
+    if (shouldResume) {
+      video.play().catch(() => {});
+    }
+  }, { once: true });
 }
 
 function materialPreviewSourceSectionKey() {
@@ -5192,7 +5255,7 @@ function materialPreviewMediaStageMarkup(row, options = {}) {
   if (canDirectPlay) {
     return `
       <div class="preview-media-stage">
-        <video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>
+        <video class="preview-video" data-original-src="${escapeHtml(directVideoUrl)}" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>
       </div>
     `;
   }
@@ -5244,6 +5307,12 @@ async function hydrateMaterialPreviewSource(row) {
     }
     const previewVideo = previewMediaShell.querySelector(".preview-video");
     const previewCover = previewMediaShell.querySelector(".preview-cover");
+    previewVideo?.addEventListener("loadedmetadata", () => {
+      stabilizePreviewVideoElement(previewVideo);
+    });
+    previewVideo?.addEventListener("playing", () => {
+      stabilizePreviewVideoElement(previewVideo);
+    }, { once: true });
     previewVideo?.addEventListener("error", () => {
       if (!previewMediaShell) return;
       previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
@@ -5494,6 +5563,10 @@ function openMaterialPreviewFromRow(row) {
   const directVideoUrl = String(row.video_url || "").trim();
   const coverUrl = String(row.cover_url || "").trim();
   const awemeLink = materialAwemeLink(row);
+  const waitForResolvedVideoUrl = needsResolvedPreviewVideoUrl(directVideoUrl);
+  const previewMessage = waitForResolvedVideoUrl
+    ? "正在解析稳定视频直链..."
+    : undefined;
   if (materialPreviewTitle) {
     materialPreviewTitle.textContent = row.material_name || "素材预览";
   }
@@ -5506,7 +5579,7 @@ function openMaterialPreviewFromRow(row) {
   const previewBlock = materialPreviewMediaStageMarkup(
     row,
     {
-      videoUrl: isLikelyPublicVideoUrl(directVideoUrl) ? directVideoUrl : "",
+      videoUrl: isLikelyPublicVideoUrl(directVideoUrl) && !waitForResolvedVideoUrl ? directVideoUrl : "",
       coverUrl,
       message: isLikelyPublicVideoUrl(directVideoUrl)
         ? ""
@@ -6231,26 +6304,40 @@ async function ensureAccessData(force = false) {
 async function fetchPerformance(filter, force = false) {
   const normalized = normalizeRangeFilter(filter);
   const cacheKey = performanceFilterKey(normalized);
-  if (!force && state.rangePayloads[cacheKey]) {
-    return state.rangePayloads[cacheKey];
+  const cachedPayload = state.rangePayloads[cacheKey];
+  const cachedAt = Number(state.rangePayloadFetchedAt[cacheKey] || 0);
+  if (!force && cachedPayload && cachedAt > 0 && Date.now() - cachedAt < PERFORMANCE_CACHE_TTL_MS) {
+    return cachedPayload;
   }
-  const params = appendDisplayScopeParam(new URLSearchParams());
-  params.set("range", normalized.mode);
-  if (normalized.mode === "custom") {
-    params.set("start_date", normalized.start);
-    params.set("end_date", normalized.end);
+  if (state.rangeRequestPromises[cacheKey]) {
+    return state.rangeRequestPromises[cacheKey];
   }
-  const response = await fetch(`/api/performance?${params.toString()}`).catch(() => null);
-  if (!response || !response.ok) {
-    const errorPayload = response ? await response.json().catch(() => ({})) : {};
-    if (state.rangePayloads[cacheKey]) {
-      return state.rangePayloads[cacheKey];
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    params.set("range", normalized.mode);
+    if (normalized.mode === "custom") {
+      params.set("start_date", normalized.start);
+      params.set("end_date", normalized.end);
     }
-    throw new Error(errorPayload.detail || `performance fetch failed for ${cacheKey}`);
+    const response = await fetch(`/api/performance?${params.toString()}`).catch(() => null);
+    if (!response || !response.ok) {
+      const errorPayload = response ? await response.json().catch(() => ({})) : {};
+      if (state.rangePayloads[cacheKey]) {
+        return state.rangePayloads[cacheKey];
+      }
+      throw new Error(errorPayload.detail || `performance fetch failed for ${cacheKey}`);
+    }
+    const payload = await response.json();
+    state.rangePayloads[cacheKey] = payload;
+    state.rangePayloadFetchedAt[cacheKey] = Date.now();
+    return payload;
+  })();
+  state.rangeRequestPromises[cacheKey] = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    delete state.rangeRequestPromises[cacheKey];
   }
-  const payload = await response.json();
-  state.rangePayloads[cacheKey] = payload;
-  return payload;
 }
 
 function renderPerformanceSections() {
@@ -6293,6 +6380,42 @@ async function refreshPerformanceSections(force = false) {
   });
   await Promise.all([...uniqueFilters.values()].map((filter) => fetchPerformance(filter, force)));
   renderPerformanceSections();
+}
+
+async function refreshPerformanceSection(sectionKey, force = false) {
+  const normalizedSectionKey = String(sectionKey || "").trim();
+  if (!PERFORMANCE_SECTION_CONFIG[normalizedSectionKey]) return;
+  await fetchPerformance(sectionFilter(normalizedSectionKey), force);
+  renderPerformanceSections();
+}
+
+async function ensureActiveViewData(force = false) {
+  const activeView = String(state.activeView || "").trim();
+  const performanceSection = performanceSectionForView(activeView);
+  if (performanceSection) {
+    await refreshPerformanceSection(performanceSection, force);
+    return;
+  }
+  if (activeView === "materials") {
+    await refreshMaterialSection(force);
+    return;
+  }
+  if (activeView === "team-materials") {
+    await refreshTeamMaterialSection(force);
+    return;
+  }
+  if (activeView === "comments") {
+    await refreshCommentSection(force);
+    return;
+  }
+  if (activeView === "access") {
+    await ensureAccessData(force);
+    return;
+  }
+  if (activeView === "uploads" && canUseUploadModule()) {
+    await fetchUploadTargets(force);
+    await fetchUploadJobs();
+  }
 }
 
 async function refreshMaterialSection(force = false) {
@@ -6359,7 +6482,7 @@ async function applyQuickRange(sectionKey, mode) {
       await refreshCommentSection(false);
       return;
     }
-    await refreshPerformanceSections(true);
+    await refreshPerformanceSection(sectionKey, true);
   } catch (error) {
     window.alert(error.message || "切换时间范围失败");
   }
@@ -6396,7 +6519,7 @@ async function applyCustomRange(sectionKey) {
       await refreshCommentSection(false);
       return;
     }
-    await refreshPerformanceSections(true);
+    await refreshPerformanceSection(sectionKey, true);
   } catch (error) {
     window.alert(error.message || "查询时间段失败");
   }
@@ -6530,22 +6653,7 @@ function bindInputs() {
         }
         const view = button.dataset.view || "overview";
         setActiveView(view);
-        if (view === "materials") {
-          await refreshMaterialSection(false);
-        }
-        if (view === "team-materials") {
-          await refreshTeamMaterialSection(false);
-        }
-        if (view === "comments") {
-          await refreshCommentSection(false);
-        }
-        if (view === "uploads") {
-          await fetchUploadTargets(true);
-          await fetchUploadJobs();
-        }
-        if (view === "access") {
-          await ensureAccessData(true);
-        }
+        await ensureActiveViewData(false);
       });
     });
   }
@@ -6741,7 +6849,7 @@ function bindInputs() {
         window.alert(errorPayload.detail || "保存通知设置失败");
         return;
       }
-      await fetchDashboard();
+      await fetchDashboard(true);
       if (notificationStatus) {
         notificationStatus.dataset.tone = "success";
       }
@@ -6795,7 +6903,7 @@ function bindInputs() {
       }
       const savedLabel = payload.entity_type ? entityLabel(payload.entity_type) : String(form.get("entity_type") || "规则");
       resetRuleFormState();
-      await fetchDashboard();
+      await fetchDashboard(true);
       if (ruleFormHint) {
         ruleFormHint.textContent = `已保存${savedLabel}规则。可继续新增，或到下方调整状态。`;
         ruleFormHint.dataset.tone = "success";
@@ -6850,7 +6958,7 @@ function bindInputs() {
       }
       syncButton.textContent = "已加入队列";
       window.setTimeout(() => {
-        fetchDashboard().catch(() => {});
+        fetchDashboard(true).catch(() => {});
       }, 1500);
     } finally {
       window.setTimeout(() => {
@@ -6871,7 +6979,7 @@ function bindInputs() {
         }
         syncExtendedButton.textContent = "已加入队列";
         window.setTimeout(() => {
-          fetchDashboard().catch(() => {});
+          fetchDashboard(true).catch(() => {});
           refreshMaterialSection(true).catch(() => {});
         }, 2000);
       } finally {
@@ -7055,7 +7163,7 @@ function bindInputs() {
     renderUserMatchedMaterialTable();
     setInlineFeedback(operatorKeywordStatus, `已添加关键词“${payload.keyword}”。`, "success");
     focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
-    await fetchDashboard();
+    await fetchDashboard(true);
   });
 
   operatorKeywordTable?.addEventListener("click", async (event) => {
@@ -7076,7 +7184,7 @@ function bindInputs() {
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
     setInlineFeedback(operatorKeywordStatus, "已删除关键词。", "success");
-    await fetchDashboard();
+    await fetchDashboard(true);
   });
 
   saveUserScopesButton?.addEventListener("click", async () => {
@@ -7108,19 +7216,45 @@ function bindInputs() {
   resetRuleFormState();
 }
 
-async function fetchDashboard() {
-  const params = appendDisplayScopeParam(new URLSearchParams());
-  const response = await fetch(`/api/dashboard?${params.toString()}`);
-  const payload = await response.json();
-  state.payload = payload;
-  state.session = payload.session || null;
-  state.oceanEngineConfig = payload.oceanEngineConfig || null;
-  if (!payload.latest) {
-    applyRoleViewPolicy();
-    renderOceanEngineConfig(payload.oceanEngineConfig || { customer_center_id: payload.customerCenterId || "" });
-    return;
+async function fetchDashboard(force = false) {
+  const now = Date.now();
+  if (state.dashboardFetchPromise) {
+    if (force) {
+      state.dashboardFetchQueued = true;
+    }
+    return state.dashboardFetchPromise;
   }
-  await render(payload);
+  if (!force && state.payload && now - Number(state.dashboardFetchedAt || 0) < DASHBOARD_FETCH_DEDUPE_MS) {
+    return state.payload;
+  }
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    const response = await fetch(`/api/dashboard?${params.toString()}`);
+    const payload = await response.json();
+    state.payload = payload;
+    state.session = payload.session || null;
+    state.oceanEngineConfig = payload.oceanEngineConfig || null;
+    state.dashboardFetchedAt = Date.now();
+    if (!payload.latest) {
+      applyRoleViewPolicy();
+      renderOceanEngineConfig(payload.oceanEngineConfig || { customer_center_id: payload.customerCenterId || "" });
+      return payload;
+    }
+    await render(payload);
+    return payload;
+  })();
+  state.dashboardFetchPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    state.dashboardFetchPromise = null;
+    if (state.dashboardFetchQueued) {
+      state.dashboardFetchQueued = false;
+      window.setTimeout(() => {
+        fetchDashboard(true).catch(() => {});
+      }, 0);
+    }
+  }
 }
 
 async function render(payload) {
@@ -7139,54 +7273,26 @@ async function render(payload) {
   lastSnapshotText.textContent = latest.snapshot_time;
   refreshHintText.textContent = "采集 1 分钟 · 明细 10 分钟 · 页面 60 秒";
   try {
-    await refreshPerformanceSections(true);
+    await ensureActiveViewData(false);
   } catch (error) {
-    console.error("refreshPerformanceSections failed", error);
-  }
-  if (state.activeView === "materials") {
-    try {
-      await refreshMaterialSection(false);
-    } catch (error) {
-      console.error("refreshMaterialSection failed", error);
-    }
-  }
-  if (state.activeView === "team-materials") {
-    try {
-      await refreshTeamMaterialSection(false);
-    } catch (error) {
-      console.error("refreshTeamMaterialSection failed", error);
-    }
-  }
-  if (state.activeView === "comments") {
-    try {
-      await refreshCommentSection(false);
-    } catch (error) {
-      console.error("refreshCommentSection failed", error);
-    }
-  }
-  if (state.activeView === "access") {
-    try {
-      await ensureAccessData(true);
-    } catch (error) {
-      console.error("ensureAccessData failed", error);
-    }
-  }
-  if (state.activeView === "uploads" && canUseUploadModule()) {
-    try {
-      await fetchUploadTargets(true);
-      await fetchUploadJobs();
-    } catch (error) {
-      console.error("upload section load failed", error);
-    }
+    console.error("ensureActiveViewData failed", error);
   }
   setActiveView(state.activeView);
 }
 
 bindInputs();
 setActiveView(state.activeView);
-fetchDashboard();
-window.setInterval(fetchDashboard, 60 * 1000);
+fetchDashboard().catch(() => {});
 window.setInterval(() => {
+  if (!isPageVisible()) return;
+  fetchDashboard().catch(() => {});
+}, 60 * 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!isPageVisible()) return;
+  fetchDashboard().catch(() => {});
+});
+window.setInterval(() => {
+  if (!isPageVisible()) return;
   if (state.activeView === "uploads" && canUseUploadModule()) {
     fetchUploadJobs().catch(() => {});
   }

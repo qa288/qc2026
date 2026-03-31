@@ -12,6 +12,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -164,6 +166,7 @@ MATERIAL_REPORT_TITLE_METRICS = MATERIAL_REPORT_CORE_METRICS + [
     "total_cost_per_pay_order_for_roi2",
 ]
 MATERIAL_PREVIEW_REFRESH_CACHE_SECONDS = 600
+PREVIEW_VIDEO_RESOLVE_CACHE_SECONDS = 300
 INIT_DB_LOCK_NAMESPACE = 20260330
 INIT_DB_LOCK_KEY = 1
 MATERIAL_REPORT_TOPIC_CONFIGS = {
@@ -308,6 +311,7 @@ class DashboardService:
         self._performance_cache: dict[str, dict[str, Any]] = {}
         self._material_cache: dict[str, dict[str, Any]] = {}
         self._material_preview_refresh_cache: dict[str, dict[str, Any]] = {}
+        self._preview_video_resolve_cache: dict[str, dict[str, Any]] = {}
         self._comment_cache: dict[str, dict[str, Any]] = {}
         self._backfill_queue_marks: dict[str, float] = {}
         self.user_access = UserAccess(
@@ -4658,7 +4662,7 @@ class DashboardService:
         except ValueError:
             return False
         host = str(parsed.netloc or "").strip().lower()
-        return host.endswith("cc.oceanengine.com") or host.endswith("ad.oceanengine.com")
+        return host in {"localhost", "127.0.0.1"} or host.endswith(".local")
 
     @classmethod
     def _is_public_preview_video_url(cls, url: Any) -> bool:
@@ -4671,7 +4675,22 @@ class DashboardService:
             return False
         if parsed.scheme not in {"http", "https"} or not str(parsed.netloc or "").strip():
             return False
+        # OceanEngine preview URLs often use cc.oceanengine.com and then redirect to
+        # a playable CDN file. Do not block them up front; let the browser attempt
+        # playback and fall back to the cover image on error.
         return not cls._is_internal_preview_video_url(text)
+
+    @classmethod
+    def _needs_preview_video_redirect_resolution(cls, url: Any) -> bool:
+        text = cls._normalize_media_url(url)
+        if not text:
+            return False
+        try:
+            parsed = urlsplit(text)
+        except ValueError:
+            return False
+        host = str(parsed.netloc or "").strip().lower()
+        return host.endswith("cc.oceanengine.com")
 
     @classmethod
     def _preferred_video_url_from_values(cls, *values: Any) -> str:
@@ -4692,6 +4711,43 @@ class DashboardService:
             if cls._is_public_preview_video_url(text):
                 return text
         return candidates[0] if candidates else ""
+
+    def _resolve_preview_video_url(self, url: Any, *, timeout: int = 20) -> str:
+        text = self._normalize_media_url(url)
+        if not text:
+            return ""
+        if not self._needs_preview_video_redirect_resolution(text):
+            return text
+        now_ts = time.time()
+        cached = self._preview_video_resolve_cache.get(text)
+        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < PREVIEW_VIDEO_RESOLVE_CACHE_SECONDS:
+            cached_url = self._normalize_media_url(cached.get("resolved_url"))
+            if cached_url and not self._preview_url_needs_refresh(cached_url, leeway_seconds=60):
+                return cached_url
+        request = urllib.request.Request(
+            text,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Range": "bytes=0-0",
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                resolved_url = self._normalize_media_url(response.geturl())
+                content_type = str(response.headers.get("Content-Type") or "").strip().lower()
+                response.read(1)
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, OSError):
+            return text
+        if not resolved_url or not self._is_public_preview_video_url(resolved_url):
+            return text
+        if content_type and not content_type.startswith("video/"):
+            return text
+        self._preview_video_resolve_cache[text] = {
+            "_cached_at": now_ts,
+            "resolved_url": resolved_url,
+        }
+        return resolved_url
 
     @classmethod
     def _video_url_candidates_from_payload(cls, payload: Any) -> list[str]:
@@ -8462,6 +8518,7 @@ class DashboardService:
                 merged_row[key] = value
 
         current_video_url = self._normalize_media_url(merged_row.get("video_url"))
+        resolved_current_video_url = self._resolve_preview_video_url(current_video_url)
         cover_url = self._normalize_media_url(merged_row.get("cover_url"))
         aweme_item_id = str(merged_row.get("aweme_item_id") or "").strip()
         video_id = str(merged_row.get("video_id") or "").strip()
@@ -8472,9 +8529,11 @@ class DashboardService:
             "video_id": video_id,
             "cover_url": cover_url,
             "aweme_item_id": aweme_item_id,
-            "video_url": current_video_url,
-            "public_video_url": current_video_url if self._is_public_preview_video_url(current_video_url) else "",
-            "is_public_video_url": self._is_public_preview_video_url(current_video_url),
+            "video_url": resolved_current_video_url or current_video_url,
+            "public_video_url": (resolved_current_video_url or current_video_url)
+            if self._is_public_preview_video_url(resolved_current_video_url or current_video_url)
+            else "",
+            "is_public_video_url": self._is_public_preview_video_url(resolved_current_video_url or current_video_url),
             "source": "current_material_payload",
             "reason": "",
         }
@@ -8540,9 +8599,10 @@ class DashboardService:
                     uploaded_video.get("materialUrl"),
                     current_video_url,
                 )
-                if self._is_public_preview_video_url(public_video_url):
-                    result["video_url"] = public_video_url
-                    result["public_video_url"] = public_video_url
+                resolved_public_video_url = self._resolve_preview_video_url(public_video_url)
+                if self._is_public_preview_video_url(resolved_public_video_url):
+                    result["video_url"] = resolved_public_video_url
+                    result["public_video_url"] = resolved_public_video_url
                     result["is_public_video_url"] = True
                     result["source"] = "file_video_ad_get"
                     poster_url = self._normalize_media_url(uploaded_video.get("poster_url") or uploaded_video.get("posterUrl"))

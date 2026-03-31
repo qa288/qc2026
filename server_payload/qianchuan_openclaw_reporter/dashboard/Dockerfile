@@ -15,4 +15,4 @@ COPY . /app
 
 EXPOSE 9898
 
-CMD ["uvicorn", "dashboard.main:app", "--host", "0.0.0.0", "--port", "9898"]
+CMD ["sh", "-c", "uvicorn dashboard.main:app --host 0.0.0.0 --port 9898 --workers ${UVICORN_WORKERS:-2}"]
