@@ -1074,11 +1074,11 @@ function buildAccountMetricsFromPlans(plans) {
 function enrichAccountRow(row, accountMetrics) {
   const advertiserId = Number(row?.advertiser_id || 0);
   const metrics = accountMetrics.get(advertiserId) || {};
-  const statCost = Number(metrics.stat_cost ?? row?.stat_cost ?? 0);
-  const payAmount = Number(metrics.pay_amount ?? row?.pay_amount ?? 0);
+  const statCost = Number(row?.stat_cost ?? metrics.stat_cost ?? 0);
+  const payAmount = Number(row?.pay_amount ?? metrics.pay_amount ?? 0);
   const totalPayAmount = Number(metrics.total_pay_amount || 0);
   const settledPayAmount = Number(metrics.settled_pay_amount || 0);
-  const orderCount = Number(metrics.order_count ?? row?.order_count ?? 0);
+  const orderCount = Number(row?.order_count ?? metrics.order_count ?? 0);
   const settledOrderCount = Number(metrics.settled_order_count || 0);
   const refundAmount1h = Number(metrics.refund_amount_1h || 0);
   return {

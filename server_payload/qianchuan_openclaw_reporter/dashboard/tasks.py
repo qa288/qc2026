@@ -13,8 +13,13 @@ def _prepare() -> None:
 @celery_app.task(name="dashboard.sync")
 def sync_dashboard() -> dict:
     _prepare()
-    payload = service.collect_and_store()
-    return {"snapshot_time": payload["snapshot_time"]}
+    payload = service.collect_and_store_all_customer_centers()
+    return {
+        "snapshot_time": payload.get("snapshot_time", ""),
+        "current_customer_center_id": payload.get("current_customer_center_id", ""),
+        "synced_customer_center_count": int(payload.get("synced_customer_center_count", 0) or 0),
+        "error_count": int(payload.get("error_count", 0) or 0),
+    }
 
 
 @celery_app.task(name="dashboard.detail_sync")

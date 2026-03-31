@@ -3057,7 +3057,7 @@ class DashboardService:
             token_persist_callback=self.persist_token_record,
         )
 
-    def _build_scoped_customer_center_client(self, customer_center_id: str) -> OceanEngineClient:
+    def _scoped_config_for_customer_center(self, customer_center_id: str) -> dict[str, Any]:
         target_customer_center_id = str(customer_center_id or "").strip()
         if not target_customer_center_id:
             raise ValueError("customer_center_id is required")
@@ -3067,6 +3067,11 @@ class DashboardService:
         stored_refresh_token = str(stored_payload.get("refresh_token") or "").strip()
         if stored_refresh_token:
             config["refresh_token"] = stored_refresh_token
+        return config
+
+    def _build_scoped_customer_center_client(self, customer_center_id: str) -> OceanEngineClient:
+        target_customer_center_id = str(customer_center_id or "").strip()
+        config = self._scoped_config_for_customer_center(target_customer_center_id)
         token_dir = DATA_DIR / "preview_token_cache"
         token_dir.mkdir(parents=True, exist_ok=True)
         token_cache_path = token_dir / f"{target_customer_center_id}.json"
@@ -7185,12 +7190,14 @@ class DashboardService:
         end_dt: datetime,
         *,
         include_balances: bool = True,
+        config: dict[str, Any] | None = None,
+        client: OceanEngineClient | None = None,
     ) -> dict[str, Any]:
-        config = self.read_config()
-        client = self.build_client(config)
-        accounts = client.list_accounts()
+        effective_config = dict(config or self.read_config())
+        effective_client = client or self.build_client(effective_config)
+        accounts = effective_client.list_accounts()
         if include_balances:
-            balance_snapshot = self._collect_balance_snapshot(client, accounts)
+            balance_snapshot = self._collect_balance_snapshot(effective_client, accounts)
         else:
             balance_snapshot = {
                 "account_balances": [],
@@ -7198,8 +7205,8 @@ class DashboardService:
                 "wallet_relations": [],
                 "errors": [],
             }
-        account_workers = int(config.get("max_workers", 6) or 6)
-        plan_workers = int(config.get("plan_max_workers", 2) or 2)
+        account_workers = int(effective_config.get("max_workers", 6) or 6)
+        plan_workers = int(effective_config.get("plan_max_workers", 2) or 2)
 
         summaries: list[AccountSummary] = []
         plans: list[PlanSummary] = []
@@ -7209,7 +7216,7 @@ class DashboardService:
 
         with ThreadPoolExecutor(max_workers=account_workers) as pool:
             future_map = {
-                pool.submit(fetch_account_bundle, client, item, start_dt, end_dt): item
+                pool.submit(fetch_account_bundle, effective_client, item, start_dt, end_dt): item
                 for item in accounts
             }
             for future in as_completed(future_map):
@@ -7220,7 +7227,7 @@ class DashboardService:
 
         with ThreadPoolExecutor(max_workers=plan_workers) as pool:
             future_map = {
-                pool.submit(fetch_plan_bundle, client, item, start_dt, end_dt): item
+                pool.submit(fetch_plan_bundle, effective_client, item, start_dt, end_dt): item
                 for item in accounts
             }
             for future in as_completed(future_map):
@@ -7284,10 +7291,10 @@ class DashboardService:
         active_accounts = sum(1 for item in summaries if item.ok and item.stat_cost > 0)
         active_plans = [item for item in plans if item.stat_cost > 0]
         total_roi = round(total_pay / total_cost, 2) if total_cost > 0 else 0.0
-        snapshot_time = datetime.now(ZoneInfo(config["timezone"])).replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+        snapshot_time = datetime.now(ZoneInfo(effective_config["timezone"])).replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
 
         return {
-            "customer_center_id": str(config.get("customer_center_id") or "").strip(),
+            "customer_center_id": str(effective_config.get("customer_center_id") or "").strip(),
             "snapshot_time": snapshot_time,
             "window_start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
             "window_end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -7321,6 +7328,107 @@ class DashboardService:
         config = self.read_config()
         start_dt, end_dt, _title, _label = build_window("intraday", config["timezone"])
         return self._collect_window_snapshot(start_dt, end_dt)
+
+    def collect_snapshot_for_customer_center(self, customer_center_id: str) -> dict[str, Any]:
+        scoped_config = self._scoped_config_for_customer_center(customer_center_id)
+        start_dt, end_dt, _title, _label = build_window("intraday", str(scoped_config.get("timezone") or TIMEZONE))
+        return self._collect_window_snapshot(
+            start_dt,
+            end_dt,
+            config=scoped_config,
+            client=self._build_scoped_customer_center_client(customer_center_id),
+        )
+
+    def bound_customer_center_ids(self) -> list[str]:
+        current_customer_center_id = self._current_customer_center_id()
+        items = self.list_bound_customer_centers()
+        ordered_ids = [
+            str(item.get("customer_center_id") or "").strip()
+            for item in items
+            if str(item.get("customer_center_id") or "").strip() and bool(item.get("has_saved_token"))
+        ]
+        deduped_ids: list[str] = []
+        seen_ids: set[str] = set()
+        if current_customer_center_id:
+            deduped_ids.append(current_customer_center_id)
+            seen_ids.add(current_customer_center_id)
+        for customer_center_id in ordered_ids:
+            if customer_center_id in seen_ids:
+                continue
+            deduped_ids.append(customer_center_id)
+            seen_ids.add(customer_center_id)
+        return deduped_ids
+
+    def collect_and_store_all_customer_centers(self) -> dict[str, Any]:
+        customer_center_ids = self.bound_customer_center_ids()
+        if not customer_center_ids:
+            payload = self.collect_and_store()
+            return {
+                "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
+                "current_customer_center_id": str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip(),
+                "synced_customer_center_count": 1 if payload else 0,
+                "synced_customer_centers": [
+                    {
+                        "customer_center_id": str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip(),
+                        "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
+                        "account_count": int((payload.get("summary") or {}).get("account_count") or 0),
+                        "active_account_count": int((payload.get("summary") or {}).get("active_account_count") or 0),
+                    }
+                ] if payload else [],
+                "error_count": 0,
+                "errors": [],
+            }
+
+        current_customer_center_id = self._current_customer_center_id()
+        synced_customer_centers: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        current_payload: dict[str, Any] | None = None
+
+        for customer_center_id in customer_center_ids:
+            try:
+                payload = (
+                    self.collect_snapshot()
+                    if customer_center_id == current_customer_center_id
+                    else self.collect_snapshot_for_customer_center(customer_center_id)
+                )
+                self.persist_snapshot(payload)
+                synced_customer_centers.append(
+                    {
+                        "customer_center_id": customer_center_id,
+                        "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
+                        "account_count": int((payload.get("summary") or {}).get("account_count") or 0),
+                        "active_account_count": int((payload.get("summary") or {}).get("active_account_count") or 0),
+                    }
+                )
+                if customer_center_id == current_customer_center_id:
+                    current_payload = payload
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    {
+                        "customer_center_id": customer_center_id,
+                        "error": str(exc),
+                    }
+                )
+
+        if current_payload:
+            self.evaluate_alerts(current_payload)
+        self.cleanup_history()
+        self.clear_runtime_caches()
+
+        snapshot_time = ""
+        if current_payload:
+            snapshot_time = str(current_payload.get("snapshot_time") or "").strip()
+        elif synced_customer_centers:
+            snapshot_time = max(str(item.get("snapshot_time") or "").strip() for item in synced_customer_centers)
+
+        return {
+            "snapshot_time": snapshot_time,
+            "current_customer_center_id": current_customer_center_id,
+            "synced_customer_center_count": len(synced_customer_centers),
+            "synced_customer_centers": synced_customer_centers,
+            "error_count": len(errors),
+            "errors": errors,
+        }
 
     def backfill_performance_history(self, start_dt: datetime, end_dt: datetime) -> dict[str, Any]:
         tz = ZoneInfo(self.read_config()["timezone"])
@@ -10314,8 +10422,15 @@ class DashboardService:
 
     async def run_sync(self, manual: bool = False) -> dict[str, Any]:
         async with self._sync_lock:
-            payload = await asyncio.to_thread(self.collect_and_store)
-            return {"ok": True, "manual": manual, "snapshot_time": payload["snapshot_time"]}
+            payload = await asyncio.to_thread(self.collect_and_store_all_customer_centers)
+            return {
+                "ok": True,
+                "manual": manual,
+                "snapshot_time": payload.get("snapshot_time", ""),
+                "current_customer_center_id": payload.get("current_customer_center_id", ""),
+                "synced_customer_center_count": int(payload.get("synced_customer_center_count", 0) or 0),
+                "error_count": int(payload.get("error_count", 0) or 0),
+            }
 
     async def run_detail_sync(self, manual: bool = False, force_refresh: bool = False) -> dict[str, Any]:
         async with self._detail_sync_lock:
