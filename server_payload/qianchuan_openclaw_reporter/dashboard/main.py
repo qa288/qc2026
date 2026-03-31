@@ -4761,13 +4761,22 @@ class DashboardService:
         end_date: str,
         snapshot_time: str = "",
         allowed_advertiser_ids: set[int] | None = None,
+        *,
+        search_all_customer_centers: bool = False,
     ) -> list[dict[str, Any]]:
         if not items:
             return items
         refresh_targets: dict[tuple[str, int, int, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
         current_customer_center_id = self._current_customer_center_id()
         for item in items:
-            if not self._preview_url_needs_refresh(str(item.get("cover_url") or "")):
+            material_type = str(item.get("material_type") or "VIDEO").strip().upper()
+            cover_needs_refresh = self._preview_url_needs_refresh(str(item.get("cover_url") or ""))
+            video_needs_refresh = self._preview_url_needs_refresh(str(item.get("video_url") or ""))
+            if material_type == "VIDEO":
+                should_refresh = video_needs_refresh or cover_needs_refresh
+            else:
+                should_refresh = cover_needs_refresh
+            if not should_refresh:
                 continue
             source = self._resolve_material_curve_source(
                 item,
@@ -4775,6 +4784,7 @@ class DashboardService:
                 end_date,
                 snapshot_time,
                 allowed_advertiser_ids,
+                search_all_customer_centers=search_all_customer_centers,
             )
             if not source:
                 continue
@@ -9141,6 +9151,14 @@ class DashboardService:
                 )
                 items = self._apply_latest_material_previews(preview_conn, items)
                 items = self._apply_material_top_anchor_names_for_pairs(preview_conn, items, selected_pairs)
+            items = self._refresh_stale_material_previews(
+                items,
+                start_dt.strftime("%Y-%m-%d"),
+                end_dt.strftime("%Y-%m-%d"),
+                target_snapshot,
+                allowed_advertiser_ids,
+                search_all_customer_centers=True,
+            )
 
         payload = {
             "snapshot_time": str(runs[-1].get("snapshot_time") or target_snapshot) if runs else target_snapshot,
