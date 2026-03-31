@@ -5389,6 +5389,7 @@ function materialPreviewCurveCacheKey(row, filter) {
   return [
     requestDisplayScope(),
     String(row?.material_key || "").trim(),
+    String(row?.snapshot_time || "").trim(),
     normalized.mode,
     normalized.start || "",
     normalized.end || "",
@@ -5396,10 +5397,14 @@ function materialPreviewCurveCacheKey(row, filter) {
 }
 
 function materialPreviewCurveRequest(row) {
-  const filter = sectionFilter("material");
+  const filter = sectionFilter(materialPreviewSourceSectionKey());
   const params = appendDisplayScopeParam(new URLSearchParams());
   params.set("material_key", String(row?.material_key || "").trim());
   params.set("range", filter.mode);
+  const snapshotTime = String(row?.snapshot_time || "").trim();
+  if (snapshotTime) {
+    params.set("snapshot_time", snapshotTime);
+  }
   if (filter.mode === "custom") {
     params.set("start_date", filter.start);
     params.set("end_date", filter.end);
@@ -5552,11 +5557,23 @@ async function fetchMaterialPreviewCurve(row, force = false) {
     return state.materialPreviewCurveCache[request.cacheKey];
   }
   const response = await fetch(request.url).catch(() => null);
-  if (!response || !response.ok) {
-    const errorPayload = response ? await response.json().catch(() => ({})) : {};
-    throw new Error(errorPayload.detail || "峰形数据请求失败");
+  const responseText = response ? await response.text().catch(() => "") : "";
+  let payload = null;
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      if (response?.ok) {
+        throw new Error("Preview curve returned a non-JSON response");
+      }
+    }
   }
-  const payload = await response.json();
+  if (!response || !response.ok) {
+    throw new Error(payload?.detail || "Preview curve request failed");
+  }
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Preview curve response payload is invalid");
+  }
   state.materialPreviewCurveCache[request.cacheKey] = payload;
   return payload;
 }

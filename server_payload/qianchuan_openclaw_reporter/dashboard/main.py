@@ -10367,27 +10367,66 @@ class DashboardService:
         display_scope: str = DISPLAY_SCOPE_CURRENT,
     ) -> dict[str, Any]:
         material_key_text = str(material_key or "").strip()
-        row, search_all_customer_centers = self._material_preview_row_for_request(
-            material_key_text,
-            range_key,
-            start_date,
-            end_date,
-            snapshot_time,
-            allowed_advertiser_ids,
-            user,
-            display_scope,
-        )
-
-        material_type = str(row.get("material_type") or "").strip().upper()
-        advertiser_ids = [int(item) for item in row.get("advertiser_ids", []) if int(item or 0)]
-        advertiser_id = advertiser_ids[0] if advertiser_ids else 0
-
         requested_start_dt, requested_end_dt, requested_range_label = self._material_preview_requested_window(
             range_key,
             start_date,
             end_date,
             snapshot_time,
         )
+        try:
+            row, search_all_customer_centers = self._material_preview_row_for_request(
+                material_key_text,
+                range_key,
+                start_date,
+                end_date,
+                snapshot_time,
+                allowed_advertiser_ids,
+                user,
+                display_scope,
+            )
+        except ValueError as exc:
+            if str(exc) != "material not found in current material rankings":
+                raise
+            return {
+                "material_key": material_key_text,
+                "material_id": "",
+                "material_name": "",
+                "material_type": "VIDEO",
+                "advertiser_id": 0,
+                "curve_material_id": "",
+                "curve_advertiser_id": 0,
+                "curve_ad_id": 0,
+                "material_id_source": "",
+                "advertiser_count": 0,
+                "top_account_name": "",
+                "supported": True,
+                "t_plus_one_only": True,
+                "range_key": str(range_key or "day"),
+                "range_label": str(requested_range_label or ""),
+                "requested_start_date": requested_start_dt.strftime("%Y-%m-%d"),
+                "requested_end_date": requested_end_dt.strftime("%Y-%m-%d"),
+                "query_start_date": requested_start_dt.strftime("%Y-%m-%d"),
+                "query_end_date": requested_end_dt.strftime("%Y-%m-%d"),
+                "is_clamped_to_yesterday": False,
+                "notice": "",
+                "message": "Selected material is no longer present in the current rankings. Refresh the material list and retry.",
+                "series": [],
+                "totals": {
+                    "click_cnt": 0,
+                    "user_lose_cnt": 0,
+                },
+                "peak": {
+                    "second": 0,
+                    "click_cnt": 0,
+                    "user_lose_cnt": 0,
+                },
+                "duration_seconds": 0,
+                "point_count": 0,
+            }
+
+        material_type = str(row.get("material_type") or "").strip().upper()
+        advertiser_ids = [int(item) for item in row.get("advertiser_ids", []) if int(item or 0)]
+        advertiser_id = advertiser_ids[0] if advertiser_ids else 0
         config = self.read_config()
         tz = ZoneInfo(str(config.get("timezone") or TIMEZONE))
         latest_available_day = (datetime.now(tz) - timedelta(days=1)).date()
