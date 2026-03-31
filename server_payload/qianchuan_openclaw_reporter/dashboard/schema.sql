@@ -2,8 +2,8 @@ PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 
 CREATE TABLE IF NOT EXISTS summary_snapshots (
-    snapshot_time TEXT PRIMARY KEY,
     customer_center_id TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL,
     window_start TEXT NOT NULL,
     window_end TEXT NOT NULL,
     account_count INTEGER NOT NULL,
@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS summary_snapshots (
     order_count INTEGER NOT NULL,
     roi REAL NOT NULL,
     account_failures INTEGER NOT NULL,
-    plan_failures INTEGER NOT NULL
+    plan_failures INTEGER NOT NULL,
+    PRIMARY KEY (customer_center_id, snapshot_time)
 );
 
 CREATE TABLE IF NOT EXISTS account_snapshots (
@@ -29,7 +30,7 @@ CREATE TABLE IF NOT EXISTS account_snapshots (
     pay_amount REAL NOT NULL,
     ok INTEGER NOT NULL,
     error TEXT,
-    PRIMARY KEY (snapshot_time, advertiser_id)
+    PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id)
 );
 
 CREATE TABLE IF NOT EXISTS plan_snapshots (
@@ -60,7 +61,7 @@ CREATE TABLE IF NOT EXISTS plan_snapshots (
     settled_amount_rate REAL NOT NULL DEFAULT 0,
     refund_rate_1h REAL NOT NULL DEFAULT 0,
     refund_amount_1h REAL NOT NULL DEFAULT 0,
-    PRIMARY KEY (snapshot_time, ad_id)
+    PRIMARY KEY (customer_center_id, snapshot_time, ad_id)
 );
 
 CREATE TABLE IF NOT EXISTS plan_detail_snapshots (
@@ -83,7 +84,7 @@ CREATE TABLE IF NOT EXISTS plan_detail_snapshots (
     has_delivery_setting INTEGER NOT NULL DEFAULT 0,
     has_creative_setting INTEGER NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL,
-    PRIMARY KEY (snapshot_time, ad_id)
+    PRIMARY KEY (customer_center_id, snapshot_time, ad_id)
 );
 
 CREATE TABLE IF NOT EXISTS product_snapshots (
@@ -105,7 +106,7 @@ CREATE TABLE IF NOT EXISTS product_snapshots (
     order_count INTEGER NOT NULL DEFAULT 0,
     roi REAL NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL,
-    PRIMARY KEY (snapshot_time, ad_id, product_key)
+    PRIMARY KEY (customer_center_id, snapshot_time, ad_id, product_key)
 );
 
 CREATE TABLE IF NOT EXISTS material_snapshots (
@@ -136,7 +137,7 @@ CREATE TABLE IF NOT EXISTS material_snapshots (
     settled_order_count INTEGER NOT NULL DEFAULT 0,
     roi REAL NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL,
-    PRIMARY KEY (snapshot_time, ad_id, material_type, material_key)
+    PRIMARY KEY (customer_center_id, snapshot_time, ad_id, material_type, material_key)
 );
 
 CREATE TABLE IF NOT EXISTS material_rollups (
@@ -167,7 +168,7 @@ CREATE TABLE IF NOT EXISTS material_rollups (
     top_plan_name TEXT NOT NULL DEFAULT '',
     top_account_name TEXT NOT NULL DEFAULT '',
     roi REAL NOT NULL DEFAULT 0,
-    PRIMARY KEY (snapshot_time, material_key)
+    PRIMARY KEY (customer_center_id, snapshot_time, material_key)
 );
 
 CREATE TABLE IF NOT EXISTS video_origin_flags (
@@ -177,12 +178,12 @@ CREATE TABLE IF NOT EXISTS video_origin_flags (
     material_id TEXT NOT NULL,
     is_original INTEGER NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL,
-    PRIMARY KEY (snapshot_time, advertiser_id, material_id)
+    PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id, material_id)
 );
 
 CREATE TABLE IF NOT EXISTS extended_sync_runs (
-    snapshot_time TEXT PRIMARY KEY,
     customer_center_id TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL,
     window_start TEXT NOT NULL,
     window_end TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -194,7 +195,8 @@ CREATE TABLE IF NOT EXISTS extended_sync_runs (
     error_count INTEGER NOT NULL DEFAULT 0,
     error_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
-    finished_at TEXT NOT NULL
+    finished_at TEXT NOT NULL,
+    PRIMARY KEY (customer_center_id, snapshot_time)
 );
 
 CREATE TABLE IF NOT EXISTS alert_rules (
@@ -456,7 +458,7 @@ CREATE TABLE IF NOT EXISTS account_balances (
     account_balance REAL NOT NULL DEFAULT 0,
     available_balance REAL NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (snapshot_time, advertiser_id)
+    PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id)
 );
 
 CREATE TABLE IF NOT EXISTS shared_wallets (
@@ -467,7 +469,7 @@ CREATE TABLE IF NOT EXISTS shared_wallets (
     total_balance REAL NOT NULL DEFAULT 0,
     valid_balance REAL NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (snapshot_time, main_wallet_id)
+    PRIMARY KEY (customer_center_id, snapshot_time, main_wallet_id)
 );
 
 CREATE TABLE IF NOT EXISTS shared_wallet_account_relations (
@@ -478,7 +480,7 @@ CREATE TABLE IF NOT EXISTS shared_wallet_account_relations (
     child_wallet_id TEXT NOT NULL DEFAULT '',
     wallet_name TEXT NOT NULL DEFAULT '',
     raw_json TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (snapshot_time, main_wallet_id, advertiser_id)
+    PRIMARY KEY (customer_center_id, snapshot_time, main_wallet_id, advertiser_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_account_snapshots_adv_time

@@ -41,38 +41,16 @@ def register_system_routes(app: Any, service: Any, require_admin: Any) -> None:
         days: int = 30,
         _user: dict[str, Any] = Depends(require_admin),
     ) -> JSONResponse:
-        from dashboard.celery_app import celery_app
-
-        task = celery_app.send_task("dashboard.performance_backfill", args=[max(int(days or 30), 1)])
-        return JSONResponse(
-            {
-                "ok": True,
-                "queued": True,
-                "task_id": task.id,
-                "task_name": "dashboard.performance_backfill",
-                "days": max(int(days or 30), 1),
-            },
-            status_code=202,
-        )
+        result = service.queue_manual_history_backfill("performance", max(int(days or 30), 1))
+        return JSONResponse(result, status_code=202)
 
     @app.post("/api/sync/backfill/extended")
     async def manual_extended_backfill(
         days: int = 30,
         _user: dict[str, Any] = Depends(require_admin),
     ) -> JSONResponse:
-        from dashboard.celery_app import celery_app
-
-        task = celery_app.send_task("dashboard.detail_backfill", args=[max(int(days or 30), 1)])
-        return JSONResponse(
-            {
-                "ok": True,
-                "queued": True,
-                "task_id": task.id,
-                "task_name": "dashboard.detail_backfill",
-                "days": max(int(days or 30), 1),
-            },
-            status_code=202,
-        )
+        result = service.queue_manual_history_backfill("detail", max(int(days or 30), 1))
+        return JSONResponse(result, status_code=202)
 
     @app.get("/api/system/integrations/ocean-engine/token-latest")
     async def latest_token(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:

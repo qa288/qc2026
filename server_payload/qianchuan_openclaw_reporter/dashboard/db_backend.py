@@ -130,12 +130,20 @@ class _NullCursor:
         return []
 
 
-def connect_database(database_url: str | None, database_path: Path) -> DbConnection:
+def connect_database(
+    database_url: str | None,
+    database_path: Path,
+    *,
+    allow_sqlite: bool = False,
+) -> DbConnection:
     if is_postgres_url(database_url):
         if psycopg is None:
             raise RuntimeError("psycopg is required for PostgreSQL support")
         conn = psycopg.connect(str(database_url), row_factory=dict_row)
         return DbConnection("postgres", conn)
+
+    if not allow_sqlite:
+        raise RuntimeError("DATABASE_URL must point to PostgreSQL; SQLite fallback is disabled for runtime use")
 
     database_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(database_path))

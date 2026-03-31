@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from fastapi import Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -16,6 +17,9 @@ def register_query_routes(
     role_operator: str,
     timezone: str,
 ) -> None:
+    def response(payload: Any, status_code: int = 200) -> JSONResponse:
+        return JSONResponse(jsonable_encoder(payload), status_code=status_code)
+
     @app.get("/api/operator-rankings")
     async def operator_rankings(
         range: str = "day",
@@ -36,7 +40,7 @@ def register_query_routes(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(payload)
+        return response(payload)
 
     @app.get("/api/unassigned-candidates")
     async def unassigned_candidates(
@@ -58,12 +62,12 @@ def register_query_routes(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(payload)
+        return response(payload)
 
     @app.get("/api/session/me")
     async def current_session(user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
-        return JSONResponse(
+        return response(
             {
                 "id": user["id"],
                 "username": user["username"],
@@ -83,7 +87,7 @@ def register_query_routes(
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
         items = await asyncio.to_thread(service.latest_account_catalog, allowed, display_scope)
-        return JSONResponse({"items": items})
+        return response({"items": items})
 
     @app.get("/api/dashboard")
     async def dashboard_data(
@@ -130,7 +134,7 @@ def register_query_routes(
         notification_settings = await notification_settings_task if notification_settings_task else {}
         alert_rules = await alert_rules_task if alert_rules_task else []
         alert_events = await alert_events_task if alert_events_task else []
-        return JSONResponse(
+        return response(
             {
                 "session": {
                     "id": user["id"],
@@ -179,21 +183,21 @@ def register_query_routes(
                 payload = service._apply_operator_scope(payload, user)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(payload)
+        return response(payload)
 
     @app.get("/api/accounts/{advertiser_id}/history")
     async def account_history(advertiser_id: int, user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
         if str(user.get("role") or "") == role_operator:
             raise HTTPException(status_code=403, detail="operator cannot access account history")
         allowed = service.allowed_advertiser_ids_for_user(user)
-        return JSONResponse({"items": service.account_history(advertiser_id, allowed_advertiser_ids=allowed)})
+        return response({"items": service.account_history(advertiser_id, allowed_advertiser_ids=allowed)})
 
     @app.get("/api/plans/{ad_id}/history")
     async def plan_history(ad_id: int, user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
         if str(user.get("role") or "") == role_operator:
             raise HTTPException(status_code=403, detail="operator cannot access plan history")
         allowed = service.allowed_advertiser_ids_for_user(user)
-        return JSONResponse({"items": service.plan_history(ad_id, allowed_advertiser_ids=allowed)})
+        return response({"items": service.plan_history(ad_id, allowed_advertiser_ids=allowed)})
 
     @app.get("/api/plans/{ad_id}/assets")
     async def plan_assets(
@@ -205,7 +209,7 @@ def register_query_routes(
         if str(user.get("role") or "") == role_operator:
             raise HTTPException(status_code=403, detail="operator cannot access plan assets")
         allowed = service.allowed_advertiser_ids_for_user(user)
-        return JSONResponse(service.plan_assets(ad_id, snapshot_time, allowed, display_scope))
+        return response(service.plan_assets(ad_id, snapshot_time, allowed, display_scope))
 
     @app.get("/api/material-rankings")
     async def material_rankings(
@@ -229,7 +233,7 @@ def register_query_routes(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(payload)
+        return response(payload)
 
     @app.get("/api/team-material-rankings")
     async def team_material_rankings(
@@ -253,7 +257,7 @@ def register_query_routes(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(payload)
+        return response(payload)
 
     @app.get("/api/material-preview-curve")
     async def material_preview_curve(
@@ -282,7 +286,7 @@ def register_query_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return JSONResponse(payload)
+        return response(payload)
 
     @app.post("/api/material-preview-source")
     async def material_preview_source(
@@ -311,7 +315,7 @@ def register_query_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return JSONResponse(payload)
+        return response(payload)
 
     @app.get("/api/comments")
     async def comments(
@@ -340,7 +344,7 @@ def register_query_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return JSONResponse(payload)
+        return response(payload)
 
     @app.post("/api/comments/reply")
     async def reply_comment(
@@ -362,7 +366,7 @@ def register_query_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return JSONResponse(response_payload)
+        return response(response_payload)
 
     @app.post("/api/comments/hide")
     async def hide_comment(
@@ -383,4 +387,4 @@ def register_query_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return JSONResponse(response_payload)
+        return response(response_payload)

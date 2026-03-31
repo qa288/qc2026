@@ -117,6 +117,8 @@ DASHBOARD_USERNAME = settings.dashboard_username
 DASHBOARD_PASSWORD = settings.dashboard_password
 SESSION_SECRET = settings.session_secret
 RANGE_CACHE_SECONDS = settings.range_cache_seconds
+COMMENT_SYNC_SUCCESS_TTL_SECONDS = settings.comment_sync_success_ttl_seconds
+COMMENT_SYNC_ERROR_RETRY_SECONDS = settings.comment_sync_error_retry_seconds
 BACKFILL_QUEUE_DEBOUNCE_SECONDS = settings.backfill_queue_debounce_seconds
 PERFORMANCE_RANGES = {"day", "yesterday", "week", "month", "custom"}
 RANGE_LABEL_MAP = {
@@ -474,17 +476,313 @@ class DashboardService:
         except Exception:  # noqa: BLE001
             pass
 
+    @staticmethod
+    def _versioned_cache_key(version: str, raw_key: str) -> str:
+        return f"v{str(version or '1').strip()}:{str(raw_key or '').strip()}"
+
+    @staticmethod
+    def _shared_payload_cache_storage_key(namespace: str, raw_key: str, version: str) -> str:
+        digest = hashlib.sha1(str(raw_key or "").encode("utf-8")).hexdigest()[:20]
+        return f"dashboard:payload:{str(namespace or 'default').strip()}:v{str(version or '1').strip()}:{digest}"
+
+    @staticmethod
+    def _local_dict_cache_get(
+        cache_store: dict[str, dict[str, Any]],
+        cache_key: str,
+        ttl_seconds: int,
+    ) -> dict[str, Any] | None:
+        cached = cache_store.get(cache_key)
+        if not cached:
+            return None
+        cached_at = float(cached.get("_cached_at", 0.0) or 0.0)
+        if time.time() - cached_at >= max(int(ttl_seconds or 0), 1):
+            return None
+        payload = cached.get("payload")
+        return copy.deepcopy(payload) if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _local_dict_cache_set(
+        cache_store: dict[str, dict[str, Any]],
+        cache_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        cache_store[cache_key] = {
+            "_cached_at": time.time(),
+            "payload": copy.deepcopy(payload),
+        }
+
+    def _shared_dict_cache_get(self, namespace: str, raw_key: str, version: str) -> dict[str, Any] | None:
+        payload = self._shared_json_cache_get(self._shared_payload_cache_storage_key(namespace, raw_key, version))
+        return copy.deepcopy(payload) if isinstance(payload, dict) else None
+
+    def _shared_dict_cache_set(self, namespace: str, raw_key: str, version: str, payload: dict[str, Any], ttl_seconds: int) -> None:
+        self._shared_json_cache_set(
+            self._shared_payload_cache_storage_key(namespace, raw_key, version),
+            payload,
+            ttl_seconds,
+        )
+
+    def _invalidate_cache_namespaces(self, *namespaces: str) -> None:
+        for namespace in namespaces:
+            self._bump_shared_cache_version(namespace)
+
+    @contextmanager
+    def _distributed_runtime_lock(
+        self,
+        lock_name: str,
+        *,
+        timeout_seconds: int,
+        blocking_timeout_seconds: int = 0,
+    ) -> Any:
+        client = self._redis()
+        if client is None:
+            yield True
+            return
+        lock = client.lock(
+            f"dashboard:runtime-lock:{str(lock_name or '').strip()}",
+            timeout=max(int(timeout_seconds or 0), 1),
+            blocking_timeout=max(int(blocking_timeout_seconds or 0), 0),
+        )
+        try:
+            acquired = bool(lock.acquire(blocking=blocking_timeout_seconds > 0))
+        except Exception:  # noqa: BLE001
+            acquired = False
+        if not acquired:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            try:
+                lock.release()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _range_span_days(self, start_dt: datetime, end_dt: datetime) -> int:
         return max((end_dt.date() - start_dt.date()).days + 1, 1)
 
-    def _enqueue_backfill_task(self, task_name: str, days: int, dedupe_key: str) -> bool:
+    @staticmethod
+    def _history_backfill_kind(task_name: str) -> str:
+        return "detail" if str(task_name or "").strip() == "dashboard.detail_backfill" else "performance"
+
+    @staticmethod
+    def _db_optional_timestamp_value(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        return value
+
+    def _record_history_backfill_job_locked(
+        self,
+        conn: Any,
+        *,
+        job_key: str,
+        kind: str,
+        task_name: str,
+        range_start: str,
+        range_end: str,
+        days: int,
+        requested_missing_days: int,
+        status: str,
+        task_id: str = "",
+        message: str = "",
+        result_json: Any = "{}",
+        queued_at: Any = "",
+        started_at: Any = "",
+        finished_at: Any = "",
+    ) -> None:
+        updated_at = now_text()
+        conn.execute(
+            """
+            INSERT INTO history_backfill_jobs (
+                job_key, kind, task_name, range_start, range_end, days, requested_missing_days,
+                status, task_id, message, result_json, queued_at, started_at, finished_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (job_key) DO UPDATE SET
+                kind = excluded.kind,
+                task_name = excluded.task_name,
+                range_start = excluded.range_start,
+                range_end = excluded.range_end,
+                days = excluded.days,
+                requested_missing_days = excluded.requested_missing_days,
+                status = excluded.status,
+                task_id = excluded.task_id,
+                message = excluded.message,
+                result_json = excluded.result_json,
+                queued_at = excluded.queued_at,
+                started_at = excluded.started_at,
+                finished_at = excluded.finished_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                job_key,
+                kind,
+                task_name,
+                range_start,
+                range_end,
+                max(int(days or 0), 0),
+                max(int(requested_missing_days or 0), 0),
+                status,
+                task_id,
+                message,
+                result_json,
+                self._db_optional_timestamp_value(queued_at),
+                self._db_optional_timestamp_value(started_at),
+                self._db_optional_timestamp_value(finished_at),
+                updated_at,
+            ),
+        )
+
+    def mark_history_backfill_job_started(self, job_key: str, task_id: str = "") -> None:
+        normalized_job_key = str(job_key or "").strip()
+        if not normalized_job_key:
+            return
+        with self.db() as conn:
+            row = conn.execute(
+                "SELECT kind, task_name, range_start, range_end, days, requested_missing_days FROM history_backfill_jobs WHERE job_key = ? LIMIT 1",
+                (normalized_job_key,),
+            ).fetchone()
+            if not row:
+                return
+            started_at = now_text()
+            self._record_history_backfill_job_locked(
+                conn,
+                job_key=normalized_job_key,
+                kind=str(row["kind"] or "").strip(),
+                task_name=str(row["task_name"] or "").strip(),
+                range_start=str(row["range_start"] or "").strip(),
+                range_end=str(row["range_end"] or "").strip(),
+                days=int(row["days"] or 0),
+                requested_missing_days=int(row["requested_missing_days"] or 0),
+                status="running",
+                task_id=str(task_id or row["task_id"] or "").strip(),
+                message="",
+                result_json="{}",
+                queued_at="",
+                started_at=started_at,
+                finished_at="",
+            )
+
+    def mark_history_backfill_job_finished(
+        self,
+        job_key: str,
+        status: str,
+        *,
+        message: str = "",
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        normalized_job_key = str(job_key or "").strip()
+        if not normalized_job_key:
+            return
+        with self.db() as conn:
+            row = conn.execute(
+                """
+                SELECT kind, task_name, range_start, range_end, days, requested_missing_days, task_id, queued_at, started_at
+                FROM history_backfill_jobs
+                WHERE job_key = ?
+                LIMIT 1
+                """,
+                (normalized_job_key,),
+            ).fetchone()
+            if not row:
+                return
+            self._record_history_backfill_job_locked(
+                conn,
+                job_key=normalized_job_key,
+                kind=str(row["kind"] or "").strip(),
+                task_name=str(row["task_name"] or "").strip(),
+                range_start=str(row["range_start"] or "").strip(),
+                range_end=str(row["range_end"] or "").strip(),
+                days=int(row["days"] or 0),
+                requested_missing_days=int(row["requested_missing_days"] or 0),
+                status=str(status or "success").strip() or "success",
+                task_id=str(row["task_id"] or "").strip(),
+                message=str(message or "").strip(),
+                result_json=self._json_text(result or {}),
+                queued_at=str(row["queued_at"] or "").strip(),
+                started_at=str(row["started_at"] or "").strip(),
+                finished_at=now_text(),
+            )
+
+    def _enqueue_backfill_task(
+        self,
+        task_name: str,
+        days: int,
+        dedupe_key: str,
+        *,
+        range_start: str = "",
+        range_end: str = "",
+        requested_missing_days: int = 0,
+    ) -> bool:
         now_ts = time.time()
+        client = self._redis()
+        normalized_task_name = str(task_name or "").strip()
+        normalized_job_key = str(dedupe_key or "").strip()
+        normalized_kind = self._history_backfill_kind(normalized_task_name)
+        if client is not None:
+            redis_key = f"dashboard:backfill-dedupe:{str(dedupe_key or '').strip()}"
+            try:
+                acquired = bool(
+                    client.set(
+                        redis_key,
+                        str(now_ts),
+                        nx=True,
+                        ex=max(int(BACKFILL_QUEUE_DEBOUNCE_SECONDS or 0), 1),
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                acquired = None
+            if acquired is True:
+                from dashboard.celery_app import celery_app
+
+                task = celery_app.send_task(normalized_task_name, args=[max(int(days or 1), 1), normalized_job_key])
+                with self.db() as conn:
+                    self._record_history_backfill_job_locked(
+                        conn,
+                        job_key=normalized_job_key,
+                        kind=normalized_kind,
+                        task_name=normalized_task_name,
+                        range_start=range_start,
+                        range_end=range_end,
+                        days=max(int(days or 1), 1),
+                        requested_missing_days=max(int(requested_missing_days or 0), 0),
+                        status="queued",
+                        task_id=str(getattr(task, "id", "") or "").strip(),
+                        message="",
+                        result_json="{}",
+                        queued_at=now_text(),
+                        started_at="",
+                        finished_at="",
+                    )
+                return True
+            if acquired is False:
+                return True
         last_ts = float(self._backfill_queue_marks.get(dedupe_key, 0.0) or 0.0)
         if now_ts - last_ts < BACKFILL_QUEUE_DEBOUNCE_SECONDS:
             return True
         from dashboard.celery_app import celery_app
 
-        celery_app.send_task(task_name, args=[max(int(days or 1), 1)])
+        task = celery_app.send_task(normalized_task_name, args=[max(int(days or 1), 1), normalized_job_key])
+        with self.db() as conn:
+            self._record_history_backfill_job_locked(
+                conn,
+                job_key=normalized_job_key,
+                kind=normalized_kind,
+                task_name=normalized_task_name,
+                range_start=range_start,
+                range_end=range_end,
+                days=max(int(days or 1), 1),
+                requested_missing_days=max(int(requested_missing_days or 0), 0),
+                status="queued",
+                task_id=str(getattr(task, "id", "") or "").strip(),
+                message="",
+                result_json="{}",
+                queued_at=now_text(),
+                started_at="",
+                finished_at="",
+            )
         self._backfill_queue_marks[dedupe_key] = now_ts
         return True
 
@@ -500,21 +798,81 @@ class DashboardService:
         days = min(self._range_span_days(start_dt, end_dt), RETENTION_DAYS)
         range_key = f"{start_dt.strftime('%Y-%m-%d')}:{end_dt.strftime('%Y-%m-%d')}"
         if kind == "performance":
-            return self._enqueue_backfill_task("dashboard.performance_backfill", days, f"performance:{range_key}")
+            return self._enqueue_backfill_task(
+                "dashboard.performance_backfill",
+                days,
+                f"performance:{range_key}",
+                range_start=start_dt.strftime("%Y-%m-%d"),
+                range_end=end_dt.strftime("%Y-%m-%d"),
+                requested_missing_days=missing_days,
+            )
         if kind == "detail":
-            return self._enqueue_backfill_task("dashboard.detail_backfill", days, f"detail:{range_key}")
+            return self._enqueue_backfill_task(
+                "dashboard.detail_backfill",
+                days,
+                f"detail:{range_key}",
+                range_start=start_dt.strftime("%Y-%m-%d"),
+                range_end=end_dt.strftime("%Y-%m-%d"),
+                requested_missing_days=missing_days,
+            )
         return False
+
+    def queue_manual_history_backfill(self, kind: str, days: int = 30) -> dict[str, Any]:
+        normalized_kind = "detail" if str(kind or "").strip() == "detail" else "performance"
+        normalized_days = max(int(days or 30), 1)
+        tz = ZoneInfo(self.read_config()["timezone"])
+        end_dt = datetime.now(tz).replace(hour=23, minute=59, second=59, microsecond=0)
+        start_day = end_dt.date() - timedelta(days=max(normalized_days - 1, 0))
+        start_dt = datetime(start_day.year, start_day.month, start_day.day, 0, 0, 0, tzinfo=tz)
+        task_name = "dashboard.detail_backfill" if normalized_kind == "detail" else "dashboard.performance_backfill"
+        job_key = (
+            f"manual:{normalized_kind}:{start_dt.strftime('%Y-%m-%d')}:"
+            f"{end_dt.strftime('%Y-%m-%d')}:{int(time.time())}"
+        )
+        from dashboard.celery_app import celery_app
+
+        task = celery_app.send_task(task_name, args=[normalized_days, job_key])
+        with self.db() as conn:
+            self._record_history_backfill_job_locked(
+                conn,
+                job_key=job_key,
+                kind=normalized_kind,
+                task_name=task_name,
+                range_start=start_dt.strftime("%Y-%m-%d"),
+                range_end=end_dt.strftime("%Y-%m-%d"),
+                days=normalized_days,
+                requested_missing_days=0,
+                status="queued",
+                task_id=str(getattr(task, "id", "") or "").strip(),
+                message="manual trigger",
+                result_json="{}",
+                queued_at=now_text(),
+                started_at="",
+                finished_at="",
+            )
+        return {
+            "ok": True,
+            "queued": True,
+            "task_id": str(getattr(task, "id", "") or "").strip(),
+            "task_name": task_name,
+            "job_key": job_key,
+            "days": normalized_days,
+            "range_start": start_dt.strftime("%Y-%m-%d"),
+            "range_end": end_dt.strftime("%Y-%m-%d"),
+        }
 
     def init_db(self) -> None:
         with self.db() as conn:
             self._acquire_init_db_lock(conn)
-            apply_migrations(conn)
-            self._ensure_customer_center_scope_schema_locked(conn)
-            self._ensure_plan_snapshot_schema_locked(conn)
-            self._ensure_app_users_schema_locked(conn)
-            self._ensure_material_upload_schema_locked(conn)
-            self._ensure_material_preview_schema_locked(conn)
-            self._ensure_comment_storage_schema_locked(conn)
+            apply_migrations(
+                conn,
+                context={
+                    "base_customer_center_id": str(
+                        self._base_runtime_config().get("customer_center_id") or ""
+                    ).strip(),
+                    "timezone": TIMEZONE,
+                },
+            )
             self.alert_access.ensure_notification_settings(conn)
 
     def init_db_once(self) -> None:
@@ -536,63 +894,6 @@ class DashboardService:
             (INIT_DB_LOCK_NAMESPACE, INIT_DB_LOCK_KEY),
         )
 
-    def _column_exists_locked(self, conn: Any, table_name: str, column_name: str) -> bool:
-        table = str(table_name or "").strip()
-        column = str(column_name or "").strip()
-        if not table or not column:
-            return False
-        if getattr(conn, "backend", "") == "postgres":
-            row = conn.execute(
-                """
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
-                LIMIT 1
-                """,
-                (table, column),
-            ).fetchone()
-            return bool(row)
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        return any(str(row["name"]) == column for row in rows)
-
-    def _column_type_locked(self, conn: Any, table_name: str, column_name: str) -> str:
-        table = str(table_name or "").strip()
-        column = str(column_name or "").strip()
-        if not table or not column:
-            return ""
-        if getattr(conn, "backend", "") == "postgres":
-            row = conn.execute(
-                """
-                SELECT data_type
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
-                LIMIT 1
-                """,
-                (table, column),
-            ).fetchone()
-            return str(row["data_type"] or "").strip().lower() if row else ""
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        for row in rows:
-            if str(row["name"]) == column:
-                return str(row["type"] or "").strip().lower()
-        return ""
-
-    def _ensure_app_users_schema_locked(self, conn: Any) -> None:
-        if not self._column_exists_locked(conn, "app_users", "upload_materials_enabled"):
-            conn.execute("ALTER TABLE app_users ADD COLUMN upload_materials_enabled INTEGER NOT NULL DEFAULT 0")
-
-    def _ensure_column_locked(self, conn: Any, table_name: str, column_name: str, definition: str) -> None:
-        if self._column_exists_locked(conn, table_name, column_name):
-            return
-        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
-
-    def _ensure_bigint_column_locked(self, conn: Any, table_name: str, column_name: str) -> None:
-        if getattr(conn, "backend", "") != "postgres":
-            return
-        column_type = self._column_type_locked(conn, table_name, column_name)
-        if column_type in {"integer", "int", "int4", "smallint", "int2"}:
-            conn.execute(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE BIGINT")
-
     def _runtime_config_override_row_locked(self, conn: Any) -> dict[str, Any] | None:
         row = conn.execute(
             """
@@ -603,252 +904,6 @@ class DashboardService:
             """
         ).fetchone()
         return dict(row) if row else None
-
-    def _ensure_customer_center_scope_schema_locked(self, conn: Any) -> None:
-        table_names = (
-            "summary_snapshots",
-            "account_snapshots",
-            "plan_snapshots",
-            "plan_detail_snapshots",
-            "product_snapshots",
-            "material_snapshots",
-            "material_rollups",
-            "video_origin_flags",
-            "extended_sync_runs",
-            "account_balances",
-            "shared_wallets",
-            "shared_wallet_account_relations",
-        )
-        for table_name in table_names:
-            self._ensure_column_locked(conn, table_name, "customer_center_id", "TEXT NOT NULL DEFAULT ''")
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_summary_snapshots_cc_time ON summary_snapshots (customer_center_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_account_snapshots_cc_adv_time ON account_snapshots (customer_center_id, advertiser_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_plan_snapshots_cc_plan_time ON plan_snapshots (customer_center_id, ad_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_plan_detail_snapshots_cc_plan_time ON plan_detail_snapshots (customer_center_id, ad_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_product_snapshots_cc_plan_time ON product_snapshots (customer_center_id, ad_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_material_snapshots_cc_plan_time ON material_snapshots (customer_center_id, ad_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_material_rollups_cc_snapshot_time ON material_rollups (customer_center_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_video_origin_flags_cc_material_time ON video_origin_flags (customer_center_id, material_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_extended_sync_runs_cc_time ON extended_sync_runs (customer_center_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_account_balances_cc_adv_time ON account_balances (customer_center_id, advertiser_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_shared_wallets_cc_time ON shared_wallets (customer_center_id, snapshot_time)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_shared_wallet_relations_cc_time ON shared_wallet_account_relations (customer_center_id, snapshot_time)"
-        )
-
-        base_customer_center_id = str(self._base_runtime_config().get("customer_center_id") or "").strip()
-        override_row = self._runtime_config_override_row_locked(conn) or {}
-        override_customer_center_id = str(override_row.get("customer_center_id") or "").strip()
-        override_updated_at = str(override_row.get("updated_at") or "").strip()
-        fallback_customer_center_id = override_customer_center_id or base_customer_center_id
-        if not fallback_customer_center_id:
-            return
-
-        for table_name in table_names:
-            if override_customer_center_id and override_customer_center_id != base_customer_center_id and override_updated_at:
-                if base_customer_center_id:
-                    conn.execute(
-                        f"""
-                        UPDATE {table_name}
-                        SET customer_center_id = ?
-                        WHERE COALESCE(customer_center_id, '') = ''
-                          AND snapshot_time < ?
-                        """,
-                        (base_customer_center_id, override_updated_at),
-                    )
-                conn.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET customer_center_id = ?
-                    WHERE COALESCE(customer_center_id, '') = ''
-                      AND snapshot_time >= ?
-                    """,
-                    (override_customer_center_id, override_updated_at),
-                )
-            if base_customer_center_id:
-                conn.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET customer_center_id = ?
-                    WHERE COALESCE(customer_center_id, '') = ''
-                    """,
-                    (base_customer_center_id,),
-                )
-            else:
-                conn.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET customer_center_id = ?
-                    WHERE COALESCE(customer_center_id, '') = ''
-                    """,
-                    (fallback_customer_center_id,),
-                )
-
-    def _ensure_material_upload_schema_locked(self, conn: Any) -> None:
-        self._ensure_column_locked(conn, "material_upload_jobs", "task_id", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column_locked(conn, "material_upload_jobs", "processed_files", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "material_upload_jobs", "success_files", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "material_upload_jobs", "failed_files", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "material_upload_jobs", "started_at", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column_locked(conn, "material_upload_jobs", "completed_at", "TEXT NOT NULL DEFAULT ''")
-
-        self._ensure_column_locked(conn, "material_upload_job_files", "file_sha256", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column_locked(conn, "material_upload_job_files", "file_md5", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column_locked(conn, "material_upload_job_files", "processed_advertisers", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "material_upload_job_files", "success_advertisers", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "material_upload_job_files", "failed_advertisers", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "material_upload_job_files", "material_id", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column_locked(conn, "material_upload_job_files", "video_id", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column_locked(conn, "material_upload_job_files", "video_url", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column_locked(conn, "material_upload_job_files", "message", "TEXT NOT NULL DEFAULT ''")
-        self._ensure_column_locked(conn, "material_upload_job_files", "updated_at", "TEXT NOT NULL DEFAULT ''")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS material_upload_job_target_assets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id INTEGER NOT NULL,
-                target_id INTEGER NOT NULL,
-                file_id INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'queued',
-                message TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(job_id) REFERENCES material_upload_jobs(id),
-                FOREIGN KEY(target_id) REFERENCES material_upload_job_targets(id),
-                FOREIGN KEY(file_id) REFERENCES material_upload_job_files(id)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_material_upload_job_target_assets_unique
-            ON material_upload_job_target_assets (job_id, target_id, file_id)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_material_upload_job_target_assets_job
-            ON material_upload_job_target_assets (job_id, target_id, file_id, status)
-            """
-        )
-
-    def _ensure_material_preview_schema_locked(self, conn: Any) -> None:
-        for table_name in ("material_snapshots", "material_rollups"):
-            self._ensure_column_locked(conn, table_name, "create_time", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column_locked(conn, table_name, "cover_url", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column_locked(conn, table_name, "aweme_item_id", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column_locked(conn, table_name, "video_url", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column_locked(conn, table_name, "total_pay_amount", "REAL NOT NULL DEFAULT 0")
-            self._ensure_column_locked(conn, table_name, "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
-            self._ensure_column_locked(conn, table_name, "settled_order_count", "INTEGER NOT NULL DEFAULT 0")
-
-    def _ensure_comment_storage_schema_locked(self, conn: Any) -> None:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS comment_records (
-                customer_center_id TEXT NOT NULL DEFAULT '',
-                advertiser_id BIGINT NOT NULL,
-                comment_id TEXT NOT NULL,
-                comment_date TEXT NOT NULL DEFAULT '',
-                create_time TEXT NOT NULL DEFAULT '',
-                advertiser_name TEXT NOT NULL DEFAULT '',
-                text TEXT NOT NULL DEFAULT '',
-                reply_count INTEGER NOT NULL DEFAULT 0,
-                hide_status TEXT NOT NULL DEFAULT 'NOT_HIDE',
-                level_type TEXT NOT NULL DEFAULT '',
-                comment_user_name TEXT NOT NULL DEFAULT '',
-                comment_user_id TEXT NOT NULL DEFAULT '',
-                like_count INTEGER NOT NULL DEFAULT 0,
-                item_title TEXT NOT NULL DEFAULT '',
-                comment_type TEXT NOT NULL DEFAULT '',
-                promotion_id TEXT NOT NULL DEFAULT '',
-                material_id TEXT NOT NULL DEFAULT '',
-                item_id TEXT NOT NULL DEFAULT '',
-                raw_json TEXT NOT NULL DEFAULT '{}',
-                fetched_at TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (customer_center_id, advertiser_id, comment_id)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_comment_records_cc_date_adv
-            ON comment_records (customer_center_id, comment_date, advertiser_id, create_time)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_comment_records_cc_promotion
-            ON comment_records (customer_center_id, advertiser_id, promotion_id)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_comment_records_cc_material
-            ON comment_records (customer_center_id, advertiser_id, material_id)
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS comment_sync_states (
-                customer_center_id TEXT NOT NULL DEFAULT '',
-                advertiser_id BIGINT NOT NULL,
-                sync_date TEXT NOT NULL,
-                advertiser_name TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'pending',
-                comment_count INTEGER NOT NULL DEFAULT 0,
-                last_attempt_at TEXT NOT NULL DEFAULT '',
-                last_success_at TEXT NOT NULL DEFAULT '',
-                error_message TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (customer_center_id, advertiser_id, sync_date)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_comment_sync_states_cc_date_adv
-            ON comment_sync_states (customer_center_id, sync_date, advertiser_id)
-            """
-        )
-        self._ensure_bigint_column_locked(conn, "comment_records", "advertiser_id")
-        self._ensure_bigint_column_locked(conn, "comment_sync_states", "advertiser_id")
-
-    def _ensure_plan_snapshot_schema_locked(self, conn: Any) -> None:
-        self._ensure_column_locked(conn, "plan_snapshots", "plan_source", "TEXT NOT NULL DEFAULT 'UNI_PROMOTION'")
-        self._ensure_column_locked(conn, "plan_snapshots", "plan_delivery_type", "TEXT NOT NULL DEFAULT 'GLOBAL'")
-        self._ensure_column_locked(conn, "plan_snapshots", "raw_json", "TEXT NOT NULL DEFAULT '{}'")
-        self._ensure_column_locked(conn, "plan_snapshots", "total_pay_amount", "REAL NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "plan_snapshots", "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "plan_snapshots", "settled_roi", "REAL NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "plan_snapshots", "settled_order_count", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "plan_snapshots", "pay_order_cost", "REAL NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "plan_snapshots", "settled_amount_rate", "REAL NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "plan_snapshots", "refund_rate_1h", "REAL NOT NULL DEFAULT 0")
-        self._ensure_column_locked(conn, "plan_snapshots", "refund_amount_1h", "REAL NOT NULL DEFAULT 0")
 
     @contextmanager
     def db(self) -> Any:
@@ -2243,12 +2298,22 @@ class DashboardService:
     def _refresh_latest_snapshot_cache(
         self,
         cache_key: str,
+        raw_cache_key: str,
+        cache_version: str,
         allowed_advertiser_ids: set[int] | None,
         display_scope: str,
     ) -> None:
         try:
             payload = self._compute_latest_snapshot(allowed_advertiser_ids, display_scope)
             self._store_latest_snapshot_cache(cache_key, payload)
+            if isinstance(payload, dict):
+                self._shared_dict_cache_set(
+                    "latest-snapshot",
+                    raw_cache_key,
+                    cache_version,
+                    payload,
+                    LATEST_SNAPSHOT_STALE_SECONDS,
+                )
         except Exception:
             pass
         finally:
@@ -2258,6 +2323,8 @@ class DashboardService:
     def _schedule_latest_snapshot_refresh(
         self,
         cache_key: str,
+        raw_cache_key: str,
+        cache_version: str,
         allowed_advertiser_ids: set[int] | None,
         display_scope: str,
     ) -> None:
@@ -2267,7 +2334,7 @@ class DashboardService:
             self._latest_snapshot_refreshing.add(cache_key)
         threading.Thread(
             target=self._refresh_latest_snapshot_cache,
-            args=(cache_key, allowed_advertiser_ids, display_scope),
+            args=(cache_key, raw_cache_key, cache_version, allowed_advertiser_ids, display_scope),
             daemon=True,
             name=f"latest-snapshot-refresh-{display_scope}",
         ).start()
@@ -2277,11 +2344,13 @@ class DashboardService:
         allowed_advertiser_ids: set[int] | None = None,
         display_scope: str = DISPLAY_SCOPE_CURRENT,
     ) -> dict[str, Any] | None:
-        cache_key = build_latest_snapshot_cache_key(
+        cache_version = self._shared_cache_version("latest-snapshot")
+        raw_cache_key = build_latest_snapshot_cache_key(
             allowed_advertiser_ids,
             display_scope,
             self._current_customer_center_id(),
         )
+        cache_key = self._versioned_cache_key(cache_version, raw_cache_key)
         now_ts = time.time()
         with self._latest_snapshot_cache_lock:
             cached = copy.deepcopy(self._latest_snapshot_cache.get(cache_key))
@@ -2292,20 +2361,45 @@ class DashboardService:
             if age < LATEST_SNAPSHOT_CACHE_SECONDS:
                 return cached_payload
             if age < LATEST_SNAPSHOT_STALE_SECONDS:
-                self._schedule_latest_snapshot_refresh(cache_key, allowed_advertiser_ids, display_scope)
+                self._schedule_latest_snapshot_refresh(
+                    cache_key,
+                    raw_cache_key,
+                    cache_version,
+                    allowed_advertiser_ids,
+                    display_scope,
+                )
                 return cached_payload
+        shared_payload = self._shared_dict_cache_get("latest-snapshot", raw_cache_key, cache_version)
+        if shared_payload is not None:
+            self._store_latest_snapshot_cache(cache_key, shared_payload)
+            return copy.deepcopy(shared_payload)
         payload = self._compute_latest_snapshot(allowed_advertiser_ids, display_scope)
         self._store_latest_snapshot_cache(cache_key, payload)
+        if isinstance(payload, dict):
+            self._shared_dict_cache_set("latest-snapshot", raw_cache_key, cache_version, payload, LATEST_SNAPSHOT_STALE_SECONDS)
         return copy.deepcopy(payload)
 
     def clear_runtime_caches(self) -> None:
         self._performance_cache.clear()
         self._material_cache.clear()
+        self._material_preview_refresh_cache.clear()
+        self._preview_video_resolve_cache.clear()
         self._comment_cache.clear()
+        self._backfill_queue_marks.clear()
         with self._latest_snapshot_cache_lock:
             self._latest_snapshot_cache.clear()
             self._latest_snapshot_refreshing.clear()
-        self._bump_shared_cache_version("dashboard-overview")
+        self._invalidate_cache_namespaces(
+            "dashboard-overview",
+            "performance",
+            "material",
+            "comment",
+            "latest-snapshot",
+        )
+
+    def _clear_comment_caches(self) -> None:
+        self._comment_cache.clear()
+        self._invalidate_cache_namespaces("comment")
 
     def _build_dashboard_overview_payload(
         self,
@@ -3119,21 +3213,77 @@ class DashboardService:
 
     @staticmethod
     def _customer_center_second(customer_center_id: str) -> int:
-        digits = [int(char) for char in str(customer_center_id or "").strip() if char.isdigit()]
-        if not digits:
-            return 59
-        return sum(digits) % 60
+        return DashboardService._customer_center_slot(customer_center_id, 60)
+
+    @staticmethod
+    def _customer_center_slot(customer_center_id: str, slot_count: int) -> int:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        normalized_slot_count = max(int(slot_count or 0), 1)
+        if not normalized_customer_center_id:
+            return normalized_slot_count - 1
+        digest = hashlib.sha1(normalized_customer_center_id.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "big") % normalized_slot_count
 
     def _scoped_day_snapshot_time(self, target_day: datetime, customer_center_id: str) -> str:
-        scoped_second = self._customer_center_second(customer_center_id)
+        scoped_offset = self._customer_center_slot(customer_center_id, 3600)
         return datetime(
             target_day.year,
             target_day.month,
             target_day.day,
             23,
-            59,
-            scoped_second,
+            scoped_offset // 60,
+            scoped_offset % 60,
         ).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _snapshot_time_owner(conn: Any, table_name: str, snapshot_time: str) -> str:
+        row = conn.execute(
+            f"SELECT customer_center_id FROM {table_name} WHERE snapshot_time = ? LIMIT 1",
+            (snapshot_time,),
+        ).fetchone()
+        if not row:
+            return ""
+        try:
+            return str(row["customer_center_id"] or "").strip()
+        except Exception:
+            return str(row[0] or "").strip()
+
+    def _next_available_snapshot_time(
+        self,
+        conn: Any,
+        table_name: str,
+        snapshot_time: str,
+        customer_center_id: str,
+    ) -> str:
+        candidate = str(snapshot_time or "").strip()
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        if not candidate:
+            return candidate
+        current_owner = self._snapshot_time_owner(conn, table_name, candidate)
+        if not current_owner or current_owner == normalized_customer_center_id:
+            return candidate
+
+        try:
+            base_dt = datetime.strptime(candidate, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return candidate
+
+        for offset_seconds in range(1, 86400):
+            for direction in (1, -1):
+                candidate_dt = base_dt + timedelta(seconds=offset_seconds * direction)
+                if candidate_dt.date() != base_dt.date():
+                    continue
+                shifted_candidate = candidate_dt.strftime("%Y-%m-%d %H:%M:%S")
+                shifted_owner = self._snapshot_time_owner(conn, table_name, shifted_candidate)
+                if not shifted_owner or shifted_owner == normalized_customer_center_id:
+                    return shifted_candidate
+        raise RuntimeError(f"no available snapshot_time slot for {table_name} on {candidate[:10]}")
+
+    @staticmethod
+    def _replace_snapshot_time_in_rows(rows: list[tuple[Any, ...]], snapshot_time: str) -> list[tuple[Any, ...]]:
+        if not rows:
+            return rows
+        return [(snapshot_time, *tuple(row)[1:]) for row in rows]
 
     @staticmethod
     def _employee_name(value: Any) -> str:
@@ -6043,11 +6193,11 @@ class DashboardService:
         if status != "ok":
             if last_attempt_at is None:
                 return True
-            return max((now_local - last_attempt_at).total_seconds(), 0.0) >= RANGE_CACHE_SECONDS
+            return max((now_local - last_attempt_at).total_seconds(), 0.0) >= COMMENT_SYNC_ERROR_RETRY_SECONDS
         if sync_date >= hot_cutoff_date:
             if last_success_at is None:
                 return True
-            return max((now_local - last_success_at).total_seconds(), 0.0) >= RANGE_CACHE_SECONDS
+            return max((now_local - last_success_at).total_seconds(), 0.0) >= COMMENT_SYNC_SUCCESS_TTL_SECONDS
         return False
 
     def _comment_sync_plans(
@@ -6166,7 +6316,7 @@ class DashboardService:
                         int(record["advertiser_id"]),
                         str(record["comment_id"]),
                         str(record["comment_date"] or ""),
-                        str(record["create_time"] or ""),
+                        self._db_optional_timestamp_value(record.get("create_time")),
                         str(record["advertiser_name"] or advertiser_name or advertiser_id),
                         str(record["text"] or ""),
                         self._safe_int(record.get("reply_count", 0)),
@@ -6181,8 +6331,8 @@ class DashboardService:
                         str(record["material_id"] or ""),
                         str(record["item_id"] or ""),
                         str(record["raw_json"] or "{}"),
-                        str(record["fetched_at"] or attempted_at),
-                        str(record["updated_at"] or attempted_at),
+                        self._db_optional_timestamp_value(record.get("fetched_at") or attempted_at),
+                        self._db_optional_timestamp_value(record.get("updated_at") or attempted_at),
                     )
                     for record in records
                 ],
@@ -6263,7 +6413,7 @@ class DashboardService:
                     "error",
                     0,
                     attempted_at,
-                    "",
+                    None,
                     str(error_message or ""),
                 )
                 for sync_date in requested_dates
@@ -6328,8 +6478,8 @@ class DashboardService:
             """,
             (
                 next_reply_count,
-                str(updated_at or ""),
-                str(updated_at or ""),
+                self._db_optional_timestamp_value(updated_at),
+                self._db_optional_timestamp_value(updated_at),
                 self._current_customer_center_id(),
                 int(advertiser_id),
                 str(comment_id).strip(),
@@ -6346,8 +6496,8 @@ class DashboardService:
               AND comment_id = ?
             """,
             (
-                str(updated_at or ""),
-                str(updated_at or ""),
+                self._db_optional_timestamp_value(updated_at),
+                self._db_optional_timestamp_value(updated_at),
                 self._current_customer_center_id(),
                 int(advertiser_id),
                 str(comment_id).strip(),
@@ -6380,10 +6530,17 @@ class DashboardService:
             allowed_advertiser_ids,
             self._current_customer_center_id(),
         )
-        cached = self._comment_cache.get(cache_key)
+        cache_version = self._shared_cache_version("comment")
+        versioned_cache_key = self._versioned_cache_key(cache_version, cache_key)
         now_ts = time.time()
-        if not force_refresh and cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
-            return dict(cached["payload"])
+        if not force_refresh:
+            cached_payload = self._local_dict_cache_get(self._comment_cache, versioned_cache_key, RANGE_CACHE_SECONDS)
+            if cached_payload is not None:
+                return cached_payload
+            shared_payload = self._shared_dict_cache_get("comment", cache_key, cache_version)
+            if shared_payload is not None:
+                self._local_dict_cache_set(self._comment_cache, versioned_cache_key, shared_payload)
+                return shared_payload
 
         client = self.build_client(config)
         client.get_access_token()
@@ -6410,7 +6567,8 @@ class DashboardService:
                 "selected_advertiser_id": selected_advertiser_id,
                 "fetched_at": now_text(config["timezone"]),
             }
-            self._comment_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+            self._local_dict_cache_set(self._comment_cache, versioned_cache_key, payload)
+            self._shared_dict_cache_set("comment", cache_key, cache_version, payload, RANGE_CACHE_SECONDS)
             return payload
 
         comment_start_date = start_dt.strftime("%Y-%m-%d")
@@ -6485,7 +6643,7 @@ class DashboardService:
                         records,
                         attempted_at,
                     )
-            self._comment_cache.clear()
+            self._clear_comment_caches()
 
         items: list[dict[str, Any]] = []
         advertiser_ids: set[int] = set()
@@ -6555,7 +6713,8 @@ class DashboardService:
             "selected_advertiser_id": selected_advertiser_id,
             "fetched_at": now_text(config["timezone"]),
         }
-        self._comment_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+        self._local_dict_cache_set(self._comment_cache, versioned_cache_key, payload)
+        self._shared_dict_cache_set("comment", cache_key, cache_version, payload, RANGE_CACHE_SECONDS)
         return payload
 
     def reply_comment(
@@ -6583,7 +6742,7 @@ class DashboardService:
         updated_at = now_text(self.read_config()["timezone"])
         with self.db() as conn:
             self._mark_comment_replied(conn, advertiser_id_value, comment_text, updated_at)
-        self._comment_cache.clear()
+        self._clear_comment_caches()
         return {
             "ok": True,
             "advertiser_id": advertiser_id_value,
@@ -6611,7 +6770,7 @@ class DashboardService:
         updated_at = now_text(self.read_config()["timezone"])
         with self.db() as conn:
             self._mark_comment_hidden(conn, advertiser_id_value, comment_text, updated_at)
-        self._comment_cache.clear()
+        self._clear_comment_caches()
         return {
             "ok": True,
             "advertiser_id": advertiser_id_value,
@@ -7360,75 +7519,90 @@ class DashboardService:
         return deduped_ids
 
     def collect_and_store_all_customer_centers(self) -> dict[str, Any]:
-        customer_center_ids = self.bound_customer_center_ids()
-        if not customer_center_ids:
-            payload = self.collect_and_store()
-            return {
-                "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
-                "current_customer_center_id": str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip(),
-                "synced_customer_center_count": 1 if payload else 0,
-                "synced_customer_centers": [
-                    {
-                        "customer_center_id": str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip(),
-                        "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
-                        "account_count": int((payload.get("summary") or {}).get("account_count") or 0),
-                        "active_account_count": int((payload.get("summary") or {}).get("active_account_count") or 0),
-                    }
-                ] if payload else [],
-                "error_count": 0,
-                "errors": [],
-            }
-
         current_customer_center_id = self._current_customer_center_id()
-        synced_customer_centers: list[dict[str, Any]] = []
-        errors: list[dict[str, Any]] = []
-        current_payload: dict[str, Any] | None = None
+        with self._distributed_runtime_lock("sync", timeout_seconds=300) as acquired:
+            if not acquired:
+                return {
+                    "snapshot_time": "",
+                    "current_customer_center_id": current_customer_center_id,
+                    "synced_customer_center_count": 0,
+                    "synced_customer_centers": [],
+                    "error_count": 0,
+                    "errors": [],
+                    "skipped": True,
+                    "reason": "sync already running",
+                }
 
-        for customer_center_id in customer_center_ids:
-            try:
-                payload = (
-                    self.collect_snapshot()
-                    if customer_center_id == current_customer_center_id
-                    else self.collect_snapshot_for_customer_center(customer_center_id)
-                )
-                self.persist_snapshot(payload)
-                synced_customer_centers.append(
-                    {
-                        "customer_center_id": customer_center_id,
-                        "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
-                        "account_count": int((payload.get("summary") or {}).get("account_count") or 0),
-                        "active_account_count": int((payload.get("summary") or {}).get("active_account_count") or 0),
-                    }
-                )
-                if customer_center_id == current_customer_center_id:
-                    current_payload = payload
-            except Exception as exc:  # noqa: BLE001
-                errors.append(
-                    {
-                        "customer_center_id": customer_center_id,
-                        "error": str(exc),
-                    }
-                )
+            customer_center_ids = self.bound_customer_center_ids()
+            if not customer_center_ids:
+                payload = self.collect_and_store()
+                return {
+                    "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
+                    "current_customer_center_id": str(payload.get("customer_center_id") or current_customer_center_id or "").strip(),
+                    "synced_customer_center_count": 1 if payload else 0,
+                    "synced_customer_centers": [
+                        {
+                            "customer_center_id": str(payload.get("customer_center_id") or current_customer_center_id or "").strip(),
+                            "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
+                            "account_count": int((payload.get("summary") or {}).get("account_count") or 0),
+                            "active_account_count": int((payload.get("summary") or {}).get("active_account_count") or 0),
+                        }
+                    ] if payload else [],
+                    "error_count": 0,
+                    "errors": [],
+                    "skipped": False,
+                }
 
-        if current_payload:
-            self.evaluate_alerts(current_payload)
-        self.cleanup_history()
-        self.clear_runtime_caches()
+            synced_customer_centers: list[dict[str, Any]] = []
+            errors: list[dict[str, Any]] = []
+            current_payload: dict[str, Any] | None = None
 
-        snapshot_time = ""
-        if current_payload:
-            snapshot_time = str(current_payload.get("snapshot_time") or "").strip()
-        elif synced_customer_centers:
-            snapshot_time = max(str(item.get("snapshot_time") or "").strip() for item in synced_customer_centers)
+            for customer_center_id in customer_center_ids:
+                try:
+                    payload = (
+                        self.collect_snapshot()
+                        if customer_center_id == current_customer_center_id
+                        else self.collect_snapshot_for_customer_center(customer_center_id)
+                    )
+                    self.persist_snapshot(payload)
+                    synced_customer_centers.append(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
+                            "account_count": int((payload.get("summary") or {}).get("account_count") or 0),
+                            "active_account_count": int((payload.get("summary") or {}).get("active_account_count") or 0),
+                        }
+                    )
+                    if customer_center_id == current_customer_center_id:
+                        current_payload = payload
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "error": str(exc),
+                        }
+                    )
 
-        return {
-            "snapshot_time": snapshot_time,
-            "current_customer_center_id": current_customer_center_id,
-            "synced_customer_center_count": len(synced_customer_centers),
-            "synced_customer_centers": synced_customer_centers,
-            "error_count": len(errors),
-            "errors": errors,
-        }
+            if current_payload:
+                self.evaluate_alerts(current_payload)
+            self.cleanup_history()
+            self.clear_runtime_caches()
+
+            snapshot_time = ""
+            if current_payload:
+                snapshot_time = str(current_payload.get("snapshot_time") or "").strip()
+            elif synced_customer_centers:
+                snapshot_time = max(str(item.get("snapshot_time") or "").strip() for item in synced_customer_centers)
+
+            return {
+                "snapshot_time": snapshot_time,
+                "current_customer_center_id": current_customer_center_id,
+                "synced_customer_center_count": len(synced_customer_centers),
+                "synced_customer_centers": synced_customer_centers,
+                "error_count": len(errors),
+                "errors": errors,
+                "skipped": False,
+            }
 
     def backfill_performance_history(self, start_dt: datetime, end_dt: datetime) -> dict[str, Any]:
         tz = ZoneInfo(self.read_config()["timezone"])
@@ -7607,6 +7781,13 @@ class DashboardService:
     def persist_snapshot(self, payload: dict[str, Any]) -> None:
         customer_center_id = str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip()
         with self.db() as conn:
+            resolved_snapshot_time = self._next_available_snapshot_time(
+                conn,
+                "summary_snapshots",
+                str(payload.get("snapshot_time") or "").strip(),
+                customer_center_id,
+            )
+            payload["snapshot_time"] = resolved_snapshot_time
             conn.execute(
                 """
                 INSERT INTO summary_snapshots (
@@ -7614,8 +7795,7 @@ class DashboardService:
                     plan_count, active_plan_count, stat_cost, pay_amount, order_count, roi,
                     account_failures, plan_failures
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (snapshot_time) DO UPDATE SET
-                    customer_center_id = excluded.customer_center_id,
+                ON CONFLICT (customer_center_id, snapshot_time) DO UPDATE SET
                     window_start = excluded.window_start,
                     window_end = excluded.window_end,
                     account_count = excluded.account_count,
@@ -7630,7 +7810,7 @@ class DashboardService:
                     plan_failures = excluded.plan_failures
                 """,
                 (
-                    payload["snapshot_time"],
+                    resolved_snapshot_time,
                     customer_center_id,
                     payload["window_start"],
                     payload["window_end"],
@@ -7648,23 +7828,23 @@ class DashboardService:
             )
             conn.execute(
                 "DELETE FROM account_snapshots WHERE snapshot_time = ? AND customer_center_id = ?",
-                (payload["snapshot_time"], customer_center_id),
+                (resolved_snapshot_time, customer_center_id),
             )
             conn.execute(
                 "DELETE FROM plan_snapshots WHERE snapshot_time = ? AND customer_center_id = ?",
-                (payload["snapshot_time"], customer_center_id),
+                (resolved_snapshot_time, customer_center_id),
             )
             conn.execute(
                 "DELETE FROM account_balances WHERE snapshot_time = ? AND customer_center_id = ?",
-                (payload["snapshot_time"], customer_center_id),
+                (resolved_snapshot_time, customer_center_id),
             )
             conn.execute(
                 "DELETE FROM shared_wallets WHERE snapshot_time = ? AND customer_center_id = ?",
-                (payload["snapshot_time"], customer_center_id),
+                (resolved_snapshot_time, customer_center_id),
             )
             conn.execute(
                 "DELETE FROM shared_wallet_account_relations WHERE snapshot_time = ? AND customer_center_id = ?",
-                (payload["snapshot_time"], customer_center_id),
+                (resolved_snapshot_time, customer_center_id),
             )
             conn.executemany(
                 """
@@ -7675,7 +7855,7 @@ class DashboardService:
                 """,
                 [
                     (
-                        payload["snapshot_time"],
+                        resolved_snapshot_time,
                         customer_center_id,
                         item["advertiser_id"],
                         item["advertiser_name"],
@@ -7701,7 +7881,7 @@ class DashboardService:
                 """,
                 [
                     (
-                        payload["snapshot_time"],
+                        resolved_snapshot_time,
                         customer_center_id,
                         item["advertiser_id"],
                         item["advertiser_name"],
@@ -7742,7 +7922,7 @@ class DashboardService:
                     """,
                     [
                         (
-                            payload["snapshot_time"],
+                            resolved_snapshot_time,
                             customer_center_id,
                             item["advertiser_id"],
                             item["advertiser_name"],
@@ -7763,7 +7943,7 @@ class DashboardService:
                     """,
                     [
                         (
-                            payload["snapshot_time"],
+                            resolved_snapshot_time,
                             customer_center_id,
                             item["main_wallet_id"],
                             item["wallet_name"],
@@ -7784,7 +7964,7 @@ class DashboardService:
                     """,
                     [
                         (
-                            payload["snapshot_time"],
+                            resolved_snapshot_time,
                             customer_center_id,
                             item["main_wallet_id"],
                             item["advertiser_id"],
@@ -8227,6 +8407,19 @@ class DashboardService:
         if payload.get("skipped"):
             return
         customer_center_id = str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip()
+        with self.db() as conn:
+            resolved_snapshot_time = self._next_available_snapshot_time(
+                conn,
+                "extended_sync_runs",
+                str(payload.get("snapshot_time") or "").strip(),
+                customer_center_id,
+            )
+            if resolved_snapshot_time != str(payload.get("snapshot_time") or "").strip():
+                payload["snapshot_time"] = resolved_snapshot_time
+                payload["detail_rows"] = self._replace_snapshot_time_in_rows(list(payload.get("detail_rows") or []), resolved_snapshot_time)
+                payload["product_rows"] = self._replace_snapshot_time_in_rows(list(payload.get("product_rows") or []), resolved_snapshot_time)
+                payload["material_rows"] = self._replace_snapshot_time_in_rows(list(payload.get("material_rows") or []), resolved_snapshot_time)
+                payload["video_flag_rows"] = self._replace_snapshot_time_in_rows(list(payload.get("video_flag_rows") or []), resolved_snapshot_time)
         original_material_keys: set[tuple[int, str]] = {
             (int(row[1]), str(row[2]))
             for row in payload["video_flag_rows"]
@@ -8388,8 +8581,7 @@ class DashboardService:
                     product_row_count, material_row_count, original_video_row_count,
                     error_count, error_json, created_at, finished_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (snapshot_time) DO UPDATE SET
-                    customer_center_id = excluded.customer_center_id,
+                ON CONFLICT (customer_center_id, snapshot_time) DO UPDATE SET
                     window_start = excluded.window_start,
                     window_end = excluded.window_end,
                     status = excluded.status,
@@ -9280,10 +9472,15 @@ class DashboardService:
             allowed_advertiser_ids,
             self._current_customer_center_id(),
         )
-        cached = self._material_cache.get(cache_key)
+        cache_version = self._shared_cache_version("material")
+        versioned_cache_key = self._versioned_cache_key(cache_version, cache_key)
         now_ts = time.time()
-        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
-            cached_payload = dict(cached["payload"])
+        cached_payload = self._local_dict_cache_get(self._material_cache, versioned_cache_key, RANGE_CACHE_SECONDS)
+        if cached_payload is None:
+            cached_payload = self._shared_dict_cache_get("material", cache_key, cache_version)
+            if cached_payload is not None:
+                self._local_dict_cache_set(self._material_cache, versioned_cache_key, cached_payload)
+        if cached_payload is not None:
             missing_cached_days = int(cached_payload.get("missing_history_days", 0) or 0)
             if (
                 not target_snapshot
@@ -9473,7 +9670,8 @@ class DashboardService:
             payload["history_backfill_pending"] = missing_days > 0
             payload["missing_history_days"] = missing_days
             payload["history_backfill_queued"] = backfill_queued
-        self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+        self._local_dict_cache_set(self._material_cache, versioned_cache_key, payload)
+        self._shared_dict_cache_set("material", cache_key, cache_version, payload, RANGE_CACHE_SECONDS)
         return payload
 
     def material_rankings_for_user(
@@ -9709,10 +9907,16 @@ class DashboardService:
             allowed_advertiser_ids,
             "__all_customer_centers__",
         )
-        cached = self._material_cache.get(cache_key)
+        cache_version = self._shared_cache_version("material")
+        versioned_cache_key = self._versioned_cache_key(cache_version, cache_key)
         now_ts = time.time()
-        if cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
-            return dict(cached["payload"])
+        cached_payload = self._local_dict_cache_get(self._material_cache, versioned_cache_key, RANGE_CACHE_SECONDS)
+        if cached_payload is None:
+            cached_payload = self._shared_dict_cache_get("material", cache_key, cache_version)
+            if cached_payload is not None:
+                self._local_dict_cache_set(self._material_cache, versioned_cache_key, cached_payload)
+        if cached_payload is not None:
+            return cached_payload
 
         with self.db() as conn:
             run_rows = [
@@ -9754,7 +9958,8 @@ class DashboardService:
                     "query_start_date": start_dt.strftime("%Y-%m-%d"),
                     "query_end_date": end_dt.strftime("%Y-%m-%d"),
                 }
-                self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+                self._local_dict_cache_set(self._material_cache, versioned_cache_key, payload)
+                self._shared_dict_cache_set("material", cache_key, cache_version, payload, RANGE_CACHE_SECONDS)
                 return payload
 
             selected_pairs = {
@@ -9917,7 +10122,8 @@ class DashboardService:
             "query_start_date": start_dt.strftime("%Y-%m-%d"),
             "query_end_date": end_dt.strftime("%Y-%m-%d"),
         }
-        self._material_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+        self._local_dict_cache_set(self._material_cache, versioned_cache_key, payload)
+        self._shared_dict_cache_set("material", cache_key, cache_version, payload, RANGE_CACHE_SECONDS)
         return payload
 
     def _apply_material_operator_rankings(
@@ -10008,10 +10214,17 @@ class DashboardService:
             start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
         cache_customer_center_id = "__all_customer_centers__" if self._display_scope_uses_all_customer_centers(display_scope) else self._current_customer_center_id()
         cache_key = build_performance_cache_key(normalized, start_date, end_date, cache_customer_center_id)
-        cached = self._performance_cache.get(cache_key)
+        cache_version = self._shared_cache_version("performance")
+        versioned_cache_key = self._versioned_cache_key(cache_version, cache_key)
         now_ts = time.time()
-        if not force_refresh and cached and now_ts - float(cached.get("_cached_at", 0.0)) < RANGE_CACHE_SECONDS:
-            cached_payload = dict(cached["payload"])
+        cached_payload = None
+        if not force_refresh:
+            cached_payload = self._local_dict_cache_get(self._performance_cache, versioned_cache_key, RANGE_CACHE_SECONDS)
+            if cached_payload is None:
+                cached_payload = self._shared_dict_cache_get("performance", cache_key, cache_version)
+                if cached_payload is not None:
+                    self._local_dict_cache_set(self._performance_cache, versioned_cache_key, cached_payload)
+        if cached_payload is not None:
             if (
                 not self._display_scope_uses_all_customer_centers(display_scope)
                 and cached_payload.get("history_backfill_pending")
@@ -10056,7 +10269,8 @@ class DashboardService:
             start_date=start_dt.strftime("%Y-%m-%d"),
             end_date=end_dt.strftime("%Y-%m-%d"),
         )
-        self._performance_cache[cache_key] = {"_cached_at": now_ts, "payload": payload}
+        self._local_dict_cache_set(self._performance_cache, versioned_cache_key, payload)
+        self._shared_dict_cache_set("performance", cache_key, cache_version, payload, RANGE_CACHE_SECONDS)
         return self._apply_account_scope(payload, allowed_advertiser_ids)
 
     def public_employee_rankings(
@@ -10426,6 +10640,8 @@ class DashboardService:
             return {
                 "ok": True,
                 "manual": manual,
+                "skipped": bool(payload.get("skipped", False)),
+                "reason": str(payload.get("reason") or ""),
                 "snapshot_time": payload.get("snapshot_time", ""),
                 "current_customer_center_id": payload.get("current_customer_center_id", ""),
                 "synced_customer_center_count": int(payload.get("synced_customer_center_count", 0) or 0),
@@ -10453,17 +10669,29 @@ class DashboardService:
         return payload
 
     def collect_extended_and_store(self, force_refresh: bool = False) -> dict[str, Any]:
-        payload = self.collect_extended_snapshot(force_refresh=force_refresh)
-        if payload.get("skipped"):
+        with self._distributed_runtime_lock(
+            "detail-sync",
+            timeout_seconds=max(int(DETAIL_SYNC_INTERVAL_MINUTES or 1) * 120, 300),
+        ) as acquired:
+            if not acquired:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "detail sync already running",
+                    "snapshot_time": "",
+                    "errors": [],
+                }
+            payload = self.collect_extended_snapshot(force_refresh=force_refresh)
+            if payload.get("skipped"):
+                return payload
+            self.persist_extended_snapshot(payload, replace_same_day=True)
+            self.cleanup_history()
+            self.clear_runtime_caches()
+            try:
+                self.material_rankings("day")
+            except Exception:
+                pass
             return payload
-        self.persist_extended_snapshot(payload, replace_same_day=True)
-        self.cleanup_history()
-        self.clear_runtime_caches()
-        try:
-            self.material_rankings("day")
-        except Exception:
-            pass
-        return payload
 
     async def start(self) -> None:
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
