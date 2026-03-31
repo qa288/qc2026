@@ -82,7 +82,8 @@ def register_query_routes(
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
-        return JSONResponse({"items": service.latest_account_catalog(allowed, display_scope)})
+        items = await asyncio.to_thread(service.latest_account_catalog, allowed, display_scope)
+        return JSONResponse({"items": items})
 
     @app.get("/api/dashboard")
     async def dashboard_data(
@@ -91,9 +92,8 @@ def register_query_routes(
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
         is_admin = str(user.get("role") or "") == role_admin
-        latest_task = asyncio.create_task(asyncio.to_thread(service.latest_snapshot, allowed, display_scope))
+        latest_task = asyncio.create_task(asyncio.to_thread(service.dashboard_overview_payload, allowed, display_scope, user))
         extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, display_scope))
-        summary_history_task = asyncio.create_task(asyncio.to_thread(lambda: service.summary_history(display_scope=display_scope)))
         config_task = asyncio.create_task(asyncio.to_thread(service.read_config))
         token_task = (
             asyncio.create_task(asyncio.to_thread(lambda: service.latest_token_payload(masked=True)))
@@ -120,10 +120,9 @@ def register_query_routes(
             if is_admin
             else None
         )
-        latest, extended_sync, summary_history, current_config = await asyncio.gather(
+        latest, extended_sync, current_config = await asyncio.gather(
             latest_task,
             extended_sync_task,
-            summary_history_task,
             config_task,
         )
         token_info = await token_task if token_task else None
@@ -131,8 +130,6 @@ def register_query_routes(
         notification_settings = await notification_settings_task if notification_settings_task else {}
         alert_rules = await alert_rules_task if alert_rules_task else []
         alert_events = await alert_events_task if alert_events_task else []
-        if latest and str(user.get("role") or "") == role_operator:
-            latest = service._apply_operator_scope(latest, user)
         return JSONResponse(
             {
                 "session": {
@@ -149,7 +146,7 @@ def register_query_routes(
                 "extendedSync": extended_sync,
                 "tokenInfo": token_info,
                 "oceanEngineConfig": ocean_engine_config,
-                "summaryHistory": summary_history,
+                "summaryHistory": [],
                 "notificationSettings": notification_settings,
                 "alertRules": alert_rules,
                 "alertEvents": alert_events,

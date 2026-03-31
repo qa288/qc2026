@@ -24,6 +24,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
+try:
+    import redis
+except Exception:  # noqa: BLE001
+    redis = None
+
 from fastapi import FastAPI, HTTPException, UploadFile, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -314,6 +319,23 @@ def build_latest_snapshot_cache_key(
     )
 
 
+def build_dashboard_overview_cache_key(
+    allowed_advertiser_ids: set[int] | None = None,
+    display_scope: str = DISPLAY_SCOPE_CURRENT,
+    customer_center_id: str = "",
+    role: str = "",
+    user_id: int = 0,
+    version: str = "1",
+) -> str:
+    scope_digest = hashlib.sha1(build_scope_cache_key(allowed_advertiser_ids).encode("utf-8")).hexdigest()[:16]
+    return (
+        f"dashboard-overview:v{str(version or '1').strip()}:"
+        f"{str(display_scope or DISPLAY_SCOPE_CURRENT).strip().lower()}:"
+        f"{str(customer_center_id or '').strip()}:"
+        f"{str(role or '').strip().lower()}:{int(user_id or 0)}:{scope_digest}"
+    )
+
+
 class DashboardService:
     def __init__(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -330,6 +352,7 @@ class DashboardService:
         self._latest_snapshot_cache: dict[str, dict[str, Any]] = {}
         self._latest_snapshot_refreshing: set[str] = set()
         self._latest_snapshot_cache_lock = threading.Lock()
+        self._redis_client: Any | None = None
         self._backfill_queue_marks: dict[str, float] = {}
         self.user_access = UserAccess(
             self.db,
@@ -387,6 +410,69 @@ class DashboardService:
     @property
     def templates(self) -> Jinja2Templates:
         return self._templates
+
+    def _redis(self) -> Any | None:
+        redis_url = str(settings.redis_url or "").strip()
+        if not redis_url or redis is None:
+            return None
+        if self._redis_client is None:
+            self._redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
+        return self._redis_client
+
+    def _shared_cache_version(self, namespace: str) -> str:
+        client = self._redis()
+        if client is None:
+            return "1"
+        version_key = f"dashboard:cache-version:{str(namespace or 'default').strip()}"
+        try:
+            value = str(client.get(version_key) or "").strip()
+            if value:
+                return value
+            client.set(version_key, "1")
+            return "1"
+        except Exception:  # noqa: BLE001
+            return "1"
+
+    def _bump_shared_cache_version(self, namespace: str) -> None:
+        client = self._redis()
+        if client is None:
+            return
+        version_key = f"dashboard:cache-version:{str(namespace or 'default').strip()}"
+        try:
+            client.incr(version_key)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _shared_json_cache_get(self, key: str) -> dict[str, Any] | list[Any] | None:
+        client = self._redis()
+        if client is None:
+            return None
+        try:
+            raw = client.get(key)
+        except Exception:  # noqa: BLE001
+            return None
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(payload, (dict, list)):
+            return payload
+        return None
+
+    def _shared_json_cache_set(self, key: str, payload: dict[str, Any] | list[Any], ttl_seconds: int) -> None:
+        client = self._redis()
+        if client is None:
+            return
+        try:
+            client.setex(
+                key,
+                max(int(ttl_seconds or RANGE_CACHE_SECONDS), 1),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _range_span_days(self, start_dt: datetime, end_dt: datetime) -> int:
         return max((end_dt.date() - start_dt.date()).days + 1, 1)
@@ -2219,6 +2305,73 @@ class DashboardService:
         with self._latest_snapshot_cache_lock:
             self._latest_snapshot_cache.clear()
             self._latest_snapshot_refreshing.clear()
+        self._bump_shared_cache_version("dashboard-overview")
+
+    def _build_dashboard_overview_payload(
+        self,
+        allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+        user: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        config = self.read_config()
+        start_dt, end_dt, _range_label = build_performance_window("day", str(config.get("timezone") or TIMEZONE))
+        if self._display_scope_uses_all_customer_centers(display_scope):
+            payload = self._performance_snapshot_from_db_all_customer_centers(start_dt, end_dt)
+        else:
+            payload = self._performance_snapshot_from_db(start_dt, end_dt)
+
+        accounts = [dict(item) for item in payload.get("accounts", [])]
+        plans = self._apply_employee_attribution([dict(item) for item in payload.get("plans", [])], accounts)
+        scoped_payload = dict(payload)
+        scoped_payload["accounts"] = accounts
+        scoped_payload["plans"] = plans
+        scoped_payload["summary"], scoped_payload["products"], scoped_payload["employees"], scoped_payload["operators"] = self._rankings_bundle(
+            dict(scoped_payload.get("summary") or {}),
+            accounts,
+            plans,
+        )
+        if allowed_advertiser_ids is not None:
+            scoped_payload = self._apply_account_scope(scoped_payload, allowed_advertiser_ids)
+        if str((user or {}).get("role") or "").strip() == ROLE_OPERATOR:
+            scoped_payload = self._apply_operator_scope(scoped_payload, user or {})
+        return {
+            "snapshot_time": str(scoped_payload.get("snapshot_time") or "").strip(),
+            "window_start": str(scoped_payload.get("window_start") or "").strip(),
+            "window_end": str(scoped_payload.get("window_end") or "").strip(),
+            "summary": dict(scoped_payload.get("summary") or {}),
+            "snapshot_count": int(scoped_payload.get("snapshot_count", 0) or 0),
+            "customer_center_count": int(scoped_payload.get("customer_center_count", 0) or 0),
+        }
+
+    def dashboard_overview_payload(
+        self,
+        allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+        user: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        display_scope_key = str(display_scope or DISPLAY_SCOPE_CURRENT).strip().lower()
+        customer_center_id = (
+            "__all_customer_centers__"
+            if self._display_scope_uses_all_customer_centers(display_scope_key)
+            else self._current_customer_center_id()
+        )
+        role = str((user or {}).get("role") or "").strip().lower()
+        user_id = int((user or {}).get("id", 0) or 0)
+        cache_version = self._shared_cache_version("dashboard-overview")
+        cache_key = build_dashboard_overview_cache_key(
+            allowed_advertiser_ids,
+            display_scope_key,
+            customer_center_id,
+            role,
+            user_id,
+            cache_version,
+        )
+        cached = self._shared_json_cache_get(cache_key)
+        if isinstance(cached, dict):
+            return copy.deepcopy(cached)
+        payload = self._build_dashboard_overview_payload(allowed_advertiser_ids, display_scope_key, user)
+        self._shared_json_cache_set(cache_key, payload, RANGE_CACHE_SECONDS)
+        return copy.deepcopy(payload)
 
     def _performance_snapshot_from_db_all_customer_centers(
         self,
@@ -2585,17 +2738,85 @@ class DashboardService:
         allowed_advertiser_ids: set[int] | None = None,
         display_scope: str = DISPLAY_SCOPE_CURRENT,
     ) -> list[dict[str, Any]]:
-        latest = self.latest_snapshot(allowed_advertiser_ids, display_scope)
-        if not latest:
-            return []
-        items = latest.get("accounts", [])
-        return [
-            {
-                "advertiser_id": int(item.get("advertiser_id", 0) or 0),
+        items: list[dict[str, Any]]
+        with self.db() as conn:
+            if self._display_scope_uses_all_customer_centers(display_scope):
+                summary_rows = self._latest_rows_by_customer_center(
+                    [
+                        dict(row)
+                        for row in conn.execute(
+                            """
+                            SELECT snapshot_time, customer_center_id
+                            FROM summary_snapshots
+                            WHERE COALESCE(customer_center_id, '') <> ''
+                            ORDER BY snapshot_time DESC, customer_center_id ASC
+                            """
+                        ).fetchall()
+                    ]
+                )
+                selected_pairs = self._snapshot_pairs_from_rows(summary_rows)
+                if not selected_pairs:
+                    return []
+                snapshot_times = sorted({snapshot_time for _customer_center_id, snapshot_time in selected_pairs})
+                placeholders = ",".join("?" for _ in snapshot_times)
+                items = self._filter_rows_for_snapshot_pairs(
+                    [
+                        dict(row)
+                        for row in conn.execute(
+                            f"""
+                            SELECT snapshot_time, customer_center_id, advertiser_id, advertiser_name
+                            FROM account_snapshots
+                            WHERE snapshot_time IN ({placeholders})
+                            ORDER BY snapshot_time DESC, advertiser_name ASC, advertiser_id ASC
+                            """,
+                            snapshot_times,
+                        ).fetchall()
+                    ],
+                    selected_pairs,
+                )
+            else:
+                customer_center_id = self._current_customer_center_id()
+                latest = conn.execute(
+                    """
+                    SELECT snapshot_time
+                    FROM summary_snapshots
+                    WHERE customer_center_id = ?
+                    ORDER BY snapshot_time DESC
+                    LIMIT 1
+                    """,
+                    (customer_center_id,),
+                ).fetchone()
+                if not latest:
+                    return []
+                items = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT advertiser_id, advertiser_name
+                        FROM account_snapshots
+                        WHERE snapshot_time = ?
+                          AND customer_center_id = ?
+                        ORDER BY advertiser_name ASC, advertiser_id ASC
+                        """,
+                        (str(latest["snapshot_time"] or ""), customer_center_id),
+                    ).fetchall()
+                ]
+        if allowed_advertiser_ids is not None:
+            allowed = {int(item) for item in allowed_advertiser_ids}
+            items = [item for item in items if int(item.get("advertiser_id", 0) or 0) in allowed]
+        deduped: dict[int, dict[str, Any]] = {}
+        for item in items:
+            advertiser_id = int(item.get("advertiser_id", 0) or 0)
+            if not advertiser_id or advertiser_id in deduped:
+                continue
+            deduped[advertiser_id] = {
+                "advertiser_id": advertiser_id,
                 "advertiser_name": str(item.get("advertiser_name") or "").strip(),
             }
-            for item in items
-        ]
+        return sorted(
+            deduped.values(),
+            key=lambda item: (str(item.get("advertiser_name") or ""), int(item.get("advertiser_id", 0) or 0)),
+        )
 
     def _reference_catalog(self) -> dict[str, Any]:
         return self.catalog_access.reference_catalog()
