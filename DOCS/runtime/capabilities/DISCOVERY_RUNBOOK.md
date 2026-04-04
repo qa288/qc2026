@@ -1,6 +1,8 @@
 # 千川能力发现手册
 
-最后更新：`2026-03-19`
+最后更新：`2026-03-30`
+适用范围：能力发现脚本执行与结果沉淀
+读者对象：后端、联调同事
 
 ## 1. 目的
 
@@ -17,15 +19,15 @@
 
 脚本位置：
 
-- [tools/discover_qianchuan_capabilities.py](../tools/discover_qianchuan_capabilities.py)
+- [tools/discover_qianchuan_capabilities.py](../../../server_payload/qianchuan_openclaw_reporter/tools/discover_qianchuan_capabilities.py)
 
 共享客户端：
 
-- [report_qianchuan.py](../report_qianchuan.py)
+- [report_qianchuan.py](../../../server_payload/qianchuan_openclaw_reporter/report_qianchuan.py)
 
 ## 3. 本地运行
 
-如果本地有真实 `config.json`：
+如果本地准备了 `config.json`，或已经导出必要环境变量：
 
 ```bash
 python3 /path/to/qianchuan-reporter/tools/discover_qianchuan_capabilities.py \

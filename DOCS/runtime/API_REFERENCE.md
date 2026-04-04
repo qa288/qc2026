@@ -1,12 +1,16 @@
 # Runtime API Reference
 
-版本：`v2.0`  
-状态：`生效中`  
-最后更新：`2026-03-25`
+版本：`v2.0`
+状态：`生效中`
+最后更新：`2026-03-30`
+verified_commit：`539cc19`
+verified_date：`2026-03-30`
+适用范围：当前线上 `/api/*` 联调与同事参考开发
+读者对象：前端、后端、联调同事
 
 ## 1. 文档定位
 
-本文档面向当前这套线上运行系统的前后端联调、接口接入和同事参考开发。  
+本文档面向当前这套线上运行系统的前后端联调、接口接入和同事参考开发。
 这里只记录“现在实际可调用”的接口，不替代 `DOCS/standard/05_内部接口与集成规范.md` 的长期规范。
 
 当前运行基线：
@@ -216,6 +220,26 @@
   - `end_date`
   - `scope`
     - `all | account | plan | product | material`
+
+### `GET /api/comments`
+
+- 作用：读取评论列表
+- 权限：任意登录账号
+- 查询参数：
+  - `advertiser_id`
+  - `keyword`
+  - `page`
+  - `page_size`
+
+### `POST /api/comments/reply`
+
+- 作用：回复评论
+- 权限：任意登录账号
+
+### `POST /api/comments/hide`
+
+- 作用：隐藏评论
+- 权限：任意登录账号
 
 ## 4. 上传接口
 
@@ -447,12 +471,10 @@
 
 - `POST /api/sync`
   - 手动触发主同步
-- `POST /api/sync/extended`
-  - 手动触发细粒度同步
-- `POST /api/sync/backfill/performance`
-  - 手动触发主快照回补
-- `POST /api/sync/backfill/extended`
-  - 手动触发细粒度回补
+- `POST /api/sync/full-refresh`
+  - 手动触发 history 队列全量校正
+- `GET /api/sync/full-refresh/status`
+  - 查询全量校正状态
 - `GET /api/system/integrations/ocean-engine/token-latest`
   - 读取最新 token
 - `POST /api/system/integrations/ocean-engine/exchange-auth-code`
@@ -470,8 +492,10 @@
   "ok": true,
   "queued": true,
   "task_id": "3df8b0f7-8b5d-4fd1-84f1-0f9c6d2f4e6a",
-  "task_name": "dashboard.performance_backfill",
-  "days": 30
+  "task_name": "dashboard.full_refresh",
+  "status": {
+    "state": "queued"
+  }
 }
 ```
 

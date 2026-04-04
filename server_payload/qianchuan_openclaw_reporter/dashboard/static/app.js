@@ -3,8 +3,14 @@ const RANGE_LABELS = {
   yesterday: "昨日",
   week: "近7天",
   month: "近30天",
+  all: "全部",
   custom: "指定日期范围",
 };
+
+const DISPLAY_SCOPE_CURRENT = "current";
+const DISPLAY_SCOPE_ALL = "all";
+const DISPLAY_SCOPE_PREFERENCE_KEY = "dashboard-display-scope";
+const DISPLAY_SCOPE_MIGRATION_KEY = "dashboard-display-scope-default-all-v1";
 
 const RULE_ENTITY_CONFIG = {
   account: {
@@ -54,35 +60,83 @@ const RULE_ENTITY_CONFIG = {
   },
 };
 
-const MATERIAL_PAGE_SIZE = 100;
+const ACCOUNT_PAGE_SIZE = 20;
+const PLAN_PAGE_SIZE = 20;
+const MATERIAL_PAGE_SIZE = 10;
+const PERFORMANCE_CACHE_TTL_MS = 55 * 1000;
+const ACCESS_CACHE_TTL_MS = 30 * 1000;
+const USER_MATCHED_MATERIALS_CACHE_TTL_MS = 60 * 1000;
 const MATERIAL_CACHE_TTL_MS = 55 * 1000;
 const MATERIAL_SEARCH_DEBOUNCE_MS = 180;
+const MATERIAL_WARMUP_DELAY_MS = 250;
+const COMMENT_PAGE_SIZE = 50;
+const COMMENT_CACHE_TTL_MS = 30 * 1000;
+const COMMENT_SEARCH_DEBOUNCE_MS = 180;
+const DASHBOARD_FETCH_DEDUPE_MS = 1500;
+const UPLOAD_TARGETS_CACHE_TTL_MS = 15 * 1000;
+const UPLOAD_JOBS_FETCH_MIN_INTERVAL_MS = 1500;
+const PERFORMANCE_WARMUP_DELAY_MS = 200;
 const MATERIAL_TOTAL_PAY_TYPES = new Set(["VIDEO", "IMAGE", "TITLE"]);
 const MATERIAL_SETTLED_TYPES = new Set(["VIDEO", "IMAGE"]);
 
 const state = {
   payload: null,
+  alertRules: [],
   session: null,
+  oceanEngineConfig: null,
+  oceanEnginePreview: null,
+  oceanEnginePopoverOpen: false,
+  oceanEnginePendingCustomerCenterId: "",
   rangePayloads: {},
+  rangePayloadFetchedAt: {},
+  rangeRequestPromises: {},
   planAssetCache: {},
   materialPayloads: {},
   materialPayloadFetchedAt: {},
+  materialRequestPromises: {},
+  teamMaterialPayloads: {},
+  teamMaterialPayloadFetchedAt: {},
+  teamMaterialRequestPromises: {},
+  commentPayloads: {},
+  commentPayloadFetchedAt: {},
+  commentRequestPromises: {},
   materialPreviewCurveCache: {},
+  materialPreviewSourceCache: {},
   users: [],
+  usersFetchedAt: 0,
+  usersRequestPromise: null,
   catalogAccounts: [],
+  catalogAccountsFetchedAt: 0,
+  catalogAccountsRequestPromise: null,
   userScopes: {},
+  userScopesFetchedAt: {},
+  userScopeRequestPromises: {},
   userKeywords: {},
+  userKeywordsFetchedAt: {},
+  userKeywordRequestPromises: {},
   userMatchedMaterials: {},
+  userMatchedMaterialsFetchedAt: {},
+  userMatchedMaterialRequestPromises: {},
   uploadTargets: null,
+  uploadTargetsFetchedAt: 0,
+  uploadTargetsRequestKey: "",
+  uploadTargetsRequestPromise: null,
   uploadJobs: [],
+  uploadJobsFetchedAt: 0,
+  uploadJobsRequestPromise: null,
   uploadSelectedPlanIds: [],
   uploadFiles: [],
   uploadRetryingJobId: null,
+  uploadDeletingJobId: null,
+  displayScope: DISPLAY_SCOPE_ALL,
   unassignedScope: "all",
   accountSort: loadSort("account-sort", { key: "stat_cost", dir: "desc" }),
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
   employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
-  materialSort: loadSort("material-sort", { key: "stat_cost", dir: "desc" }),
+  productSort: loadSort("product-sort", { key: "order_count", dir: "desc" }),
+  materialSort: loadSort("material-sort-v2", { key: "stat_cost", dir: "desc" }),
+  teamMaterialSort: loadSort("team-material-sort-v2", { key: "stat_cost", dir: "desc" }),
+  commentSort: loadSort("comment-sort", { key: "create_time", dir: "desc" }),
   activeView: loadPreference("active-view", "overview"),
   ruleTargetOptions: [],
   performanceFilters: {
@@ -90,25 +144,53 @@ const state = {
     plan: loadRangeFilter("plan-range-filter", "day"),
     breakdown: loadRangeFilter("breakdown-range-filter", "day"),
     material: loadRangeFilter("material-range-filter", "day"),
+    teamMaterial: loadRangeFilter("team-material-range-filter", "day"),
+    comment: loadRangeFilter("comment-range-filter", "day"),
   },
   rangeEditorOpen: {},
+  rangeEditorDrafts: {},
+  accountPage: 1,
+  planPage: 1,
   materialPage: 1,
+  teamMaterialPage: 1,
+  commentPage: 1,
+  selectedEmployeeName: null,
   selectedPlanId: null,
+  selectedProductKey: null,
   selectedMaterialKey: null,
+  commentReplyTarget: null,
   materialPreviewRequestToken: 0,
+  materialPreviewMediaRequestToken: 0,
+  dashboardFetchPromise: null,
+  dashboardFetchRequestFresh: false,
+  dashboardFetchQueued: false,
+  dashboardFetchQueuedFresh: false,
+  dashboardFetchedAt: 0,
+  fullRefreshStatus: null,
+  fullRefreshStatusPromise: null,
+  fullRefreshStatusPollTimer: 0,
   selectedUserId: null,
+  userEditorMode: "edit",
   selectedUserScopeIds: [],
   editingRuleId: null,
+  performanceWarmupTimers: {},
+  materialWarmupTimers: {},
 };
 
 const kpiGrid = document.getElementById("kpiGrid");
 const alertStream = document.getElementById("alertStream");
 const accountTable = document.getElementById("accountTable");
+const accountTablePager = document.getElementById("accountTablePager");
 const planTable = document.getElementById("planTable");
+const planTablePager = document.getElementById("planTablePager");
 const employeeTable = document.getElementById("employeeTable");
 const ruleTable = document.getElementById("ruleTable");
 const materialTable = document.getElementById("materialTable");
 const materialTablePager = document.getElementById("materialTablePager");
+const teamMaterialTable = document.getElementById("teamMaterialTable");
+const teamMaterialTablePager = document.getElementById("teamMaterialTablePager");
+const commentTable = document.getElementById("commentTable");
+const commentTablePager = document.getElementById("commentTablePager");
 const alertSummary = document.getElementById("alertSummary");
 const accountSearch = document.getElementById("accountSearch");
 const planSearch = document.getElementById("planSearch");
@@ -117,6 +199,8 @@ const productSearch = document.getElementById("productSearch");
 const breakdownTitle = document.getElementById("breakdownTitle");
 const teamPanelTitle = document.getElementById("teamPanelTitle");
 const materialSearch = document.getElementById("materialSearch");
+const teamMaterialSearch = document.getElementById("teamMaterialSearch");
+const commentSearch = document.getElementById("commentSearch");
 const productTable = document.getElementById("productTable");
 const employeeDetail = document.getElementById("employeeDetail");
 const productDetail = document.getElementById("productDetail");
@@ -129,8 +213,10 @@ const materialDetail = document.getElementById("materialDetail");
 const planAccountFilter = document.getElementById("planAccountFilter");
 const notificationForm = document.getElementById("notificationForm");
 const notificationStatus = document.getElementById("notificationStatus");
+const notificationGuide = document.getElementById("notificationGuide");
 const ruleForm = document.getElementById("ruleForm");
 const ruleFormHint = document.getElementById("ruleFormHint");
+const rulePreviewCard = document.getElementById("rulePreviewCard");
 const ruleFormSubmitButton = document.getElementById("ruleFormSubmitButton");
 const ruleFormCancelButton = document.getElementById("ruleFormCancelButton");
 const ruleTargetInput = document.getElementById("ruleTargetInput");
@@ -139,8 +225,16 @@ const ruleTargetLabel = document.getElementById("ruleTargetLabel");
 const ruleTargetOptions = document.getElementById("ruleTargetOptions");
 const ruleTargetMeta = document.getElementById("ruleTargetMeta");
 const ruleMinSpendField = document.getElementById("ruleMinSpendField");
+const ruleStatusFilter = document.getElementById("ruleStatusFilter");
+const ruleSearchInput = document.getElementById("ruleSearchInput");
+const ruleListMeta = document.getElementById("ruleListMeta");
 const syncButton = document.getElementById("syncButton");
+const accountRefreshButton = document.getElementById("accountRefreshButton");
+const breakdownRefreshButton = document.getElementById("breakdownRefreshButton");
+const planRefreshButton = document.getElementById("planRefreshButton");
 const syncExtendedButton = document.getElementById("syncExtendedButton");
+const teamMaterialRefreshButton = document.getElementById("teamMaterialRefreshButton");
+const customerCenterChip = document.getElementById("customerCenterChip");
 const heroStatusText = document.getElementById("heroStatusText");
 const heroStatusHint = document.getElementById("heroStatusHint");
 const heroCopy = document.getElementById("heroCopy");
@@ -152,6 +246,7 @@ const signalOverview = document.getElementById("signalOverview");
 const overviewHeroCard = document.getElementById("overviewHeroCard");
 const overviewBoardGrid = document.getElementById("overviewBoardGrid");
 const overviewAlertTitle = document.getElementById("overviewAlertTitle");
+const overviewAlertMeta = document.getElementById("overviewAlertMeta");
 const overviewSystemRail = document.querySelector(".system-rail");
 const viewTabs = document.getElementById("viewTabs");
 const viewSections = Array.from(document.querySelectorAll(".view-section"));
@@ -176,9 +271,32 @@ const materialDateEnd = document.getElementById("materialDateEnd");
 const materialDateApply = document.getElementById("materialDateApply");
 const materialSyncMeta = document.getElementById("materialSyncMeta");
 const materialsPanelTitle = document.getElementById("materialsPanelTitle");
+const teamMaterialRangeSwitch = document.getElementById("teamMaterialRangeSwitch");
+const teamMaterialDateStart = document.getElementById("teamMaterialDateStart");
+const teamMaterialDateEnd = document.getElementById("teamMaterialDateEnd");
+const teamMaterialDateApply = document.getElementById("teamMaterialDateApply");
+const teamMaterialSyncMeta = document.getElementById("teamMaterialSyncMeta");
+const teamMaterialsPanelTitle = document.getElementById("teamMaterialsPanelTitle");
+const commentsPanelTitle = document.getElementById("commentsPanelTitle");
+const commentRangeSwitch = document.getElementById("commentRangeSwitch");
+const commentDateStart = document.getElementById("commentDateStart");
+const commentDateEnd = document.getElementById("commentDateEnd");
+const commentDateApply = document.getElementById("commentDateApply");
+const commentSyncMeta = document.getElementById("commentSyncMeta");
+const commentAccountFilter = document.getElementById("commentAccountFilter");
+const commentRefreshButton = document.getElementById("commentRefreshButton");
 const userTable = document.getElementById("userTable");
 const userForm = document.getElementById("userForm");
 const userFormReset = document.getElementById("userFormReset");
+const userFormSubmitButton = userForm?.querySelector('button[type="submit"]') || null;
+const accessOverview = document.getElementById("accessOverview");
+const oceanEngineConfigCard = document.getElementById("oceanEngineConfigCard");
+const oceanEngineConfigForm = document.getElementById("oceanEngineConfigForm");
+const oceanEngineConfigStatus = document.getElementById("oceanEngineConfigStatus");
+const oceanEngineConfigMeta = document.getElementById("oceanEngineConfigMeta");
+const oceanEngineConfigPreview = document.getElementById("oceanEngineConfigPreview");
+const oceanEngineBoundAccounts = document.getElementById("oceanEngineBoundAccounts");
+const oceanEngineBoundAccountsMeta = document.getElementById("oceanEngineBoundAccountsMeta");
 const userEditorStatus = document.getElementById("userEditorStatus");
 const uploadPermissionField = document.getElementById("uploadPermissionField");
 const operatorKeywordSeedField = document.getElementById("operatorKeywordSeedField");
@@ -217,6 +335,16 @@ const materialPreviewModal = document.getElementById("materialPreviewModal");
 const materialPreviewTitle = document.getElementById("materialPreviewTitle");
 const materialPreviewMeta = document.getElementById("materialPreviewMeta");
 const materialPreviewBody = document.getElementById("materialPreviewBody");
+const commentReplyModal = document.getElementById("commentReplyModal");
+const commentReplyTitle = document.getElementById("commentReplyTitle");
+const commentReplyMeta = document.getElementById("commentReplyMeta");
+const commentReplyInput = document.getElementById("commentReplyInput");
+const commentReplyStatus = document.getElementById("commentReplyStatus");
+const commentReplySubmit = document.getElementById("commentReplySubmit");
+const relationDetailModal = document.getElementById("relationDetailModal");
+const relationDetailTitle = document.getElementById("relationDetailTitle");
+const relationDetailMeta = document.getElementById("relationDetailMeta");
+const relationDetailBody = document.getElementById("relationDetailBody");
 const ruleTemplateButtons = Array.from(document.querySelectorAll(".signal-template-button"));
 const PERFORMANCE_SECTION_CONFIG = {
   account: {
@@ -251,10 +379,38 @@ const PERFORMANCE_SECTION_CONFIG = {
     endEl: materialDateEnd,
     applyEl: materialDateApply,
   },
+  teamMaterial: {
+    storageKey: "team-material-range-filter",
+    switchEl: teamMaterialRangeSwitch,
+    metaEl: teamMaterialSyncMeta,
+    startEl: teamMaterialDateStart,
+    endEl: teamMaterialDateEnd,
+    applyEl: teamMaterialDateApply,
+  },
+  comment: {
+    storageKey: "comment-range-filter",
+    switchEl: commentRangeSwitch,
+    metaEl: commentSyncMeta,
+    startEl: commentDateStart,
+    endEl: commentDateEnd,
+    applyEl: commentDateApply,
+  },
+};
+
+const PERFORMANCE_VIEW_SECTION_MAP = {
+  accounts: "account",
+  plans: "plan",
+  breakdown: "breakdown",
 };
 
 Object.entries(state.performanceFilters).forEach(([sectionKey, filter]) => {
   state.rangeEditorOpen[sectionKey] = filter.mode === "custom";
+  if (filter.mode === "custom") {
+    state.rangeEditorDrafts[sectionKey] = {
+      start: String(filter.start || ""),
+      end: String(filter.end || ""),
+    };
+  }
 });
 
 function loadSort(key, fallback) {
@@ -279,6 +435,152 @@ function loadPreference(key, fallback) {
 
 function savePreference(key, value) {
   localStorage.setItem(key, value);
+}
+
+function normalizeDisplayScope(value) {
+  return String(value || "").trim().toLowerCase() === DISPLAY_SCOPE_ALL
+    ? DISPLAY_SCOPE_ALL
+    : DISPLAY_SCOPE_CURRENT;
+}
+
+function loadDisplayScopePreference() {
+  try {
+    const saved = localStorage.getItem(DISPLAY_SCOPE_PREFERENCE_KEY);
+    const migrated = localStorage.getItem(DISPLAY_SCOPE_MIGRATION_KEY);
+    if (!migrated) {
+      localStorage.setItem(DISPLAY_SCOPE_PREFERENCE_KEY, DISPLAY_SCOPE_ALL);
+      localStorage.setItem(DISPLAY_SCOPE_MIGRATION_KEY, "1");
+      return DISPLAY_SCOPE_ALL;
+    }
+    return normalizeDisplayScope(saved || DISPLAY_SCOPE_ALL);
+  } catch {
+    return DISPLAY_SCOPE_ALL;
+  }
+}
+
+state.displayScope = loadDisplayScopePreference();
+
+function requestDisplayScope() {
+  if (!isAdmin()) {
+    return DISPLAY_SCOPE_CURRENT;
+  }
+  return normalizeDisplayScope(state.displayScope);
+}
+
+function usingAllCustomerCenters() {
+  return requestDisplayScope() === DISPLAY_SCOPE_ALL;
+}
+
+function setDisplayScope(nextScope, options = {}) {
+  const normalized = normalizeDisplayScope(nextScope);
+  const previous = normalizeDisplayScope(state.displayScope);
+  state.displayScope = normalized;
+  if (options.persist !== false) {
+    savePreference(DISPLAY_SCOPE_PREFERENCE_KEY, normalized);
+    savePreference(DISPLAY_SCOPE_MIGRATION_KEY, "1");
+  }
+  if (options.clearCaches !== false && previous !== normalized) {
+    clearDashboardDataCaches();
+  }
+}
+
+function appendDisplayScopeParam(params) {
+  params.set("display_scope", requestDisplayScope());
+  return params;
+}
+
+function hasFreshClientCache(fetchedAt, ttlMs) {
+  const fetchedTs = Number(fetchedAt || 0);
+  return fetchedTs > 0 && Date.now() - fetchedTs < Math.max(Number(ttlMs || 0), 0);
+}
+
+function invalidateUsersCache() {
+  state.users = [];
+  state.usersFetchedAt = 0;
+  state.usersRequestPromise = null;
+}
+
+function invalidateCatalogAccountsCache() {
+  state.catalogAccounts = [];
+  state.catalogAccountsFetchedAt = 0;
+  state.catalogAccountsRequestPromise = null;
+}
+
+function invalidateUserScopeCache(userId = 0) {
+  const normalizedUserId = Number(userId || 0);
+  if (normalizedUserId > 0) {
+    delete state.userScopes[normalizedUserId];
+    delete state.userScopesFetchedAt[normalizedUserId];
+    delete state.userScopeRequestPromises[normalizedUserId];
+    return;
+  }
+  state.userScopes = {};
+  state.userScopesFetchedAt = {};
+  state.userScopeRequestPromises = {};
+}
+
+function invalidateUserKeywordCache(userId = 0) {
+  const normalizedUserId = Number(userId || 0);
+  if (normalizedUserId > 0) {
+    delete state.userKeywords[normalizedUserId];
+    delete state.userKeywordsFetchedAt[normalizedUserId];
+    delete state.userKeywordRequestPromises[normalizedUserId];
+    return;
+  }
+  state.userKeywords = {};
+  state.userKeywordsFetchedAt = {};
+  state.userKeywordRequestPromises = {};
+}
+
+function invalidateUserMatchedMaterialCache(userId = 0) {
+  const normalizedUserId = Number(userId || 0);
+  if (normalizedUserId > 0) {
+    delete state.userMatchedMaterials[normalizedUserId];
+    delete state.userMatchedMaterialsFetchedAt[normalizedUserId];
+    delete state.userMatchedMaterialRequestPromises[normalizedUserId];
+    return;
+  }
+  state.userMatchedMaterials = {};
+  state.userMatchedMaterialsFetchedAt = {};
+  state.userMatchedMaterialRequestPromises = {};
+}
+
+function invalidateUploadTargetsCache() {
+  state.uploadTargets = null;
+  state.uploadTargetsFetchedAt = 0;
+  state.uploadTargetsRequestKey = "";
+  state.uploadTargetsRequestPromise = null;
+  state.uploadSelectedPlanIds = [];
+}
+
+function clearPerformanceWarmupTimer(sectionKey = "") {
+  const normalizedSectionKey = String(sectionKey || "").trim();
+  const timerId = Number(state.performanceWarmupTimers[normalizedSectionKey] || 0);
+  if (timerId > 0) {
+    window.clearTimeout(timerId);
+  }
+  delete state.performanceWarmupTimers[normalizedSectionKey];
+}
+
+function clearAllPerformanceWarmupTimers() {
+  Object.keys(state.performanceWarmupTimers || {}).forEach((sectionKey) => {
+    clearPerformanceWarmupTimer(sectionKey);
+  });
+}
+
+function clearMaterialWarmupTimer(sectionKey = "") {
+  const normalizedSectionKey = String(sectionKey || "").trim();
+  const timerId = Number(state.materialWarmupTimers[normalizedSectionKey] || 0);
+  if (timerId > 0) {
+    window.clearTimeout(timerId);
+  }
+  delete state.materialWarmupTimers[normalizedSectionKey];
+}
+
+function clearAllMaterialWarmupTimers() {
+  Object.keys(state.materialWarmupTimers || {}).forEach((sectionKey) => {
+    clearMaterialWarmupTimer(sectionKey);
+  });
 }
 
 function debounce(callback, waitMs) {
@@ -308,6 +610,8 @@ function derivePresetDateRange(mode) {
   } else if (mode === "week") {
     start.setDate(start.getDate() - 6);
   } else if (mode === "month") {
+    start.setDate(start.getDate() - 29);
+  } else if (mode === "all") {
     start.setDate(start.getDate() - 29);
   }
   return {
@@ -562,6 +866,7 @@ function resetRuleFormState() {
   if (ruleFormHint) {
     ruleFormHint.dataset.tone = "neutral";
   }
+  renderRulePreview();
 }
 
 function fillRuleForm(rule) {
@@ -584,6 +889,11 @@ function fillRuleForm(rule) {
   if (ruleFormSubmitButton) ruleFormSubmitButton.textContent = "保存规则";
   if (ruleFormCancelButton) ruleFormCancelButton.classList.remove("hidden");
   syncRuleFormFields();
+  if (ruleFormHint) {
+    ruleFormHint.textContent = `正在编辑 ${entityLabel(rule.entity_type)}规则，可直接调整阈值、范围或启停状态。`;
+    ruleFormHint.dataset.tone = "neutral";
+  }
+  renderRulePreview();
 }
 
 function syncRuleFormFields() {
@@ -647,6 +957,7 @@ function syncRuleFormFields() {
       ruleFormHint.dataset.tone = "neutral";
     }
   }
+  renderRulePreview();
 }
 
 function syncRuleTargetSelectionFromSearch() {
@@ -655,8 +966,10 @@ function syncRuleTargetSelectionFromSearch() {
   if (!text) {
     ruleTargetInput.value = "";
     if (ruleTargetMeta) {
+      ruleTargetMeta.textContent = "留空表示全部对象；输入关键词后请从候选项中选择具体对象。";
       ruleTargetMeta.dataset.tone = "neutral";
     }
+    renderRulePreview();
     return;
   }
   const targetMaps = ruleTargetLookupMaps(state.ruleTargetOptions || []);
@@ -667,6 +980,7 @@ function syncRuleTargetSelectionFromSearch() {
       ruleTargetMeta.textContent = `已选中：${text}`;
       ruleTargetMeta.dataset.tone = "success";
     }
+    renderRulePreview();
     return;
   }
   ruleTargetInput.value = "";
@@ -674,6 +988,7 @@ function syncRuleTargetSelectionFromSearch() {
     ruleTargetMeta.textContent = "请输入关键词后，从下拉候选项中选择一个具体对象；留空表示全部。";
     ruleTargetMeta.dataset.tone = "neutral";
   }
+  renderRulePreview();
 }
 
 function keywordScopeLabel(scope) {
@@ -747,29 +1062,128 @@ function renderMarketingGoalBadge(row) {
   return `<span class="pill marketing-goal-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
 }
 
-function deprecatedPlanSourceTone(sourceText) {
-  if (sourceText === "鍩虹鎶曟斁") return "standard";
-  if (sourceText === "鍏ㄥ煙鎶曟斁") return "uni";
-  return "neutral";
+function resolveMetricSupportFlag(row, key, fallback) {
+  const value = row?.[key];
+  return typeof value === "boolean" ? value : fallback;
 }
 
-function deprecatedRenderPlanSourceBadge(row) {
-  const text = row.plan_source_text || (String(row.plan_source || "").trim().toUpperCase() === "STANDARD" ? "鍩虹鎶曟斁" : "鍏ㄥ煙鎶曟斁");
-  const tone = planSourceTone(text);
-  const title = row.plan_source || text;
-  return `<span class="pill plan-source-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
+function metricProfileInfo(row) {
+  const source = String(row?.plan_source || "").trim().toUpperCase();
+  const deliveryType = String(row?.plan_delivery_type || "").trim().toUpperCase();
+  const explicitProfile = String(row?.metric_profile || "").trim().toUpperCase();
+  const profile = explicitProfile || (deliveryType === "CUBIC" && source === "UNI_REPORT" ? "SETTLED_ONLY" : "FULL");
+  if (profile === "MIXED") {
+    return {
+      profile,
+      badgeText: String(row?.metric_profile_text || "混合口径").trim() || "混合口径",
+      sourceText: String(row?.metric_source_text || "全域主链 + 乘方补链").trim() || "全域主链 + 乘方补链",
+      title: String(row?.metric_source_title || "该账户同时包含全域与乘方计划，字段已按可对齐口径汇总展示").trim(),
+      tone: "neutral",
+      supportsPayAmount: resolveMetricSupportFlag(row, "supports_pay_amount", false),
+      supportsTotalPayAmount: resolveMetricSupportFlag(row, "supports_total_pay_amount", false),
+      supportsPayRoi: resolveMetricSupportFlag(row, "supports_pay_roi", false),
+      supportsOrderCount: resolveMetricSupportFlag(row, "supports_order_count", false),
+      supportsPayOrderCost: resolveMetricSupportFlag(row, "supports_pay_order_cost", false),
+      supportsSettledAmountRate: resolveMetricSupportFlag(row, "supports_settled_amount_rate", false),
+      supportsRefundRate1h: resolveMetricSupportFlag(row, "supports_refund_rate_1h", false),
+    };
+  }
+  if (profile === "SETTLED_ONLY") {
+    return {
+      profile,
+      badgeText: String(row?.metric_profile_text || row?.plan_source_text || "乘方投放").trim() || "乘方投放",
+      sourceText: String(row?.metric_source_text || "旧报表净口径").trim() || "旧报表净口径",
+      title: String(row?.metric_source_title || "乘方计划 today 表现来自旧报表净口径，仅对齐消耗、净成交、净订单、净ROI").trim(),
+      tone: "report",
+      supportsPayAmount: resolveMetricSupportFlag(row, "supports_pay_amount", false),
+      supportsTotalPayAmount: resolveMetricSupportFlag(row, "supports_total_pay_amount", false),
+      supportsPayRoi: resolveMetricSupportFlag(row, "supports_pay_roi", false),
+      supportsOrderCount: resolveMetricSupportFlag(row, "supports_order_count", false),
+      supportsPayOrderCost: resolveMetricSupportFlag(row, "supports_pay_order_cost", false),
+      supportsSettledAmountRate: resolveMetricSupportFlag(row, "supports_settled_amount_rate", false),
+      supportsRefundRate1h: resolveMetricSupportFlag(row, "supports_refund_rate_1h", false),
+    };
+  }
+  return {
+    profile: "FULL",
+    badgeText: String(row?.metric_profile_text || row?.plan_source_text || (deliveryType === "CUBIC" ? "乘方投放" : "全域投放")).trim() || "全域投放",
+    sourceText: String(row?.metric_source_text || (source === "STANDARD" ? "标准补链" : source === "UNI_CUBIC" ? "乘方官方链" : "升级版主链")).trim() || "升级版主链",
+    title: String(row?.metric_source_title || (source === "UNI_CUBIC" ? "today 表现来自乘方 OVERALL_ROI_PRODUCT_PROJECT 官方链" : "today 表现来自升级版 uni_promotion 主链")).trim(),
+    tone: source === "STANDARD" ? "standard" : source === "UNI_CUBIC" ? "cubic" : "uni",
+    supportsPayAmount: resolveMetricSupportFlag(row, "supports_pay_amount", true),
+    supportsTotalPayAmount: resolveMetricSupportFlag(row, "supports_total_pay_amount", true),
+    supportsPayRoi: resolveMetricSupportFlag(row, "supports_pay_roi", true),
+    supportsOrderCount: resolveMetricSupportFlag(row, "supports_order_count", true),
+    supportsPayOrderCost: resolveMetricSupportFlag(row, "supports_pay_order_cost", true),
+    supportsSettledAmountRate: resolveMetricSupportFlag(row, "supports_settled_amount_rate", true),
+    supportsRefundRate1h: resolveMetricSupportFlag(row, "supports_refund_rate_1h", true),
+  };
 }
 
-function deprecatedEnrichPlanRow(row) {
+function renderPlanSourceBadge(row) {
+  const info = metricProfileInfo(row);
+  const sub = info.sourceText && info.sourceText !== info.badgeText ? `<span class="status-sub">${escapeHtml(info.sourceText)}</span>` : "";
+  const title = info.title || [info.badgeText, info.sourceText].filter(Boolean).join(" / ");
+  return `
+    <div class="status-stack" title="${escapeHtml(title)}">
+      <span class="pill plan-source-pill ${info.tone}">${escapeHtml(info.badgeText)}</span>
+      ${sub}
+    </div>
+  `;
+}
+
+function formatAlignedMetric(row, supportKey, value, formatter, available = true) {
+  const info = metricProfileInfo(row);
+  if (!info[supportKey] || !available) return "-";
+  return formatter(value);
+}
+
+function applyAccountMetricProfile(group) {
+  const hasGlobal = Boolean(group?._has_global_metric_profile);
+  const hasCubicOfficial = Boolean(group?._has_cubic_official_metric_profile);
+  const hasSettledOnly = Boolean(group?._has_settled_only_metric_profile);
+  if ((hasGlobal || hasCubicOfficial) && hasSettledOnly) {
+    group.metric_profile = "MIXED";
+    group.metric_profile_text = "混合口径";
+    group.metric_source_text = "主链 + 旧报表补链";
+    group.metric_source_title = "该账户同时包含主链计划与旧报表补链计划，不可对齐字段已降级展示";
+  } else if (hasSettledOnly) {
+    group.metric_profile = "SETTLED_ONLY";
+    group.metric_profile_text = "乘方投放";
+    group.metric_source_text = "旧报表净口径";
+    group.metric_source_title = "账户行来自乘方旧报表净口径，仅对齐消耗、净成交、净订单、净ROI";
+  } else if (hasGlobal && hasCubicOfficial) {
+    group.metric_profile = "FULL";
+    group.metric_profile_text = "全域+乘方";
+    group.metric_source_text = "全域主链 + 乘方官方链";
+    group.metric_source_title = "账户行同时包含全域主链与乘方官方链计划，字段已按同口径汇总";
+  } else if (hasCubicOfficial) {
+    group.metric_profile = "FULL";
+    group.metric_profile_text = "乘方投放";
+    group.metric_source_text = "乘方官方链";
+    group.metric_source_title = "账户行来自乘方 OVERALL_ROI_PRODUCT_PROJECT 官方链聚合";
+  } else {
+    group.metric_profile = "FULL";
+    group.metric_profile_text = "全域投放";
+    group.metric_source_text = "升级版主链";
+    group.metric_source_title = "账户行来自升级版 uni_promotion 主链聚合";
+  }
+  delete group._has_global_metric_profile;
+  delete group._has_cubic_official_metric_profile;
+  delete group._has_settled_only_metric_profile;
+  return group;
+}
+
+function enrichPlanRow(row) {
   const statCost = Number(row?.stat_cost || 0);
   const totalPayAmount = Number(row?.total_pay_amount || 0);
   const settledPayAmount = Number(row?.settled_pay_amount || 0);
   const orderCount = Number(row?.order_count || 0);
   const settledOrderCount = Number(row?.settled_order_count || 0);
   const refundAmount1h = Number(row?.refund_amount_1h || 0);
-  return {
+  const enriched = {
     ...row,
-    plan_source_text: row?.plan_source_text || (String(row?.plan_source || "").trim().toUpperCase() === "STANDARD" ? "鍩虹鎶曟斁" : "鍏ㄥ煙鎶曟斁"),
+    plan_source_text: row?.plan_source_text || (String(row?.plan_delivery_type || "").trim().toUpperCase() === "CUBIC" ? "\u4e58\u65b9\u6295\u653e" : "\u5168\u57df\u6295\u653e"),
     marketing_goal_text: row?.marketing_goal_text || row?.marketing_goal_label || row?.marketing_goal || "-",
     status_text: row?.status_text || `${row?.status || ""}/${row?.opt_status || ""}`,
     settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
@@ -782,43 +1196,20 @@ function deprecatedEnrichPlanRow(row) {
       ? Number((refundAmount1h / totalPayAmount * 100).toFixed(2))
       : Number(row?.refund_rate_1h || 0),
   };
-}
-
-function planSourceTone(source) {
-  if (source === "STANDARD") return "standard";
-  if (source === "UNI_PROMOTION") return "uni";
-  return "neutral";
-}
-
-function renderPlanSourceBadge(row) {
-  const source = String(row?.plan_source || "").trim().toUpperCase();
-  const text = row?.plan_source_text || (source === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u5168\u57df\u6295\u653e");
-  const tone = planSourceTone(source);
-  const title = source || text;
-  return `<span class="pill plan-source-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
-}
-
-function enrichPlanRow(row) {
-  const statCost = Number(row?.stat_cost || 0);
-  const totalPayAmount = Number(row?.total_pay_amount || 0);
-  const settledPayAmount = Number(row?.settled_pay_amount || 0);
-  const orderCount = Number(row?.order_count || 0);
-  const settledOrderCount = Number(row?.settled_order_count || 0);
-  const refundAmount1h = Number(row?.refund_amount_1h || 0);
+  const info = metricProfileInfo(enriched);
   return {
-    ...row,
-    plan_source_text: row?.plan_source_text || (String(row?.plan_source || "").trim().toUpperCase() === "STANDARD" ? "\u57fa\u7840\u6295\u653e" : "\u5168\u57df\u6295\u653e"),
-    marketing_goal_text: row?.marketing_goal_text || row?.marketing_goal_label || row?.marketing_goal || "-",
-    status_text: row?.status_text || `${row?.status || ""}/${row?.opt_status || ""}`,
-    settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
-    settled_order_count: settledOrderCount,
-    pay_order_cost: orderCount > 0 ? Number((statCost / orderCount).toFixed(2)) : Number(row?.pay_order_cost || 0),
-    settled_amount_rate: totalPayAmount > 0
-      ? Number((settledPayAmount / totalPayAmount * 100).toFixed(2))
-      : Number(row?.settled_amount_rate || 0),
-    refund_rate_1h: totalPayAmount > 0
-      ? Number((refundAmount1h / totalPayAmount * 100).toFixed(2))
-      : Number(row?.refund_rate_1h || 0),
+    ...enriched,
+    metric_profile: info.profile,
+    metric_profile_text: info.badgeText,
+    metric_source_text: info.sourceText,
+    metric_source_title: info.title,
+    supports_pay_amount: info.supportsPayAmount,
+    supports_total_pay_amount: info.supportsTotalPayAmount,
+    supports_pay_roi: info.supportsPayRoi,
+    supports_order_count: info.supportsOrderCount,
+    supports_pay_order_cost: info.supportsPayOrderCost,
+    supports_settled_amount_rate: info.supportsSettledAmountRate,
+    supports_refund_rate_1h: info.supportsRefundRate1h,
   };
 }
 
@@ -840,9 +1231,18 @@ function enrichMaterialRow(row) {
   const settledPayAmount = Number(row?.settled_pay_amount || 0);
   const orderCount = Number(row?.order_count || 0);
   const settledOrderCount = Number(row?.settled_order_count || 0);
+  const overallShowCount = Number(row?.overall_show_count || 0);
+  const overallClickCount = Number(row?.overall_click_count || 0);
   return {
     ...row,
+    create_time: String(row?.create_time || "").trim(),
+    product_info_text: String(row?.product_info_text || "").trim(),
     top_anchor_name: String(row?.top_anchor_name || "").trim(),
+    overall_show_count: overallShowCount,
+    overall_click_count: overallClickCount,
+    overall_ctr: overallShowCount > 0
+      ? Number((overallClickCount / overallShowCount * 100).toFixed(2))
+      : Number(row?.overall_ctr || 0),
     total_pay_amount: totalPayAmount,
     settled_pay_amount: settledPayAmount,
     settled_order_count: settledOrderCount,
@@ -900,7 +1300,24 @@ function buildAccountMetricsFromPlans(plans) {
       top_plan_name: "",
       top_plan_orders: -1,
       top_plan_pay_amount: -1,
+      _has_global_metric_profile: false,
+      _has_cubic_official_metric_profile: false,
+      _has_settled_only_metric_profile: false,
     };
+    const profile = metricProfileInfo(row).profile;
+    const source = String(row?.plan_source || "").trim().toUpperCase();
+    const deliveryType = String(row?.plan_delivery_type || "").trim().toUpperCase();
+    if (profile === "SETTLED_ONLY") {
+      group._has_settled_only_metric_profile = true;
+    } else if (profile === "MIXED") {
+      group._has_global_metric_profile = true;
+      group._has_cubic_official_metric_profile = true;
+      group._has_settled_only_metric_profile = true;
+    } else if (deliveryType === "CUBIC" && source === "UNI_CUBIC") {
+      group._has_cubic_official_metric_profile = true;
+    } else {
+      group._has_global_metric_profile = true;
+    }
     const statCost = Number(row?.stat_cost || 0);
     const payAmount = Number(row?.pay_amount || 0);
     const totalPayAmount = Number(row?.total_pay_amount || 0);
@@ -926,20 +1343,63 @@ function buildAccountMetricsFromPlans(plans) {
     }
     metrics.set(advertiserId, group);
   });
+  metrics.forEach((group) => applyAccountMetricProfile(group));
   return metrics;
+}
+
+function buildAggregateMetricProfile(rows) {
+  const group = {
+    _has_global_metric_profile: false,
+    _has_cubic_official_metric_profile: false,
+    _has_settled_only_metric_profile: false,
+  };
+  rows.forEach((row) => {
+    const info = metricProfileInfo(row);
+    const source = String(row?.plan_source || "").trim().toUpperCase();
+    const deliveryType = String(row?.plan_delivery_type || "").trim().toUpperCase();
+    if (info.profile === "SETTLED_ONLY") {
+      group._has_settled_only_metric_profile = true;
+      return;
+    }
+    if (info.profile === "MIXED") {
+      group._has_global_metric_profile = true;
+      group._has_cubic_official_metric_profile = true;
+      group._has_settled_only_metric_profile = true;
+      return;
+    }
+    if (deliveryType === "CUBIC" && source === "UNI_CUBIC") {
+      group._has_cubic_official_metric_profile = true;
+      return;
+    }
+    group._has_global_metric_profile = true;
+  });
+  return applyAccountMetricProfile(group);
+}
+
+function summarizeMetricSupports(rows) {
+  return {
+    supports_pay_amount: rows.every((row) => metricProfileInfo(row).supportsPayAmount),
+    supports_total_pay_amount: rows.every((row) => metricProfileInfo(row).supportsTotalPayAmount),
+    supports_pay_roi: rows.every((row) => metricProfileInfo(row).supportsPayRoi),
+    supports_order_count: rows.every((row) => metricProfileInfo(row).supportsOrderCount),
+    supports_pay_order_cost: rows.every((row) => metricProfileInfo(row).supportsPayOrderCost),
+    supports_settled_amount_rate: rows.every((row) => metricProfileInfo(row).supportsSettledAmountRate),
+    supports_refund_rate_1h: rows.every((row) => metricProfileInfo(row).supportsRefundRate1h),
+  };
 }
 
 function enrichAccountRow(row, accountMetrics) {
   const advertiserId = Number(row?.advertiser_id || 0);
   const metrics = accountMetrics.get(advertiserId) || {};
-  const statCost = Number(metrics.stat_cost ?? row?.stat_cost ?? 0);
-  const payAmount = Number(metrics.pay_amount ?? row?.pay_amount ?? 0);
-  const totalPayAmount = Number(metrics.total_pay_amount || 0);
-  const settledPayAmount = Number(metrics.settled_pay_amount || 0);
-  const orderCount = Number(metrics.order_count ?? row?.order_count ?? 0);
-  const settledOrderCount = Number(metrics.settled_order_count || 0);
-  const refundAmount1h = Number(metrics.refund_amount_1h || 0);
-  return {
+  const statCost = Number(row?.stat_cost ?? metrics.stat_cost ?? 0);
+  const payAmount = Number(row?.pay_amount ?? metrics.pay_amount ?? 0);
+  const totalPayAmount = Number(row?.total_pay_amount ?? metrics.total_pay_amount ?? 0);
+  const settledPayAmount = Number(row?.settled_pay_amount ?? metrics.settled_pay_amount ?? 0);
+  const orderCount = Number(row?.order_count ?? metrics.order_count ?? 0);
+  const settledOrderCount = Number(row?.settled_order_count ?? metrics.settled_order_count ?? 0);
+  const refundAmount1h = Number(row?.refund_amount_1h ?? metrics.refund_amount_1h ?? 0);
+  const planCount = Number(row?.plan_count ?? metrics.plan_count ?? 0);
+  const enriched = {
     ...row,
     stat_cost: statCost,
     pay_amount: payAmount,
@@ -948,8 +1408,8 @@ function enrichAccountRow(row, accountMetrics) {
     order_count: orderCount,
     settled_order_count: settledOrderCount,
     refund_amount_1h: refundAmount1h,
-    plan_count: Number(metrics.plan_count || 0),
-    top_plan_name: String(metrics.top_plan_name || "").trim(),
+    plan_count: planCount,
+    top_plan_name: String(row?.top_plan_name || metrics.top_plan_name || "").trim(),
     roi: statCost > 0 ? Number((payAmount / statCost).toFixed(2)) : Number(row?.roi || 0),
     settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
     pay_order_cost: orderCount > 0 ? Number((statCost / orderCount).toFixed(2)) : Number(row?.pay_order_cost || 0),
@@ -960,6 +1420,255 @@ function enrichAccountRow(row, accountMetrics) {
       ? Number((refundAmount1h / totalPayAmount * 100).toFixed(2))
       : Number(row?.refund_rate_1h || 0),
   };
+  const info = metricProfileInfo({
+    ...metrics,
+    ...enriched,
+    metric_profile: row?.metric_profile || metrics.metric_profile,
+    metric_profile_text: row?.metric_profile_text || metrics.metric_profile_text,
+    metric_source_text: row?.metric_source_text || metrics.metric_source_text,
+    metric_source_title: row?.metric_source_title || metrics.metric_source_title,
+  });
+  return {
+    ...enriched,
+    metric_profile: info.profile,
+    metric_profile_text: info.badgeText,
+    metric_source_text: info.sourceText,
+    metric_source_title: info.title,
+    supports_pay_amount: info.supportsPayAmount,
+    supports_total_pay_amount: info.supportsTotalPayAmount,
+    supports_pay_roi: info.supportsPayRoi,
+    supports_order_count: info.supportsOrderCount,
+    supports_pay_order_cost: info.supportsPayOrderCost,
+    supports_settled_amount_rate: info.supportsSettledAmountRate,
+    supports_refund_rate_1h: info.supportsRefundRate1h,
+  };
+}
+
+function buildAccountAggregateRow(rows) {
+  if (!rows.length) return null;
+  const aggregateProfile = buildAggregateMetricProfile(rows);
+  const aggregate = enrichAccountRow({
+    advertiser_id: 0,
+    advertiser_name: "全量聚合",
+    top_plan_name: `共 ${rows.length} 个账户`,
+    stat_cost: rows.reduce((sum, row) => sum + Number(row?.stat_cost || 0), 0),
+    pay_amount: rows.reduce((sum, row) => sum + Number(row?.pay_amount || 0), 0),
+    total_pay_amount: rows.reduce((sum, row) => sum + Number(row?.total_pay_amount || 0), 0),
+    settled_pay_amount: rows.reduce((sum, row) => sum + Number(row?.settled_pay_amount || 0), 0),
+    order_count: rows.reduce((sum, row) => sum + Number(row?.order_count || 0), 0),
+    settled_order_count: rows.reduce((sum, row) => sum + Number(row?.settled_order_count || 0), 0),
+    refund_amount_1h: rows.reduce((sum, row) => sum + Number(row?.refund_amount_1h || 0), 0),
+    plan_count: rows.reduce((sum, row) => sum + Number(row?.plan_count || 0), 0),
+    ok: true,
+    error: "",
+    metric_profile: aggregateProfile.metric_profile,
+    metric_profile_text: "全量聚合",
+    metric_source_text: "当前范围账户汇总",
+    metric_source_title: "当前范围内全部账户聚合结果",
+  }, new Map());
+  return {
+    ...aggregate,
+    ...summarizeMetricSupports(rows),
+    isAggregate: true,
+    status_text: "聚合",
+  };
+}
+
+function buildPlanAggregateRow(rows) {
+  if (!rows.length) return null;
+  const aggregateProfile = buildAggregateMetricProfile(rows);
+  const aggregate = enrichPlanRow({
+    advertiser_id: 0,
+    advertiser_name: "全部账户",
+    ad_id: 0,
+    ad_name: "全量聚合",
+    product_id: "",
+    product_name: `共 ${rows.length} 个计划`,
+    anchor_name: "",
+    marketing_goal: "",
+    status: "",
+    opt_status: "",
+    roi_goal: 0,
+    stat_cost: rows.reduce((sum, row) => sum + Number(row?.stat_cost || 0), 0),
+    roi: 0,
+    order_count: rows.reduce((sum, row) => sum + Number(row?.order_count || 0), 0),
+    pay_amount: rows.reduce((sum, row) => sum + Number(row?.pay_amount || 0), 0),
+    total_pay_amount: rows.reduce((sum, row) => sum + Number(row?.total_pay_amount || 0), 0),
+    settled_pay_amount: rows.reduce((sum, row) => sum + Number(row?.settled_pay_amount || 0), 0),
+    settled_roi: 0,
+    settled_order_count: rows.reduce((sum, row) => sum + Number(row?.settled_order_count || 0), 0),
+    pay_order_cost: 0,
+    settled_amount_rate: 0,
+    refund_rate_1h: 0,
+    refund_amount_1h: rows.reduce((sum, row) => sum + Number(row?.refund_amount_1h || 0), 0),
+    plan_source: "UNI_PROMOTION",
+    plan_delivery_type: "GLOBAL",
+    metric_profile: aggregateProfile.metric_profile,
+    metric_profile_text: "全量聚合",
+    metric_source_text: "当前范围计划汇总",
+    metric_source_title: "当前范围内全部计划聚合结果",
+  });
+  return {
+    ...aggregate,
+    ...summarizeMetricSupports(rows),
+    isAggregate: true,
+    status_text: "聚合",
+  };
+}
+
+function productKeyForItem(item) {
+  const productId = String(item?.product_id || "").trim();
+  const productName = String(item?.product_name || "").trim();
+  if (productId) return `id:${productId}`;
+  if (productName) return `name:${productName}`;
+  return "unlinked";
+}
+
+function buildPlanRelationItems(plans) {
+  return plans
+    .map((row) => enrichPlanRow(row))
+    .sort((left, right) => {
+      const orderDelta = Number(right.order_count || 0) - Number(left.order_count || 0);
+      if (orderDelta) return orderDelta;
+      const payDelta = Number(right.pay_amount || 0) - Number(left.pay_amount || 0);
+      if (payDelta) return payDelta;
+      const costDelta = Number(right.stat_cost || 0) - Number(left.stat_cost || 0);
+      if (costDelta) return costDelta;
+      return Number(left.ad_id || 0) - Number(right.ad_id || 0);
+    });
+}
+
+function buildAccountRelationItemsFromPlans(plans) {
+  const groups = new Map();
+  plans.map((row) => enrichPlanRow(row)).forEach((row) => {
+    const advertiserId = Number(row?.advertiser_id || 0);
+    if (!advertiserId) return;
+    const group = groups.get(advertiserId) || {
+      advertiser_id: advertiserId,
+      advertiser_name: String(row?.advertiser_name || "").trim(),
+      stat_cost: 0,
+      pay_amount: 0,
+      order_count: 0,
+      plan_count: 0,
+      top_plan_name: "",
+      top_plan_orders: -1,
+      top_plan_pay_amount: -1,
+      _has_global_metric_profile: false,
+      _has_cubic_official_metric_profile: false,
+      _has_settled_only_metric_profile: false,
+    };
+    const profile = metricProfileInfo(row).profile;
+    const source = String(row?.plan_source || "").trim().toUpperCase();
+    const deliveryType = String(row?.plan_delivery_type || "").trim().toUpperCase();
+    if (profile === "SETTLED_ONLY") {
+      group._has_settled_only_metric_profile = true;
+    } else if (profile === "MIXED") {
+      group._has_global_metric_profile = true;
+      group._has_cubic_official_metric_profile = true;
+      group._has_settled_only_metric_profile = true;
+    } else if (deliveryType === "CUBIC" && source === "UNI_CUBIC") {
+      group._has_cubic_official_metric_profile = true;
+    } else {
+      group._has_global_metric_profile = true;
+    }
+    const statCost = Number(row?.stat_cost || 0);
+    const payAmount = Number(row?.pay_amount || 0);
+    const orderCount = Number(row?.order_count || 0);
+    group.stat_cost = Number((group.stat_cost + statCost).toFixed(2));
+    group.pay_amount = Number((group.pay_amount + payAmount).toFixed(2));
+    group.order_count += orderCount;
+    group.plan_count += 1;
+    if (
+      orderCount > group.top_plan_orders
+      || (orderCount === group.top_plan_orders && payAmount > group.top_plan_pay_amount)
+    ) {
+      group.top_plan_name = String(row?.ad_name || "").trim();
+      group.top_plan_orders = orderCount;
+      group.top_plan_pay_amount = payAmount;
+    }
+    groups.set(advertiserId, group);
+  });
+  groups.forEach((group) => applyAccountMetricProfile(group));
+  return [...groups.values()].sort((left, right) => {
+    const costDelta = Number(right.stat_cost || 0) - Number(left.stat_cost || 0);
+    if (costDelta) return costDelta;
+    const planDelta = Number(right.plan_count || 0) - Number(left.plan_count || 0);
+    if (planDelta) return planDelta;
+    const orderDelta = Number(right.order_count || 0) - Number(left.order_count || 0);
+    if (orderDelta) return orderDelta;
+    return Number(left.advertiser_id || 0) - Number(right.advertiser_id || 0);
+  });
+}
+
+function loadedPlanLookup() {
+  const lookup = new Map();
+  Object.values(state.rangePayloads || {}).forEach((payload) => {
+    (payload?.plans || []).forEach((row) => {
+      const plan = enrichPlanRow(row);
+      const adId = Number(plan.ad_id || 0);
+      if (!adId || lookup.has(adId)) return;
+      lookup.set(adId, plan);
+    });
+  });
+  return lookup;
+}
+
+function loadedAccountLookup() {
+  const lookup = new Map();
+  Object.values(state.rangePayloads || {}).forEach((payload) => {
+    (payload?.accounts || []).forEach((row) => {
+      const advertiserId = Number(row?.advertiser_id || 0);
+      if (!advertiserId || lookup.has(advertiserId)) return;
+      lookup.set(advertiserId, row);
+    });
+  });
+  (state.catalogAccounts || []).forEach((row) => {
+    const advertiserId = Number(row?.advertiser_id || 0);
+    if (!advertiserId || lookup.has(advertiserId)) return;
+    lookup.set(advertiserId, row);
+  });
+  return lookup;
+}
+
+function resolvePlanRelationItemsByIds(planIds) {
+  const lookup = loadedPlanLookup();
+  const uniquePlanIds = [...new Set((planIds || []).map((item) => Number(item || 0)).filter((item) => item > 0))];
+  return uniquePlanIds
+    .map((planId) => {
+      const plan = lookup.get(planId);
+      if (plan) return enrichPlanRow(plan);
+      return {
+        ad_id: planId,
+        ad_name: "",
+        advertiser_name: "",
+      };
+    })
+    .sort((left, right) => Number(left.ad_id || 0) - Number(right.ad_id || 0));
+}
+
+function resolveAccountRelationItemsByIds(advertiserIds) {
+  const lookup = loadedAccountLookup();
+  const uniqueAdvertiserIds = [...new Set((advertiserIds || []).map((item) => Number(item || 0)).filter((item) => item > 0))];
+  return uniqueAdvertiserIds
+    .map((advertiserId) => {
+      const row = lookup.get(advertiserId);
+      if (row) {
+        return {
+          advertiser_id: advertiserId,
+          advertiser_name: String(row.advertiser_name || "").trim(),
+          plan_count: row.plan_count,
+          stat_cost: row.stat_cost,
+          pay_amount: row.pay_amount,
+          order_count: row.order_count,
+          top_plan_name: String(row.top_plan_name || "").trim(),
+        };
+      }
+      return {
+        advertiser_id: advertiserId,
+        advertiser_name: "",
+      };
+    })
+    .sort((left, right) => Number(left.advertiser_id || 0) - Number(right.advertiser_id || 0));
 }
 
 function formatMaterialTotalPayAmount(row) {
@@ -1058,6 +1767,135 @@ function describeNotificationTarget(settings) {
   return { label: "已配置目标", detail: "当前渠道已经设置接收对象。" };
 }
 
+function notificationTargetPlaceholder(channel) {
+  if (channel === "feishu") return "填写群会话 ID、成员 open_id，或机器人目标";
+  if (channel === "dingtalk") return "填写钉钉机器人 webhook 或群目标";
+  if (channel === "wechat") return "填写企业微信机器人或接收对象标识";
+  return "填写接收对象标识";
+}
+
+function renderNotificationGuide(settings) {
+  if (!notificationGuide) return;
+  const channel = String(settings?.channel || "feishu");
+  const target = String(settings?.target || "").trim();
+  const enabled = Boolean(settings?.enabled);
+  const alertEnabled = Boolean(settings?.alert_enabled);
+  const steps = [
+    enabled ? "1. 外发已开启" : "1. 先决定是否开启外发",
+    `2. 当前渠道：${channelLabel(channel)}`,
+    target ? "3. 已配置接收目标" : "3. 还没配置接收目标",
+    alertEnabled ? `4. 阈值告警每批 ${formatNumber(settings?.alert_batch_size || 6)} 条` : "4. 当前只保留页面提醒",
+  ];
+  notificationGuide.innerHTML = `
+    <div class="signal-channel-guide-head">
+      <strong>${enabled ? "通知已进入可外发状态" : "通知仍处于页面内提醒模式"}</strong>
+      <span>${notificationTargetPlaceholder(channel)}</span>
+    </div>
+    <div class="signal-channel-guide-steps">
+      ${steps.map((item) => `<span class="signal-guide-pill">${escapeHtml(item)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function syncNotificationFormFields() {
+  if (!notificationForm) return;
+  const enabledInput = notificationForm.querySelector('input[name="enabled"]');
+  const alertEnabledInput = notificationForm.querySelector('input[name="alert_enabled"]');
+  const channelSelect = notificationForm.querySelector('select[name="channel"]');
+  const targetInput = notificationForm.querySelector('input[name="target"]');
+  const accountInput = notificationForm.querySelector('input[name="account"]');
+  const batchInput = notificationForm.querySelector('input[name="alert_batch_size"]');
+  const channel = String(channelSelect?.value || "feishu");
+  const enabled = Boolean(enabledInput?.checked);
+  const alertEnabled = Boolean(alertEnabledInput?.checked);
+  if (targetInput) {
+    targetInput.placeholder = notificationTargetPlaceholder(channel);
+  }
+  if (batchInput) {
+    batchInput.disabled = !enabled || !alertEnabled;
+  }
+  if (accountInput) {
+    accountInput.placeholder = enabled ? "default" : "通知关闭时可先留空";
+  }
+  renderNotificationGuide({
+    enabled,
+    alert_enabled: alertEnabled,
+    channel,
+    target: targetInput?.value || "",
+    alert_batch_size: Number(batchInput?.value || 6),
+  });
+}
+
+function renderRulePreview() {
+  if (!rulePreviewCard || !ruleForm) return;
+  const form = new FormData(ruleForm);
+  const entityType = String(form.get("entity_type") || "plan");
+  const metric = String(form.get("metric") || "");
+  const operator = String(form.get("operator") || "lt");
+  const threshold = String(form.get("threshold") || "").trim();
+  const cooldownMinutes = String(form.get("cooldown_minutes") || "60").trim() || "60";
+  const minSpend = String(form.get("min_spend") || "0").trim() || "0";
+  const enabled = form.get("enabled") === "on";
+  const targetId = String(form.get("target_id") || "").trim();
+  const targetSearchValue = String(ruleTargetSearchInput?.value || "").trim();
+  const config = ruleEntityConfig(entityType);
+  const targetLabel = targetId
+    ? targetDisplayLabel(entityType, targetId)
+    : targetSearchValue
+      ? `${targetSearchValue}（待确认）`
+      : "全部对象";
+  const thresholdLabel = threshold
+    ? `${metricLabel(metric)} ${operatorLabel(operator)} ${threshold}`
+    : `等待填写${metricLabel(metric)}阈值`;
+  const spendLabel = config.supportsMinSpend ? `最低消耗 ${formatMoney(minSpend)}` : "无需最低消耗门槛";
+  rulePreviewCard.innerHTML = `
+    <div class="signal-rule-preview-head">
+      <div>
+        <span class="signal-rule-preview-label">${state.editingRuleId ? "编辑预览" : "新增预览"}</span>
+        <strong>${escapeHtml(entityLabel(entityType))} · ${escapeHtml(metricLabel(metric))}</strong>
+      </div>
+      <span class="signal-rule-preview-badge ${enabled ? "on" : "off"}">${enabled ? "启用后立即生效" : "保存后保持关闭"}</span>
+    </div>
+    <div class="signal-rule-preview-body">
+      <div class="signal-rule-preview-item">
+        <span>作用对象</span>
+        <strong>${escapeHtml(targetLabel)}</strong>
+      </div>
+      <div class="signal-rule-preview-item">
+        <span>触发条件</span>
+        <strong>${escapeHtml(thresholdLabel)}</strong>
+      </div>
+      <div class="signal-rule-preview-item">
+        <span>冷却周期</span>
+        <strong>${escapeHtml(cooldownMinutes)} 分钟</strong>
+      </div>
+      <div class="signal-rule-preview-item">
+        <span>补充限制</span>
+        <strong>${escapeHtml(spendLabel)}</strong>
+      </div>
+    </div>
+  `;
+}
+
+function filteredAlertRules(rules) {
+  const status = String(ruleStatusFilter?.value || "all");
+  const query = String(ruleSearchInput?.value || "").trim().toLowerCase();
+  return (rules || []).filter((rule) => {
+    const enabled = Boolean(rule?.enabled);
+    if (status === "enabled" && !enabled) return false;
+    if (status === "disabled" && enabled) return false;
+    if (!query) return true;
+    const haystack = [
+      entityLabel(rule?.entity_type),
+      metricLabel(rule?.metric),
+      targetDisplayLabel(rule?.entity_type, rule?.target_id),
+      String(rule?.note || ""),
+      String(rule?.threshold ?? ""),
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
 function renderNotificationSettings(settings) {
   const channelSelect = notificationForm.querySelector('select[name="channel"]');
   const channelValue = String(settings?.channel || "feishu");
@@ -1082,6 +1920,8 @@ function renderNotificationSettings(settings) {
     </div>
     <p class="notify-inline-copy">${escapeHtml(targetInfo.detail)} ${settings?.alert_enabled ? `当前每批发送 ${formatNumber(settings?.alert_batch_size || 6)} 条阈值告警。` : "当前只保留页面内提醒，外发可后续开启。"} </p>
   `;
+  notificationStatus.dataset.tone = "neutral";
+  syncNotificationFormFields();
 }
 
 function renderSignalOverview(settings, rules) {
@@ -1099,7 +1939,7 @@ function renderSignalOverview(settings, rules) {
       <span class="signal-summary-sub">${escapeHtml(channelLabel(settings?.channel || "-"))} / ${escapeHtml(targetInfo.label)}</span>
     </article>
     <article class="signal-summary-card">
-      <span class="signal-summary-label">规则</span>
+      <span class="signal-summary-label">启用规则</span>
       <strong class="mono">${formatNumber(enabledRules)}</strong>
       <span class="signal-summary-sub">共 ${formatNumber(totalRules)} 条 · 计划 ${formatNumber(planRules)} · 账户 ${formatNumber(accountRules)}</span>
     </article>
@@ -1122,10 +1962,103 @@ function normalizeRangeKey(value) {
 
 function performanceFilterKey(filter) {
   const normalized = normalizeRangeFilter(filter);
+  const prefix = requestDisplayScope();
   if (normalized.mode === "custom") {
-    return `custom:${normalized.start}:${normalized.end}`;
+    return `${prefix}:custom:${normalized.start}:${normalized.end}`;
   }
-  return normalized.mode;
+  return `${prefix}:${normalized.mode}`;
+}
+
+function normalizePerformanceSectionKey(sectionKey) {
+  const normalized = String(sectionKey || "").trim();
+  return Object.prototype.hasOwnProperty.call(PERFORMANCE_SECTION_CONFIG, normalized) ? normalized : "";
+}
+
+function performancePayloadKey(filter, sectionKey = "") {
+  const normalizedSectionKey = normalizePerformanceSectionKey(sectionKey);
+  return `${performanceFilterKey(filter)}:${normalizedSectionKey || "all"}`;
+}
+
+function performanceServerQueryState(sectionKey = "") {
+  const normalizedSectionKey = normalizePerformanceSectionKey(sectionKey);
+  if (normalizedSectionKey === "account") {
+    return {
+      page: Math.max(1, Number(state.accountPage) || 1),
+      pageSize: ACCOUNT_PAGE_SIZE,
+      sortKey: String(state.accountSort?.key || "stat_cost"),
+      sortDir: String(state.accountSort?.dir || "desc"),
+      search: String(accountSearch?.value || "").trim(),
+      accountFilter: "",
+    };
+  }
+  if (normalizedSectionKey === "plan") {
+    return {
+      page: Math.max(1, Number(state.planPage) || 1),
+      pageSize: PLAN_PAGE_SIZE,
+      sortKey: String(state.planSort?.key || "order_count"),
+      sortDir: String(state.planSort?.dir || "desc"),
+      search: String(planSearch?.value || "").trim(),
+      accountFilter: String(planAccountFilter?.value || "").trim(),
+    };
+  }
+  return {
+    page: 1,
+    pageSize: 0,
+    sortKey: "",
+    sortDir: "desc",
+    search: "",
+    accountFilter: "",
+  };
+}
+
+function performancePayloadSignature(sectionKey = "") {
+  const normalizedSectionKey = normalizePerformanceSectionKey(sectionKey);
+  if (!normalizedSectionKey || normalizedSectionKey === "breakdown") {
+    return normalizedSectionKey || "all";
+  }
+  const query = performanceServerQueryState(normalizedSectionKey);
+  return JSON.stringify([
+    normalizedSectionKey,
+    query.page,
+    query.pageSize,
+    query.sortKey,
+    query.sortDir,
+    query.search,
+    query.accountFilter,
+  ]);
+}
+
+function materialServerQueryState(sectionKey = "material") {
+  const normalizedSectionKey = String(sectionKey || "").trim() === "teamMaterial" ? "teamMaterial" : "material";
+  if (normalizedSectionKey === "teamMaterial") {
+    return {
+      page: Math.max(1, Number(state.teamMaterialPage) || 1),
+      pageSize: MATERIAL_PAGE_SIZE,
+      sortKey: String(state.teamMaterialSort?.key || "stat_cost"),
+      sortDir: String(state.teamMaterialSort?.dir || "desc"),
+      search: String(teamMaterialSearch?.value || "").trim(),
+    };
+  }
+  return {
+    page: Math.max(1, Number(state.materialPage) || 1),
+    pageSize: MATERIAL_PAGE_SIZE,
+    sortKey: String(state.materialSort?.key || "stat_cost"),
+    sortDir: String(state.materialSort?.dir || "desc"),
+    search: String(materialSearch?.value || "").trim(),
+  };
+}
+
+function materialPayloadSignature(sectionKey = "material") {
+  const normalizedSectionKey = String(sectionKey || "").trim() === "teamMaterial" ? "teamMaterial" : "material";
+  const query = materialServerQueryState(normalizedSectionKey);
+  return JSON.stringify([
+    normalizedSectionKey,
+    query.page,
+    query.pageSize,
+    query.sortKey,
+    query.sortDir,
+    query.search,
+  ]);
 }
 
 function sectionFilter(sectionKey) {
@@ -1168,14 +2101,38 @@ function setRangeEditorOpen(sectionKey, open) {
   state.rangeEditorOpen[sectionKey] = Boolean(open);
 }
 
+function ensureRangeEditorDraft(sectionKey) {
+  const existing = state.rangeEditorDrafts[sectionKey];
+  if (existing) return existing;
+  const filter = sectionFilter(sectionKey);
+  const seeded = {
+    start: String(filter.start || ""),
+    end: String(filter.end || ""),
+  };
+  state.rangeEditorDrafts[sectionKey] = seeded;
+  return seeded;
+}
+
+function setRangeEditorDraftValue(sectionKey, field, value) {
+  const current = ensureRangeEditorDraft(sectionKey);
+  current[field] = String(value || "");
+  state.rangeEditorDrafts[sectionKey] = current;
+}
+
+function clearRangeEditorDraft(sectionKey) {
+  delete state.rangeEditorDrafts[sectionKey];
+}
+
 function syncSectionRangeControls(sectionKey) {
   const config = PERFORMANCE_SECTION_CONFIG[sectionKey];
   if (!config) return;
   const filter = sectionFilter(sectionKey);
   renderRangeSwitch(config.switchEl, filter.mode);
   const customInline = config.startEl?.closest(".custom-date-inline");
+  const editorOpen = filter.mode === "custom" || Boolean(state.rangeEditorOpen[sectionKey]);
+  const draft = editorOpen ? ensureRangeEditorDraft(sectionKey) : null;
   if (customInline) {
-    const expanded = filter.mode === "custom" || Boolean(state.rangeEditorOpen[sectionKey]);
+    const expanded = editorOpen;
     customInline.classList.toggle("active", filter.mode === "custom");
     customInline.classList.toggle("expanded", expanded);
     const toggle = customInline.querySelector('[data-role="custom-range-toggle"]');
@@ -1183,8 +2140,10 @@ function syncSectionRangeControls(sectionKey) {
       toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
     }
   }
-  if (config.startEl && document.activeElement !== config.startEl) config.startEl.value = filter.start || "";
-  if (config.endEl && document.activeElement !== config.endEl) config.endEl.value = filter.end || "";
+  const startValue = draft ? String(draft.start || "") : String(filter.start || "");
+  const endValue = draft ? String(draft.end || "") : String(filter.end || "");
+  if (config.startEl && document.activeElement !== config.startEl) config.startEl.value = startValue;
+  if (config.endEl && document.activeElement !== config.endEl) config.endEl.value = endValue;
 }
 
 function formatDateWindowMeta(payload) {
@@ -1209,12 +2168,50 @@ function formatDateWindowMeta(payload) {
   return `统计范围：${label} · ${payload.window_start} - ${payload.window_end}${backfillHint}`;
 }
 
-function rangePayload(filter) {
-  return state.rangePayloads[performanceFilterKey(filter)] || null;
+function rangePayload(filter, sectionKey = "") {
+  const normalizedSectionKey = normalizePerformanceSectionKey(sectionKey);
+  if (normalizedSectionKey) {
+    return (
+      state.rangePayloads[performancePayloadKey(filter, normalizedSectionKey)]
+      || state.rangePayloads[performancePayloadKey(filter, "all")]
+      || null
+    );
+  }
+  return (
+    state.rangePayloads[performancePayloadKey(filter, "all")]
+    || state.rangePayloads[performancePayloadKey(filter, "account")]
+    || state.rangePayloads[performancePayloadKey(filter, "plan")]
+    || state.rangePayloads[performancePayloadKey(filter, "breakdown")]
+    || null
+  );
 }
 
 function materialRangePayload(filter) {
   return state.materialPayloads[performanceFilterKey(filter)] || null;
+}
+
+function teamMaterialRangePayload(filter) {
+  return state.teamMaterialPayloads[performanceFilterKey(filter)] || null;
+}
+
+function commentRequestAdvertiserId() {
+  return Number(commentAccountFilter?.value || 0) || 0;
+}
+
+function commentCacheKey(filter, advertiserId = commentRequestAdvertiserId()) {
+  return `${performanceFilterKey(filter)}:${Number(advertiserId || 0)}`;
+}
+
+function commentRangePayload(filter, advertiserId = commentRequestAdvertiserId()) {
+  return state.commentPayloads[commentCacheKey(filter, advertiserId)] || null;
+}
+
+function performanceSectionForView(view = state.activeView) {
+  return PERFORMANCE_VIEW_SECTION_MAP[String(view || "").trim()] || "";
+}
+
+function isPageVisible() {
+  return document.visibilityState !== "hidden";
 }
 
 function latestMaterialSnapshotToken() {
@@ -1223,6 +2220,14 @@ function latestMaterialSnapshotToken() {
 
 function materialRowsForCurrentFilter() {
   return (materialRangePayload(sectionFilter("material"))?.items || []).map((row) => enrichMaterialRow(row));
+}
+
+function teamMaterialRowsForCurrentFilter() {
+  return (teamMaterialRangePayload(sectionFilter("teamMaterial"))?.items || []).map((row) => enrichMaterialRow(row));
+}
+
+function commentRowsForCurrentFilter() {
+  return commentRangePayload(sectionFilter("comment"))?.items || [];
 }
 
 function rangeLabel(filter) {
@@ -1250,7 +2255,13 @@ function uploadScopeLabel(scope) {
 function normalizeUploadJobNote(note) {
   const text = String(note || "").trim();
   if (!text) return "--";
-  if (text.includes("/local/file/video/upload/ permission")) {
+  if (text.includes("permission") && text.includes("/file/video/ad/get/")) {
+    return "当前应用缺少 /file/video/ad/get/ 权限。视频上传本身可能已成功，但系统无法查询视频封面并自动补齐图片素材。";
+  }
+  if (
+    text.includes("permission") &&
+    (text.includes("/local/file/video/upload/") || text.includes("/file/video/ad/"))
+  ) {
     return "当前应用还没有该广告主的视频上传权限，请先补齐应用授权或接口权限。";
   }
   return text;
@@ -1282,6 +2293,17 @@ function canRetryUploadJob(item) {
 
 function uploadRetryButtonLabel(item) {
   return Number(state.uploadRetryingJobId || 0) === Number(item?.id || 0) ? "重试中..." : "重试失败项";
+}
+
+function canDeleteUploadJob(item) {
+  const status = String(item?.status || "").trim().toLowerCase();
+  return status !== "queued" && status !== "running";
+}
+
+function uploadDeleteButtonLabel(item) {
+  return Number(state.uploadDeletingJobId || 0) === Number(item?.id || 0)
+    ? "\u5220\u9664\u4e2d..."
+    : "\u5220\u9664\u8bb0\u5f55";
 }
 
 function uploadFailureStageLabel(stage) {
@@ -1431,9 +2453,20 @@ function renderUploadJobTable() {
           <td>${escapeHtml(item.created_at || "--")}</td>
           <td>${renderUploadJobNote(item)}</td>
           <td>
-            ${canRetryUploadJob(item)
-              ? `<button type="button" class="button ghost compact" data-action="retry-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadRetryButtonLabel(item))}</button>`
-              : '<span class="cell-subitem">--</span>'}
+            ${(() => {
+              const actions = [];
+              if (canRetryUploadJob(item)) {
+                actions.push(
+                  `<button type="button" class="button ghost compact" data-action="retry-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) || Number(state.uploadDeletingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadRetryButtonLabel(item))}</button>`,
+                );
+              }
+              if (canDeleteUploadJob(item)) {
+                actions.push(
+                  `<button type="button" class="button ghost danger compact" data-action="delete-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadDeletingJobId || 0) === Number(item.id || 0) || Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadDeleteButtonLabel(item))}</button>`,
+                );
+              }
+              return actions.length ? `<div class="upload-job-actions">${actions.join("")}</div>` : '<span class="cell-subitem">--</span>';
+            })()}
           </td>
         </tr>
       `).join("")}
@@ -1500,10 +2533,137 @@ async function retryUploadJob(jobId) {
       `已创建重试任务 #${payload.id}，来源任务 #${payload.source_job_id || normalizedJobId}。`,
       "success",
     );
-    await fetchUploadJobs();
+    await fetchUploadJobs(true);
   } finally {
     state.uploadRetryingJobId = null;
     renderUploadJobTable();
+  }
+}
+
+async function deleteUploadJob(jobId) {
+  const normalizedJobId = Number(jobId || 0);
+  if (!normalizedJobId || state.uploadDeletingJobId === normalizedJobId) return;
+  const job = (state.uploadJobs || []).find((item) => Number(item?.id || 0) === normalizedJobId);
+  if (!job) return;
+  if (!canDeleteUploadJob(job)) {
+    window.alert("\u5f53\u524d\u4efb\u52a1\u4ecd\u5728\u6267\u884c\u4e2d\uff0c\u5b8c\u6210\u540e\u624d\u80fd\u5220\u9664\u8bb0\u5f55\u3002");
+    return;
+  }
+  if (
+    !window.confirm(
+      `\u786e\u8ba4\u5220\u9664\u4efb\u52a1 #${normalizedJobId} \u7684\u8bb0\u5f55\u5417\uff1f\u8fd9\u4f1a\u540c\u65f6\u79fb\u9664\u8be5\u4efb\u52a1\u7684\u6700\u8fd1\u4efb\u52a1\u660e\u7ec6\u3002`,
+    )
+  ) {
+    return;
+  }
+  state.uploadDeletingJobId = normalizedJobId;
+  renderUploadJobTable();
+  setInlineFeedback(
+    uploadJobStatus,
+    `\u6b63\u5728\u5220\u9664\u4efb\u52a1 #${normalizedJobId} \u7684\u8bb0\u5f55...`,
+    "neutral",
+  );
+  try {
+    const response = await fetch(`/api/upload/jobs/${encodeURIComponent(String(normalizedJobId))}`, { method: "DELETE" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(payload.detail || "\u5220\u9664\u4e0a\u4f20\u4efb\u52a1\u8bb0\u5f55\u5931\u8d25");
+      setInlineFeedback(uploadJobStatus, "\u5220\u9664\u4e0a\u4f20\u4efb\u52a1\u8bb0\u5f55\u5931\u8d25\u3002", "warn");
+      return;
+    }
+    state.uploadJobs = (state.uploadJobs || []).filter((item) => Number(item?.id || 0) !== normalizedJobId);
+    renderUploadJobTable();
+    setInlineFeedback(
+      uploadJobStatus,
+      `\u5df2\u5220\u9664\u4efb\u52a1 #${normalizedJobId} \u7684\u8bb0\u5f55\u3002`,
+      "success",
+    );
+  } finally {
+    state.uploadDeletingJobId = null;
+    renderUploadJobTable();
+  }
+}
+
+// Override the legacy upload loaders with TTL and in-flight dedupe.
+async function fetchUploadTargets(force = false) {
+  if (!canUseUploadModule()) return null;
+  const scope = String(uploadScopeSelect?.value || "plan");
+  const query = String(uploadKeywordInput?.value || "").trim();
+  const requestKey = `${scope}:${query}`;
+  if (
+    !force
+    && state.uploadTargets
+    && state.uploadTargets.scope === scope
+    && state.uploadTargets.query === query
+    && hasFreshClientCache(state.uploadTargetsFetchedAt, UPLOAD_TARGETS_CACHE_TTL_MS)
+  ) {
+    renderUploadTargetTable();
+    return state.uploadTargets;
+  }
+  if (state.uploadTargetsRequestPromise && state.uploadTargetsRequestKey === requestKey) {
+    return state.uploadTargetsRequestPromise;
+  }
+  const requestPromise = (async () => {
+    setInlineFeedback(uploadTargetMeta, `Loading ${uploadScopeLabel(scope)} targets...`, "neutral");
+    const params = new URLSearchParams({ scope, q: query });
+    const response = await fetch(`/api/upload/targets?${params.toString()}`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      window.alert(payload.detail || "鍔犺浇涓婁紶鐩爣澶辫触");
+      return state.uploadTargets;
+    }
+    state.uploadTargets = await response.json();
+    state.uploadTargetsFetchedAt = Date.now();
+    state.uploadSelectedPlanIds = [];
+    if (uploadSelectAll) uploadSelectAll.checked = false;
+    renderUploadTargetTable();
+    setInlineFeedback(
+      uploadTargetMeta,
+      `Matched ${formatNumber(state.uploadTargets.plan_count || 0)} plans across ${formatNumber(state.uploadTargets.account_count || 0)} accounts.`,
+      "success",
+    );
+    return state.uploadTargets;
+  })();
+  state.uploadTargetsRequestKey = requestKey;
+  state.uploadTargetsRequestPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    if (state.uploadTargetsRequestPromise === requestPromise) {
+      state.uploadTargetsRequestPromise = null;
+      state.uploadTargetsRequestKey = "";
+    }
+  }
+}
+
+async function fetchUploadJobs(force = false) {
+  if (!canUseUploadModule()) return [];
+  if (!force && hasFreshClientCache(state.uploadJobsFetchedAt, UPLOAD_JOBS_FETCH_MIN_INTERVAL_MS)) {
+    return state.uploadJobs;
+  }
+  if (state.uploadJobsRequestPromise) {
+    return state.uploadJobsRequestPromise;
+  }
+  const requestPromise = (async () => {
+    const response = await fetch("/api/upload/jobs");
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      window.alert(payload.detail || "鍔犺浇涓婁紶浠诲姟澶辫触");
+      return state.uploadJobs;
+    }
+    const payload = await response.json();
+    state.uploadJobs = payload.items || [];
+    state.uploadJobsFetchedAt = Date.now();
+    renderUploadJobTable();
+    return state.uploadJobs;
+  })();
+  state.uploadJobsRequestPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    if (state.uploadJobsRequestPromise === requestPromise) {
+      state.uploadJobsRequestPromise = null;
+    }
   }
 }
 
@@ -1628,29 +2788,31 @@ function renderOverviewHero(latest) {
         ${pillMarkup}
       </div>
     </div>
-    <div class="overview-hero-metrics">
-      <article class="overview-hero-metric">
-        <span>今日消耗</span>
-        <strong class="mono">${formatMoney(summary.stat_cost)}</strong>
-      </article>
-      <article class="overview-hero-metric">
-        <span>支付金额</span>
-        <strong class="mono">${formatMoney(summary.pay_amount)}</strong>
-      </article>
-      <article class="overview-hero-metric">
-        <span>订单数</span>
-        <strong class="mono">${formatNumber(summary.order_count)}</strong>
-      </article>
-      <article class="overview-hero-metric accent">
-        <span>整体 ROI</span>
-        <strong class="mono">${formatRate(summary.roi)}</strong>
-      </article>
-    </div>
-    <div class="overview-hero-foot">
-      <div class="overview-foot-stat"><span>活跃账户</span><strong class="mono">${formatNumber(summary.active_account_count)}</strong></div>
-      <div class="overview-foot-stat"><span>活跃计划</span><strong class="mono">${formatNumber(summary.active_plan_count)}</strong></div>
-      <div class="overview-foot-stat"><span>活跃商品</span><strong class="mono">${formatNumber(summary.active_product_count)}</strong></div>
-      <div class="overview-foot-stat"><span>活跃${escapeHtml(teamLabel)}</span><strong class="mono">${activeTeamCount}</strong></div>
+    <div class="overview-hero-stage">
+      <div class="overview-hero-metrics">
+        <article class="overview-hero-metric">
+          <span>今日消耗</span>
+          <strong class="mono">${formatMoney(summary.stat_cost)}</strong>
+        </article>
+        <article class="overview-hero-metric">
+          <span>支付金额</span>
+          <strong class="mono">${formatMoney(summary.pay_amount)}</strong>
+        </article>
+        <article class="overview-hero-metric">
+          <span>订单数</span>
+          <strong class="mono">${formatNumber(summary.order_count)}</strong>
+        </article>
+        <article class="overview-hero-metric accent">
+          <span>整体 ROI</span>
+          <strong class="mono">${formatRate(summary.roi)}</strong>
+        </article>
+      </div>
+      <div class="overview-hero-foot">
+        <div class="overview-foot-stat"><span>活跃账户</span><strong class="mono">${formatNumber(summary.active_account_count)}</strong></div>
+        <div class="overview-foot-stat"><span>活跃计划</span><strong class="mono">${formatNumber(summary.active_plan_count)}</strong></div>
+        <div class="overview-foot-stat"><span>活跃商品</span><strong class="mono">${formatNumber(summary.active_product_count)}</strong></div>
+        <div class="overview-foot-stat"><span>活跃${escapeHtml(teamLabel)}</span><strong class="mono">${activeTeamCount}</strong></div>
+      </div>
     </div>
   `;
 }
@@ -1720,21 +2882,360 @@ function renderSystemCards(latest, extendedSync, tokenInfo) {
 
   detailSyncCard.innerHTML = `
     <div class="system-card-head">
-      <span class="system-card-label">素材与明细同步</span>
+      <span class="system-card-label">素材热链状态</span>
       <span class="system-pill ${detailTone === "warn" ? "warn" : detailTone === "danger" ? "danger" : ""}">${escapeHtml(detailStatus === "ok" ? "完整" : detailStatus === "partial" ? "部分完成" : "未同步")}</span>
     </div>
-    <div class="system-card-value">${escapeHtml(extendedSync?.snapshot_time || "等待明细同步")}</div>
-    <div class="system-card-copy">明细按 10 分钟级同步。</div>
+    <div class="system-card-value">${escapeHtml(extendedSync?.snapshot_time || "等待素材热链")}</div>
+    <div class="system-card-copy">素材热链按 30 分钟更新，夜间历史链在 02:00 覆盖校正 daily。</div>
     <div class="system-stat-grid">
       <div class="system-stat"><span>计划数</span><strong class="mono">${formatNumber(extendedSync?.plan_count || 0)}</strong></div>
-      <div class="system-stat"><span>商品行</span><strong class="mono">${formatNumber(extendedSync?.product_row_count || 0)}</strong></div>
-      <div class="system-stat"><span>素材行</span><strong class="mono">${formatNumber(extendedSync?.material_row_count || 0)}</strong></div>
+      <div class="system-stat"><span>商品数</span><strong class="mono">${formatNumber(extendedSync?.product_row_count || 0)}</strong></div>
+      <div class="system-stat"><span>素材数</span><strong class="mono">${formatNumber(extendedSync?.material_row_count || 0)}</strong></div>
       <div class="system-stat"><span>错误数</span><strong class="mono">${formatNumber(extendedSync?.error_count || 0)}</strong></div>
     </div>
   `;
 }
 
+function clearDashboardDataCaches() {
+  clearAllPerformanceWarmupTimers();
+  clearAllMaterialWarmupTimers();
+  state.rangePayloads = {};
+  state.rangePayloadFetchedAt = {};
+  state.rangeRequestPromises = {};
+  state.planAssetCache = {};
+  state.materialPayloads = {};
+  state.materialPayloadFetchedAt = {};
+  state.materialRequestPromises = {};
+  state.teamMaterialPayloads = {};
+  state.teamMaterialPayloadFetchedAt = {};
+  state.teamMaterialRequestPromises = {};
+  state.commentPayloads = {};
+  state.commentPayloadFetchedAt = {};
+  state.commentRequestPromises = {};
+  state.materialPreviewCurveCache = {};
+  state.materialPreviewSourceCache = {};
+  invalidateCatalogAccountsCache();
+  invalidateUploadTargetsCache();
+  state.dashboardFetchedAt = 0;
+  state.dashboardFetchRequestFresh = false;
+  state.dashboardFetchQueued = false;
+  state.dashboardFetchQueuedFresh = false;
+}
+
+function syncOceanEnginePopoverState() {
+  const admin = isAdmin();
+  const open = admin && Boolean(state.oceanEnginePopoverOpen);
+  if (customerCenterChip) {
+    customerCenterChip.classList.toggle("is-interactive", admin);
+    customerCenterChip.classList.toggle("is-active", open);
+    customerCenterChip.setAttribute("aria-expanded", open ? "true" : "false");
+    customerCenterChip.setAttribute("aria-disabled", admin ? "false" : "true");
+    customerCenterChip.tabIndex = admin ? 0 : -1;
+    customerCenterChip.title = admin ? "点击查看已授权账号" : "";
+  }
+  if (oceanEngineConfigCard) {
+    oceanEngineConfigCard.classList.toggle("hidden", !open);
+  }
+}
+
+function setOceanEnginePopoverOpen(nextOpen) {
+  state.oceanEnginePopoverOpen = Boolean(nextOpen) && isAdmin();
+  syncOceanEnginePopoverState();
+}
+
+function renderOceanEngineConfigPreview(preview) {
+  if (!oceanEngineConfigPreview) return;
+  const accountCount = Number(preview?.account_count || 0);
+  const sampleAccounts = Array.isArray(preview?.sample_accounts) ? preview.sample_accounts : [];
+  if (!preview) {
+    oceanEngineConfigPreview.classList.add("hidden");
+    oceanEngineConfigPreview.innerHTML = "";
+    return;
+  }
+  oceanEngineConfigPreview.classList.remove("hidden");
+  oceanEngineConfigPreview.innerHTML = `
+    <div class="runtime-config-preview-meta">校验通过。当前 CC 可访问 ${formatNumber(accountCount)} 个账号，以下展示前 ${formatNumber(sampleAccounts.length)} 个样例。</div>
+    <div class="runtime-config-preview-list">
+      ${sampleAccounts.length
+        ? sampleAccounts.map((item) => `
+          <span class="runtime-config-preview-item">
+            <strong>${escapeHtml(item.advertiser_name || "--")}</strong>
+            <span class="mono">${escapeHtml(String(item.advertiser_id || "--"))}</span>
+          </span>
+        `).join("")
+        : '<span class="runtime-config-preview-item">当前 CC 没有返回可见账号。</span>'}
+    </div>
+  `;
+}
+
+function oceanEngineBoundCustomerCenters(config) {
+  return Array.isArray(config?.bound_customer_centers) ? config.bound_customer_centers : [];
+}
+
+function oceanEngineAllScopeSummary(items) {
+  return (items || []).reduce(
+    (summary, item) => {
+      summary.accountCount += Number(item?.account_count || 0);
+      summary.activeAccountCount += Number(item?.active_account_count || 0);
+      summary.planCount += Number(item?.plan_count || 0);
+      summary.materialCount += Number(item?.detail_material_row_count || 0);
+      const snapshotTime = String(item?.latest_snapshot_time || "").trim();
+      const detailSnapshotTime = String(item?.latest_detail_snapshot_time || "").trim();
+      if (snapshotTime > summary.latestSnapshotTime) {
+        summary.latestSnapshotTime = snapshotTime;
+      }
+      if (detailSnapshotTime > summary.latestDetailSnapshotTime) {
+        summary.latestDetailSnapshotTime = detailSnapshotTime;
+      }
+      return summary;
+    },
+    {
+      accountCount: 0,
+      activeAccountCount: 0,
+      planCount: 0,
+      materialCount: 0,
+      latestSnapshotTime: "",
+      latestDetailSnapshotTime: "",
+    },
+  );
+}
+
+async function switchOceanEngineDisplayScope(nextScope) {
+  const normalizedScope = normalizeDisplayScope(nextScope);
+  if (normalizedScope === requestDisplayScope()) {
+    return;
+  }
+  setDisplayScope(normalizedScope);
+  renderOceanEngineConfig(state.oceanEngineConfig);
+  const currentCc = String(state.oceanEngineConfig?.customer_center_id || "").trim();
+  const message = normalizedScope === DISPLAY_SCOPE_ALL
+    ? "已切换到全部账号视图，正在加载汇总数据。"
+    : `已切回当前账号 CC ${currentCc || "--"} 视图。`;
+  setInlineFeedback(oceanEngineConfigStatus, message, "success");
+  try {
+    await fetchDashboard(true);
+  } catch (error) {
+    setInlineFeedback(oceanEngineConfigStatus, error.message || "切换展示范围失败。", "error");
+    throw error;
+  }
+}
+
+function renderOceanEngineBoundAccounts(config) {
+  if (!oceanEngineBoundAccounts) return;
+  const items = oceanEngineBoundCustomerCenters(config);
+  const allScopeSummary = oceanEngineAllScopeSummary(items);
+  const hasPendingSwitch = Boolean(state.oceanEnginePendingCustomerCenterId);
+  const allScopeAvailable = items.length > 1;
+  const allScopeActive = allScopeAvailable && usingAllCustomerCenters();
+  if (oceanEngineBoundAccountsMeta) {
+    oceanEngineBoundAccountsMeta.textContent = items.length
+      ? `共 ${formatNumber(items.length)} 个`
+      : "暂无";
+  }
+  if (!items.length) {
+    oceanEngineBoundAccounts.innerHTML = `
+      <div class="customer-center-bound-empty">
+        暂无已授权并写入 token 的账号。
+      </div>
+    `;
+    return;
+  }
+  const cards = [];
+  if (allScopeAvailable) {
+    const snapshotMeta = allScopeSummary.latestSnapshotTime
+      ? `汇总快照 ${escapeHtml(allScopeSummary.latestSnapshotTime)} · 账户 ${formatNumber(allScopeSummary.accountCount)} / 活跃 ${formatNumber(allScopeSummary.activeAccountCount)} · 计划 ${formatNumber(allScopeSummary.planCount)}`
+      : "暂无汇总快照";
+    const detailMeta = allScopeSummary.latestDetailSnapshotTime
+      ? `汇总素材 ${escapeHtml(allScopeSummary.latestDetailSnapshotTime)} · 素材 ${formatNumber(allScopeSummary.materialCount)}`
+      : "暂无汇总素材";
+    cards.push(`
+      <button
+        type="button"
+        class="customer-center-bound-button ${allScopeActive ? "is-active" : ""}"
+        data-action="switch-display-scope-all"
+        ${hasPendingSwitch ? "disabled" : ""}
+      >
+        <div class="customer-center-bound-top">
+          <strong>显示全部</strong>
+          <span class="customer-center-bound-badge subtle">聚合 ${formatNumber(items.length)} 个账号</span>
+        </div>
+        <div class="customer-center-bound-meta">展示所有已授权账号的账户、计划、素材与运营汇总。</div>
+        <div class="customer-center-bound-stats">${snapshotMeta}</div>
+        <div class="customer-center-bound-stats">${detailMeta}</div>
+      </button>
+    `);
+  }
+  cards.push(...items.map((item) => {
+    const customerCenterId = String(item.customer_center_id || "").trim();
+    const isCurrent = Boolean(item.is_current);
+    const isPending = customerCenterId && customerCenterId === state.oceanEnginePendingCustomerCenterId;
+    const badges = allScopeActive
+      ? ""
+      : [
+        isCurrent ? '<span class="customer-center-bound-badge">当前</span>' : "",
+        item.is_override_customer_center ? '<span class="customer-center-bound-badge subtle">运行中</span>' : "",
+        item.is_base_customer_center ? '<span class="customer-center-bound-badge subtle">默认</span>' : "",
+      ].filter(Boolean).join("");
+    const tokenMeta = `Token ${item.token_updated_at ? formatAgoFromEpoch(item.token_updated_at) : "未记录"}${item.token_source ? ` / ${escapeHtml(item.token_source)}` : ""}`;
+    const snapshotMeta = item.latest_snapshot_time
+      ? `主快照 ${escapeHtml(item.latest_snapshot_time)} · 账号 ${formatNumber(item.account_count || 0)} / 活跃 ${formatNumber(item.active_account_count || 0)} · 计划 ${formatNumber(item.plan_count || 0)}`
+      : "暂无主快照";
+    const detailMeta = item.latest_detail_snapshot_time
+      ? `素材 ${escapeHtml(item.latest_detail_snapshot_time)}${item.detail_status ? ` / ${escapeHtml(item.detail_status)}` : ""} · 素材 ${formatNumber(item.detail_material_row_count || 0)}`
+      : "暂无素材快照";
+    return `
+      <button
+        type="button"
+        class="customer-center-bound-button ${isCurrent && !allScopeActive ? "is-active" : ""}"
+        data-action="switch-bound-customer-center"
+        data-customer-center-id="${escapeHtml(customerCenterId)}"
+        ${(isCurrent && !allScopeActive) || hasPendingSwitch || isPending ? "disabled" : ""}
+      >
+        <div class="customer-center-bound-top">
+          <strong class="mono">CC ${escapeHtml(customerCenterId || "--")}</strong>
+          ${badges}
+        </div>
+        <div class="customer-center-bound-meta">${tokenMeta}</div>
+        <div class="customer-center-bound-stats">${snapshotMeta}</div>
+        <div class="customer-center-bound-stats">${detailMeta}</div>
+      </button>
+    `;
+  }));
+  oceanEngineBoundAccounts.innerHTML = cards.join("");
+}
+
+async function switchOceanEngineCustomerCenter(targetCc, sourceLabel = "已授权 token") {
+  const normalizedTargetCc = String(targetCc || "").trim();
+  const currentCc = String(state.oceanEngineConfig?.customer_center_id || "").trim();
+  const submitButton = oceanEngineConfigForm?.querySelector('button[type="submit"]');
+  if (!/^\d+$/.test(normalizedTargetCc)) {
+    setInlineFeedback(oceanEngineConfigStatus, "账号 ID 格式不正确。", "error");
+    oceanEngineConfigForm?.querySelector('input[name="customer_center_id"]')?.focus();
+    return;
+  }
+  if (normalizedTargetCc === currentCc) {
+    if (usingAllCustomerCenters()) {
+      await switchOceanEngineDisplayScope(DISPLAY_SCOPE_CURRENT);
+      return;
+    }
+    setInlineFeedback(oceanEngineConfigStatus, `CC ${normalizedTargetCc} 已经是当前账号。`, "neutral");
+    return;
+  }
+
+  state.oceanEnginePendingCustomerCenterId = normalizedTargetCc;
+  if (submitButton) submitButton.disabled = true;
+  renderOceanEngineConfig(state.oceanEngineConfig);
+  setInlineFeedback(
+    oceanEngineConfigStatus,
+    `正在校验 ${sourceLabel} 并切换到 CC ${normalizedTargetCc}...`,
+    "neutral",
+  );
+  try {
+    const response = await fetch("/api/system/integrations/ocean-engine/runtime-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customer_center_id: normalizedTargetCc,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || "切换授权账号失败。");
+    }
+    state.oceanEngineConfig = payload.config || state.oceanEngineConfig;
+    state.oceanEnginePreview = payload.preview || null;
+    setDisplayScope(DISPLAY_SCOPE_CURRENT, { clearCaches: false });
+    clearDashboardDataCaches();
+    renderOceanEngineConfig(state.oceanEngineConfig);
+    setInlineFeedback(oceanEngineConfigStatus, `已切换到 CC ${normalizedTargetCc}，正在提交主快照同步。`, "success");
+
+    const syncResponse = await fetch("/api/sync", { method: "POST" });
+    const syncPayload = await syncResponse.json().catch(() => ({}));
+    if (!syncResponse.ok) {
+      throw new Error(syncPayload.detail || "账号已切换，但主快照同步提交失败。");
+    }
+    setInlineFeedback(
+      oceanEngineConfigStatus,
+      `已切换到 CC ${normalizedTargetCc}，主快照同步已入队。新快照完成前，页面可能短暂显示旧数据。`,
+      "success",
+    );
+    await fetchDashboard(true);
+    window.setTimeout(() => {
+      fetchDashboard(true).catch(() => {});
+    }, 1800);
+  } catch (error) {
+    setInlineFeedback(oceanEngineConfigStatus, error.message || "切换授权账号失败。", "error");
+    window.alert(error.message || "切换授权账号失败。");
+  } finally {
+    state.oceanEnginePendingCustomerCenterId = "";
+    if (submitButton) submitButton.disabled = false;
+    renderOceanEngineConfig(state.oceanEngineConfig);
+  }
+}
+
+function renderOceanEngineConfig(config) {
+  const boundItems = oceanEngineBoundCustomerCenters(config);
+  if (boundItems.length <= 1 && usingAllCustomerCenters()) {
+    setDisplayScope(DISPLAY_SCOPE_CURRENT, { clearCaches: false });
+  }
+  if (customerCenterChip) {
+    customerCenterChip.textContent = usingAllCustomerCenters() && boundItems.length > 1
+      ? "全部账号"
+      : `CC ${config?.customer_center_id || "--"}`;
+  }
+  if (!oceanEngineConfigCard) return;
+  const admin = isAdmin();
+  if (!admin) {
+    state.oceanEnginePopoverOpen = false;
+  }
+  syncOceanEnginePopoverState();
+  if (!admin || !config) {
+    renderOceanEngineBoundAccounts(null);
+    renderOceanEngineConfigPreview(null);
+    return;
+  }
+
+  const baseCc = String(config.base_customer_center_id || "").trim();
+  const overrideCc = String(config.override_customer_center_id || "").trim();
+  const tokenAgeText = config?.token_updated_at ? formatAgoFromEpoch(config.token_updated_at) : "未记录";
+  const modeText = config?.has_customer_center_override
+    ? `当前生效账号：CC ${overrideCc}。服务器默认账号：CC ${baseCc}。`
+    : `当前使用服务器默认账号：CC ${baseCc}。`;
+  const effectiveModeText = usingAllCustomerCenters() && boundItems.length > 1
+    ? `当前显示全部已授权账号（${formatNumber(boundItems.length)} 个账号），当前运行账号为 CC ${config?.customer_center_id || "--"}。`
+    : modeText;
+  if (oceanEngineConfigMeta) {
+    oceanEngineConfigMeta.textContent = `${effectiveModeText} token ${tokenAgeText}${config?.token_source ? ` / ${config.token_source}` : ""}`;
+  }
+  if (!oceanEngineConfigStatus?.textContent) {
+    setInlineFeedback(
+      oceanEngineConfigStatus,
+      "点击下方已授权账号即可切换，系统会自动提交一次主快照同步。",
+      "neutral",
+    );
+  }
+  renderOceanEngineBoundAccounts(config);
+}
+
 function renderAlerts(events) {
+  const pendingCount = events.filter((item) => item.status === "pending").length;
+  if (overviewAlertMeta) {
+    const latestCreatedAt = events[0]?.created_at || "暂无";
+    overviewAlertMeta.innerHTML = `
+      <div class="overview-alert-meta-item">
+        <strong class="mono">${formatNumber(events.length)}</strong>
+        <span>最近记录</span>
+      </div>
+      <div class="overview-alert-meta-item">
+        <strong class="mono">${formatNumber(pendingCount)}</strong>
+        <span>待处理</span>
+      </div>
+      <div class="overview-alert-meta-item is-wide">
+        <strong class="mono">${escapeHtml(latestCreatedAt)}</strong>
+        <span>最新触发</span>
+      </div>
+    `;
+  }
   renderAlertSummary(events);
   if (!events.length) {
     alertStream.className = "alert-stream empty";
@@ -1796,9 +3297,9 @@ function toggleSort(current, key, fallbackDir = "desc") {
 }
 
 function renderAccountTable(accounts) {
-  const accountPayload = rangePayload(sectionFilter("account"));
-  const accountMetrics = buildAccountMetricsFromPlans(accountPayload?.plans || []);
-  const query = accountSearch.value.trim().toLowerCase();
+  const accountPayload = rangePayload(sectionFilter("account"), "account");
+  const accountMetrics = accountPayload?.accounts_pagination ? new Map() : buildAccountMetricsFromPlans(accountPayload?.plans || []);
+  const pagination = accountPayload?.accounts_pagination || {};
   const columns = [
     { key: "advertiser_name", label: "账户", sortable: true },
     { key: "stat_cost", label: "消耗", sortable: true },
@@ -1819,16 +3320,9 @@ function renderAccountTable(accounts) {
     ...enrichAccountRow(row, accountMetrics),
     status_text: !row.ok ? "查询失败" : String(row.error || "").startsWith("fallback:") ? "计划聚合" : "正常",
   }));
-  const rows = enrichedRows.filter((row) => {
-    const haystack = [
-      row.advertiser_name,
-      row.advertiser_id,
-      row.top_plan_name,
-      row.status_text,
-      row.error,
-    ].join(" " ).toLowerCase();
-    return haystack.includes(query);
-  });
+  const aggregateRow = accountPayload?.accounts_aggregate
+    ? enrichAccountRow(accountPayload.accounts_aggregate, accountMetrics)
+    : buildAccountAggregateRow(enrichedRows);
   const activeSort = columns.some((column) => column.key === state.accountSort.key)
     ? state.accountSort
     : { key: "stat_cost", dir: "desc" };
@@ -1836,12 +3330,39 @@ function renderAccountTable(accounts) {
     state.accountSort = activeSort;
     saveSort("account-sort", state.accountSort);
   }
-  const sorted = sortRows(rows, activeSort);
+  const totalRows = Number(pagination.total_count || enrichedRows.length || 0);
+  const totalPages = Math.max(1, Number(pagination.total_pages || (totalRows > 0 ? Math.ceil(totalRows / ACCOUNT_PAGE_SIZE) : 1)));
+  const currentPage = Math.min(Math.max(Number(pagination.page || state.accountPage) || 1, 1), totalPages);
+  state.accountPage = currentPage;
 
   accountTable.innerHTML = `
     ${makeHeader(columns, activeSort, "account-sort")}
     <tbody>
-      ${sorted.map((row) => `
+      ${aggregateRow ? `
+        <tr>
+          <td>
+            <div class="cell-primary">${escapeHtml(aggregateRow.advertiser_name)}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">${escapeHtml(aggregateRow.top_plan_name || "")}</span>
+            </div>
+            <div class="cell-subline"><span class="pill">聚合</span></div>
+          </td>
+          <td class="mono">${formatMoney(aggregateRow.stat_cost)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsPayAmount", aggregateRow.pay_amount, formatMoney)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsTotalPayAmount", aggregateRow.total_pay_amount, formatMoney)}</td>
+          <td class="mono">${formatMoney(aggregateRow.settled_pay_amount)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsPayRoi", aggregateRow.roi, formatRate)}</td>
+          <td class="mono">${formatRate(aggregateRow.settled_roi)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsOrderCount", aggregateRow.order_count, formatNumber)}</td>
+          <td class="mono">${formatNumber(aggregateRow.settled_order_count)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsPayOrderCost", aggregateRow.pay_order_cost, formatMoney, Number(aggregateRow.order_count || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsSettledAmountRate", aggregateRow.settled_amount_rate, formatPercent, Number(aggregateRow.total_pay_amount || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsRefundRate1h", aggregateRow.refund_rate_1h, formatPercent, Number(aggregateRow.total_pay_amount || 0) > 0)}</td>
+          <td class="mono">${formatNumber(aggregateRow.plan_count)}</td>
+          <td><span class="pill">${escapeHtml(aggregateRow.status_text)}</span></td>
+        </tr>
+      ` : ""}
+      ${enrichedRows.map((row) => `
         <tr>
           <td>
             <div class="cell-primary">${escapeHtml(row.advertiser_name)}</div>
@@ -1849,19 +3370,24 @@ function renderAccountTable(accounts) {
               <span class="cell-subitem">AID ${escapeHtml(String(row.advertiser_id || "-"))}</span>
               ${row.top_plan_name ? `<span class="cell-subitem">代表计划 ${escapeHtml(row.top_plan_name)}</span>` : ""}
             </div>
+            <div class="cell-subline">${renderPlanSourceBadge(row)}</div>
           </td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
-          <td class="mono">${formatMoney(row.pay_amount)}</td>
-          <td class="mono">${formatMoney(row.total_pay_amount)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsPayAmount", row.pay_amount, formatMoney)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsTotalPayAmount", row.total_pay_amount, formatMoney)}</td>
           <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
-          <td class="mono">${formatRate(row.roi)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsPayRoi", row.roi, formatRate)}</td>
           <td class="mono">${formatRate(row.settled_roi)}</td>
-          <td class="mono">${formatNumber(row.order_count)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsOrderCount", row.order_count, formatNumber)}</td>
           <td class="mono">${formatNumber(row.settled_order_count)}</td>
-          <td class="mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</td>
-          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</td>
-          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}</td>
-          <td class="mono">${formatNumber(row.plan_count)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsPayOrderCost", row.pay_order_cost, formatMoney, Number(row.order_count || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsSettledAmountRate", row.settled_amount_rate, formatPercent, Number(row.total_pay_amount || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsRefundRate1h", row.refund_rate_1h, formatPercent, Number(row.total_pay_amount || 0) > 0)}</td>
+          <td class="mono">
+            ${Number(row.plan_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-account-plan-detail" data-advertiser-id="${row.advertiser_id}">${formatNumber(row.plan_count)}</button>`
+              : formatNumber(row.plan_count)}
+          </td>
           <td><span class="pill">${escapeHtml(row.status_text)}</span></td>
         </tr>
       `).join("")}
@@ -1869,21 +3395,51 @@ function renderAccountTable(accounts) {
   `;
 
   accountTable.querySelectorAll("th[data-key]").forEach((header) => {
-    header.addEventListener("click", () => {
+    header.addEventListener("click", async () => {
       const key = header.dataset.key;
       const column = columns.find((item) => item.key === key);
       if (!column || !column.sortable) return;
       state.accountSort = toggleSort(activeSort, key);
+      state.accountPage = 1;
       saveSort("account-sort", state.accountSort);
-      renderAccountTable(accounts);
+      try {
+        await refreshPerformanceSection("account", false);
+      } catch (error) {
+        window.alert(error.message || "账户排序失败");
+      }
     });
   });
+
+  accountTable.querySelectorAll('[data-action="open-account-plan-detail"]').forEach((button) => {
+    const advertiserId = Number(button.dataset.advertiserId || 0);
+    const row = enrichedRows.find((item) => Number(item.advertiser_id || 0) === advertiserId);
+    if (!row) return;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openAccountPlanRelationDetail(row);
+    });
+  });
+
+  renderAsyncTablePager(
+    accountTablePager,
+    totalRows,
+    currentPage,
+    totalPages,
+    Number(pagination.start_index || (totalRows ? 1 : 0)),
+    Number(pagination.end_index || enrichedRows.length),
+    ACCOUNT_PAGE_SIZE,
+    `显示 ${formatNumber(Number(pagination.start_index || (totalRows ? 1 : 0)))}-${formatNumber(Number(pagination.end_index || enrichedRows.length))} / ${formatNumber(totalRows)}，按页加载账户排行。`,
+    async (nextPage) => {
+      state.accountPage = nextPage;
+      await refreshPerformanceSection("account", false);
+    },
+  );
 }
 
 function clearEmployeeDetail() {
   if (!employeeDetail) return;
   employeeDetail.className = "detail-panel empty";
-  employeeDetail.textContent = breakdownDetailEmptyCopy(rangePayload(sectionFilter("breakdown")));
+  employeeDetail.textContent = breakdownDetailEmptyCopy(rangePayload(sectionFilter("breakdown"), "breakdown"));
 }
 
 function clearProductDetail() {
@@ -1895,7 +3451,7 @@ function clearProductDetail() {
 function renderEmployeeDetail(employeeName) {
   if (!employeeDetail) return;
   const breakdownFilter = sectionFilter("breakdown");
-  const payload = rangePayload(breakdownFilter);
+  const payload = rangePayload(breakdownFilter, "breakdown");
   const rows = breakdownRows(payload);
   const sourceRow = rows.find((item) => breakdownEntityName(item) === employeeName);
   if (!sourceRow) return;
@@ -1984,7 +3540,7 @@ function renderEmployeeDetail(employeeName) {
 function renderProductDetail(productKey) {
   if (!productDetail) return;
   const breakdownFilter = sectionFilter("breakdown");
-  const rows = rangePayload(breakdownFilter)?.products || [];
+  const rows = rangePayload(breakdownFilter, "breakdown")?.products || [];
   const row = rows.find((item) => item.product_key === productKey);
   if (!row) return;
   productDetail.className = "detail-panel";
@@ -2074,9 +3630,10 @@ function renderProductInteractions(rows) {
 }
 
 function renderEmployeeTable(rows) {
-  const payload = rangePayload(sectionFilter("breakdown"));
+  const payload = rangePayload(sectionFilter("breakdown"), "breakdown");
   const operatorMode = breakdownUsesOperators(payload);
   const entityLabel = breakdownEntityLabel(payload);
+  const compactOperatorRanking = isOperator();
   if (operatorMode) {
     const enrichedRows = rows.map((row) => enrichOperatorRow(row));
     const query = employeeSearch.value.trim().toLowerCase();
@@ -2089,22 +3646,29 @@ function renderEmployeeTable(rows) {
       ].join(" ").toLowerCase();
       return haystack.includes(query);
     });
-    const columns = [
-      { key: "operator_name", label: entityLabel, sortable: true },
-      { key: "stat_cost", label: "消耗", sortable: true },
-      { key: "total_pay_amount", label: "整体成交", sortable: true },
-      { key: "settled_pay_amount", label: "净成交", sortable: true },
-      { key: "roi", label: "ROI", sortable: true },
-      { key: "settled_roi", label: "净ROI", sortable: true },
-      { key: "order_count", label: "整体订单", sortable: true },
-      { key: "settled_order_count", label: "净订单", sortable: true },
-      { key: "pay_order_cost", label: "订单成本", sortable: true },
-      { key: "settled_amount_rate", label: "结算率", sortable: true },
-      { key: "refund_rate_1h", label: "1h退款率", sortable: true },
-      { key: "material_count", label: "素材数", sortable: true },
-      { key: "advertiser_count", label: "账户数", sortable: true },
-      { key: "keyword_count", label: "关键词数", sortable: true },
-    ];
+    const columns = compactOperatorRanking
+      ? [
+          { key: "rank", label: "序号", sortable: false },
+          { key: "operator_name", label: entityLabel, sortable: true },
+          { key: "stat_cost", label: "消耗", sortable: true },
+        ]
+      : [
+          { key: "rank", label: "序号", sortable: false },
+          { key: "operator_name", label: entityLabel, sortable: true },
+          { key: "stat_cost", label: "消耗", sortable: true },
+          { key: "total_pay_amount", label: "整体成交", sortable: true },
+          { key: "settled_pay_amount", label: "净成交", sortable: true },
+          { key: "roi", label: "ROI", sortable: true },
+          { key: "settled_roi", label: "净ROI", sortable: true },
+          { key: "order_count", label: "整体订单", sortable: true },
+          { key: "settled_order_count", label: "净订单", sortable: true },
+          { key: "pay_order_cost", label: "订单成本", sortable: true },
+          { key: "settled_amount_rate", label: "结算率", sortable: true },
+          { key: "refund_rate_1h", label: "1h退款率", sortable: true },
+          { key: "material_count", label: "素材数", sortable: true },
+          { key: "advertiser_count", label: "账户数", sortable: true },
+          { key: "keyword_count", label: "关键词数", sortable: true },
+        ];
     const activeSort = columns.some((column) => column.key === state.employeeSort.key)
       ? state.employeeSort
       : { key: "stat_cost", dir: "desc" };
@@ -2117,19 +3681,23 @@ function renderEmployeeTable(rows) {
     employeeTable.innerHTML = `
       ${makeHeader(columns, activeSort, "employee-sort")}
       <tbody>
-        ${sorted.map((row) => {
+        ${sorted.map((row, index) => {
           const entityName = breakdownEntityName(row);
-          const subline = [
-            row.top_material_name ? `代表素材 ${row.top_material_name}` : "",
-          ].filter(Boolean);
+          const subline = compactOperatorRanking
+            ? []
+            : [
+                row.top_material_name ? `代表素材 ${row.top_material_name}` : "",
+              ].filter(Boolean);
           const refundRateText = row.refund_rate_1h_available ? formatPercent(row.refund_rate_1h) : "-";
           return `
             <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
+              <td class="mono rank-index-cell">${formatNumber(index + 1)}</td>
               <td>
                 <div class="cell-primary">${escapeHtml(entityName)}</div>
                 ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
               </td>
               <td class="mono">${formatMoney(row.stat_cost)}</td>
+              ${compactOperatorRanking ? "" : `
               <td class="mono">${formatMoney(row.total_pay_amount)}</td>
               <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
               <td class="mono">${formatRate(row.roi)}</td>
@@ -2142,6 +3710,7 @@ function renderEmployeeTable(rows) {
               <td class="mono">${formatNumber(row.material_count)}</td>
               <td class="mono">${formatNumber(row.advertiser_count)}</td>
               <td class="mono">${formatNumber(row.keyword_count)}</td>
+              `}
             </tr>
           `;
         }).join("")}
@@ -2174,6 +3743,7 @@ function renderEmployeeTable(rows) {
       return haystack.includes(query);
     });
     const columns = [
+      { key: "rank", label: "序号", sortable: false },
       { key: "operator_name", label: entityLabel, sortable: true },
       { key: "stat_cost", label: "消耗", sortable: true },
       { key: "pay_amount", label: "支付", sortable: true },
@@ -2195,7 +3765,7 @@ function renderEmployeeTable(rows) {
     employeeTable.innerHTML = `
       ${makeHeader(columns, activeSort, "employee-sort")}
       <tbody>
-        ${sorted.map((row) => {
+        ${sorted.map((row, index) => {
           const entityName = breakdownEntityName(row);
           const materialCount = Number(row.material_count ?? row.plan_count ?? 0);
           const subline = [
@@ -2203,6 +3773,7 @@ function renderEmployeeTable(rows) {
           ].filter(Boolean);
           return `
             <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
+              <td class="mono rank-index-cell">${formatNumber(index + 1)}</td>
               <td>
                 <div class="cell-primary">${escapeHtml(entityName)}</div>
                 ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
@@ -2243,6 +3814,7 @@ function renderEmployeeTable(rows) {
   });
   const columns = operatorMode
     ? [
+        { key: "rank", label: "序号", sortable: false },
         { key: "operator_name", label: entityLabel, sortable: true },
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "pay_amount", label: "支付", sortable: true },
@@ -2253,6 +3825,7 @@ function renderEmployeeTable(rows) {
         { key: "plan_count", label: "计划数", sortable: true },
       ]
     : [
+        { key: "rank", label: "序号", sortable: false },
         { key: "employee_name", label: entityLabel, sortable: true },
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "pay_amount", label: "支付", sortable: true },
@@ -2267,13 +3840,14 @@ function renderEmployeeTable(rows) {
   employeeTable.innerHTML = `
     ${makeHeader(columns, state.employeeSort, "employee-sort")}
     <tbody>
-      ${sorted.map((row) => {
+      ${sorted.map((row, index) => {
         const entityName = breakdownEntityName(row);
         const subline = operatorMode
           ? [row.operator_username ? `账号 ${row.operator_username}` : "", row.top_account_name ? `代表账户 ${row.top_account_name}` : ""].filter(Boolean)
           : [row.top_account_name ? `代表账户 ${row.top_account_name}` : "", row.top_plan_name ? `代表计划 ${row.top_plan_name}` : ""].filter(Boolean);
         return `
           <tr data-employee-name="${escapeHtml(entityName)}" class="${state.selectedEmployeeName === entityName ? "active-row" : ""}">
+            <td class="mono rank-index-cell">${formatNumber(index + 1)}</td>
             <td>
               <div class="cell-primary">${escapeHtml(entityName)}</div>
               ${subline.length ? `<div class="cell-subline">${subline.map((item) => `<span class="cell-subitem">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
@@ -2340,9 +3914,17 @@ function renderProductTable(rows) {
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
-          <td class="mono">${formatNumber(row.advertiser_count)}</td>
+          <td class="mono">
+            ${Number(row.advertiser_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-product-account-detail" data-product-key="${escapeHtml(row.product_key)}">${formatNumber(row.advertiser_count)}</button>`
+              : formatNumber(row.advertiser_count)}
+          </td>
           <td class="mono">${formatNumber(row.employee_count)}</td>
-          <td class="mono">${formatNumber(row.plan_count)}</td>
+          <td class="mono">
+            ${Number(row.plan_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-product-plan-detail" data-product-key="${escapeHtml(row.product_key)}">${formatNumber(row.plan_count)}</button>`
+              : formatNumber(row.plan_count)}
+          </td>
         </tr>
       `).join("")}
     </tbody>
@@ -2356,6 +3938,16 @@ function renderProductTable(rows) {
       state.productSort = toggleSort(state.productSort, key);
       saveSort("product-sort", state.productSort);
       renderProductTable(rows);
+    });
+  });
+
+  productTable.querySelectorAll('[data-action="open-product-account-detail"], [data-action="open-product-plan-detail"]').forEach((button) => {
+    const productKey = String(button.dataset.productKey || "");
+    const row = sorted.find((item) => String(item.product_key || "") === productKey);
+    if (!row) return;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openProductRelationDetail(row, button.dataset.action === "open-product-account-detail" ? "account" : "plan");
     });
   });
 
@@ -2412,7 +4004,6 @@ function renderMaterialDetail(materialKey) {
       <div class="detail-section-title">效果拆分</div>
       <div class="detail-metric-grid">
         ${detailMetricCard("净成交 ROI", formatMaterialSettledRoi(row), "mono")}
-        ${detailMetricCard("支付金额", formatMoney(row.pay_amount), "mono")}
         ${detailMetricCard("成交订单数", formatNumber(row.order_count), "mono")}
         ${detailMetricCard("净成交订单数", materialSupportsSettledMetrics(row) ? formatNumber(row.settled_order_count) : "-", "mono")}
         ${detailMetricCard("净成交结算率", formatMaterialSettledAmountRate(row), "mono")}
@@ -2466,17 +4057,17 @@ function materialPagerPages(totalPages, currentPage) {
   return [...pages].filter((page) => page >= 1 && page <= totalPages).sort((left, right) => left - right);
 }
 
-function renderMaterialPager(totalRows, currentPage, totalPages, startIndex, endIndex) {
-  if (!materialTablePager) return;
-  if (totalRows <= MATERIAL_PAGE_SIZE) {
-    materialTablePager.innerHTML = "";
-    materialTablePager.classList.add("hidden");
+function renderAsyncTablePager(container, totalRows, currentPage, totalPages, startIndex, endIndex, pageSize, summaryText, onPageChange) {
+  if (!container) return;
+  if (totalRows <= pageSize) {
+    container.innerHTML = "";
+    container.classList.add("hidden");
     return;
   }
   const pages = materialPagerPages(totalPages, currentPage);
-  materialTablePager.classList.remove("hidden");
-  materialTablePager.innerHTML = `
-    <div class="table-pager-summary">显示 ${formatNumber(startIndex)}-${formatNumber(endIndex)} / ${formatNumber(totalRows)}，按页渲染以减少卡顿。</div>
+  container.classList.remove("hidden");
+  container.innerHTML = `
+    <div class="table-pager-summary">${summaryText}</div>
     <div class="table-pager-actions">
       <button
         type="button"
@@ -2501,14 +4092,34 @@ function renderMaterialPager(totalRows, currentPage, totalPages, startIndex, end
       >下一页</button>
     </div>
   `;
-  materialTablePager.querySelectorAll("button[data-page]").forEach((button) => {
-    button.addEventListener("click", () => {
+  container.querySelectorAll("button[data-page]").forEach((button) => {
+    button.addEventListener("click", async () => {
       const nextPage = Number(button.dataset.page || 0);
-      if (!nextPage || nextPage === state.materialPage) return;
-      state.materialPage = nextPage;
-      renderMaterialTable(materialRowsForCurrentFilter());
+      if (!nextPage || nextPage === currentPage) return;
+      try {
+        await onPageChange(nextPage);
+      } catch (error) {
+        window.alert(error.message || "分页加载失败");
+      }
     });
   });
+}
+
+function renderMaterialPager(totalRows, currentPage, totalPages, startIndex, endIndex) {
+  renderAsyncTablePager(
+    materialTablePager,
+    totalRows,
+    currentPage,
+    totalPages,
+    startIndex,
+    endIndex,
+    MATERIAL_PAGE_SIZE,
+    `显示 ${formatNumber(startIndex)}-${formatNumber(endIndex)} / ${formatNumber(totalRows)}，按页渲染以减少卡顿。`,
+    async (nextPage) => {
+      state.materialPage = nextPage;
+      await refreshMaterialSection(false);
+    },
+  );
 }
 
 function renderMaterialInteractions(rows) {
@@ -2529,7 +4140,7 @@ function renderMaterialInteractions(rows) {
       button.outerHTML = replacement;
       return;
     }
-    if (String(row.cover_url || "").trim()) {
+    if (replacement.includes("material-preview-thumb")) {
       button.outerHTML = replacement;
     }
   });
@@ -2553,35 +4164,35 @@ function renderMaterialInteractions(rows) {
 function renderMaterialTable(rows) {
   const operatorMode = isOperator();
   const enrichedRows = rows.map((row) => enrichMaterialRow(row));
+  const payload = materialRangePayload(sectionFilter("material"));
+  const pagination = payload?.pagination || {};
   if (
     operatorMode
-    && !["material_name", "stat_cost", "top_account_name", "top_plan_name", "top_anchor_name"].includes(String(state.materialSort.key || ""))
+    && !["material_name", "create_time", "overall_ctr", "stat_cost", "top_anchor_name"].includes(String(state.materialSort.key || ""))
   ) {
     state.materialSort = { key: "stat_cost", dir: "desc" };
-    saveSort("material-sort", state.materialSort);
+    saveSort("material-sort-v2", state.materialSort);
   }
-  const query = materialSearch.value.trim().toLowerCase();
-  const visibleRows = enrichedRows.filter((row) => {
-    const haystack = [row.material_name, row.material_id, row.video_id, row.top_plan_name, row.top_account_name, row.top_anchor_name].join(" ").toLowerCase();
-    return haystack.includes(query);
-  });
   const columns = operatorMode
     ? [
         { key: "material_name", label: "素材", sortable: true },
+        { key: "product_info_text", label: "商品信息", sortable: false },
         { key: "preview", label: "预览", sortable: false },
+        { key: "create_time", label: "创建时间", sortable: true },
+        { key: "overall_ctr", label: "整体点击率", sortable: true },
         { key: "stat_cost", label: "消耗", sortable: true },
-        { key: "top_account_name", label: "归属账户", sortable: true },
-        { key: "top_plan_name", label: "归属计划", sortable: true },
         { key: "top_anchor_name", label: "达人", sortable: true },
       ]
     : [
         { key: "material_name", label: "素材", sortable: true },
+        { key: "product_info_text", label: "商品信息", sortable: false },
         { key: "preview", label: "预览", sortable: false },
+        { key: "create_time", label: "创建时间", sortable: true },
+        { key: "overall_ctr", label: "整体点击率", sortable: true },
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "total_pay_amount", label: "整体成交", sortable: true },
         { key: "settled_pay_amount", label: "净成交", sortable: true },
         { key: "roi", label: "支付ROI", sortable: true },
-        { key: "pay_amount", label: "支付金额", sortable: true },
         { key: "order_count", label: "订单", sortable: true },
         { key: "top_account_name", label: "归属账户", sortable: true },
         { key: "top_plan_name", label: "归属计划", sortable: true },
@@ -2589,18 +4200,15 @@ function renderMaterialTable(rows) {
         { key: "plan_count", label: "计划数", sortable: true },
         { key: "advertiser_count", label: "账户数", sortable: true },
       ];
-  const sorted = sortRows(visibleRows, state.materialSort);
-  const totalRows = sorted.length;
-  const totalPages = Math.max(1, Math.ceil(totalRows / MATERIAL_PAGE_SIZE));
-  const currentPage = Math.min(Math.max(Number(state.materialPage) || 1, 1), totalPages);
-  const pageStart = totalRows ? (currentPage - 1) * MATERIAL_PAGE_SIZE : 0;
-  const pageRows = sorted.slice(pageStart, pageStart + MATERIAL_PAGE_SIZE);
+  const totalRows = Number(pagination.total_count || enrichedRows.length || 0);
+  const totalPages = Math.max(1, Number(pagination.total_pages || (totalRows > 0 ? Math.ceil(totalRows / MATERIAL_PAGE_SIZE) : 1)));
+  const currentPage = Math.min(Math.max(Number(pagination.page || state.materialPage) || 1, 1), totalPages);
   state.materialPage = currentPage;
   const supportsMaterialDetail = Boolean(materialDetail);
   materialTable.innerHTML = `
     ${makeHeader(columns, state.materialSort, "material-sort")}
     <tbody>
-      ${pageRows.map((row) => `
+      ${enrichedRows.map((row) => `
         <tr data-material-key="${escapeHtml(row.material_key)}" class="${supportsMaterialDetail && state.selectedMaterialKey === row.material_key ? "active-row" : ""}">
           <td>
             <div class="cell-primary">${escapeHtml(row.material_name || "未命名素材")}</div>
@@ -2608,6 +4216,9 @@ function renderMaterialTable(rows) {
               <span class="cell-subitem" title="素材 ID：${escapeHtml(row.material_id || "-")}">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
               <span class="cell-subitem" title="视频 ID：${escapeHtml(row.video_id || "-")}">VID ${escapeHtml(truncateMiddle(row.video_id || "-", 8, 6))}</span>
             </div>
+          </td>
+          <td>
+            <div class="cell-secondary compact">${escapeHtml(row.product_info_text || "--")}</div>
           </td>
           <td>
             <button
@@ -2618,81 +4229,863 @@ function renderMaterialTable(rows) {
               ${canPreviewMaterial(row) ? "" : "disabled"}
             >${canPreviewMaterial(row) ? "预览" : "暂无"}</button>
           </td>
+          <td class="mono">${escapeHtml(formatDateTime(row.create_time || ""))}</td>
+          <td class="mono">${formatPercent(row.overall_ctr)}</td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
           ${operatorMode
             ? `
-          <td>${escapeHtml(row.top_account_name || "--")}</td>
-          <td>${escapeHtml(row.top_plan_name || "--")}</td>
           <td>${escapeHtml(row.top_anchor_name || "--")}</td>
           `
             : `
           <td class="mono">${formatMaterialTotalPayAmount(row)}</td>
           <td class="mono">${formatMaterialSettledPayAmount(row)}</td>
           <td class="mono">${formatRate(row.roi)}</td>
-          <td class="mono">${formatMoney(row.pay_amount)}</td>
           <td class="mono">${formatNumber(row.order_count)}</td>
           <td>${escapeHtml(row.top_account_name || "--")}</td>
           <td>${escapeHtml(row.top_plan_name || "--")}</td>
           <td>${escapeHtml(row.top_anchor_name || "--")}</td>
-          <td class="mono">${formatNumber(row.plan_count)}</td>
-          <td class="mono">${formatNumber(row.advertiser_count)}</td>
+          <td class="mono">
+            ${Number(row.plan_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-material-plan-detail" data-material-key="${escapeHtml(row.material_key)}">${formatNumber(row.plan_count)}</button>`
+              : formatNumber(row.plan_count)}
+          </td>
+          <td class="mono">
+            ${Number(row.advertiser_count || 0) > 0
+              ? `<button type="button" class="relation-trigger mono" data-action="open-material-account-detail" data-material-key="${escapeHtml(row.material_key)}">${formatNumber(row.advertiser_count)}</button>`
+              : formatNumber(row.advertiser_count)}
+          </td>
           `}
         </tr>
       `).join("")}
     </tbody>
   `;
   materialTable.querySelectorAll("th[data-key]").forEach((header) => {
-    header.addEventListener("click", () => {
+    header.addEventListener("click", async () => {
       const key = header.dataset.key;
       const column = columns.find((item) => item.key === key);
       if (!column || !column.sortable) return;
       state.materialSort = toggleSort(state.materialSort, key);
-      saveSort("material-sort", state.materialSort);
-      renderMaterialTable(enrichedRows);
+      state.materialPage = 1;
+      saveSort("material-sort-v2", state.materialSort);
+      try {
+        await refreshMaterialSection(false);
+      } catch (error) {
+        window.alert(error.message || "素材排序失败");
+      }
+    });
+  });
+  materialTable.querySelectorAll('[data-action="open-material-plan-detail"], [data-action="open-material-account-detail"]').forEach((button) => {
+    const materialKey = String(button.dataset.materialKey || "");
+    const row = enrichedRows.find((item) => String(item.material_key || "") === materialKey);
+    if (!row) return;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openMaterialRelationDetail(row, button.dataset.action === "open-material-account-detail" ? "account" : "plan");
     });
   });
   renderMaterialPager(
     totalRows,
     currentPage,
     totalPages,
-    totalRows ? pageStart + 1 : 0,
-    pageStart + pageRows.length,
+    Number(pagination.start_index || (totalRows ? 1 : 0)),
+    Number(pagination.end_index || enrichedRows.length),
   );
   renderMaterialInteractions(enrichedRows);
 }
 
-async function fetchMaterialRankings(force = false) {
-  const filter = sectionFilter("material");
+function renderTeamMaterialPager(totalRows, currentPage, totalPages, startIndex, endIndex) {
+  renderAsyncTablePager(
+    teamMaterialTablePager,
+    totalRows,
+    currentPage,
+    totalPages,
+    startIndex,
+    endIndex,
+    MATERIAL_PAGE_SIZE,
+    `显示 ${formatNumber(startIndex)}-${formatNumber(endIndex)} / ${formatNumber(totalRows)}，按页渲染以减少卡顿。`,
+    async (nextPage) => {
+      state.teamMaterialPage = nextPage;
+      await refreshTeamMaterialSection(false);
+    },
+  );
+}
+
+function renderTeamMaterialTable(rows) {
+  if (!teamMaterialTable) return;
+  const operatorMode = isOperator();
+  const enrichedRows = rows.map((row) => enrichMaterialRow(row));
+  const payload = teamMaterialRangePayload(sectionFilter("teamMaterial"));
+  const pagination = payload?.pagination || {};
+  if (
+    ![
+      "material_name",
+      "create_time",
+      "overall_ctr",
+      "stat_cost",
+      ...(operatorMode ? ["top_anchor_name"] : ["top_account_name", "top_plan_name", "top_anchor_name"]),
+    ].includes(String(state.teamMaterialSort.key || ""))
+  ) {
+    state.teamMaterialSort = { key: "stat_cost", dir: "desc" };
+    saveSort("team-material-sort-v2", state.teamMaterialSort);
+  }
+  const columns = operatorMode
+    ? [
+        { key: "material_name", label: "素材", sortable: true },
+        { key: "product_info_text", label: "商品信息", sortable: false },
+        { key: "preview", label: "预览", sortable: false },
+        { key: "create_time", label: "创建时间", sortable: true },
+        { key: "overall_ctr", label: "整体点击率", sortable: true },
+        { key: "stat_cost", label: "消耗", sortable: true },
+        { key: "top_anchor_name", label: "达人", sortable: true },
+      ]
+    : [
+        { key: "material_name", label: "素材", sortable: true },
+        { key: "product_info_text", label: "商品信息", sortable: false },
+        { key: "preview", label: "预览", sortable: false },
+        { key: "create_time", label: "创建时间", sortable: true },
+        { key: "overall_ctr", label: "整体点击率", sortable: true },
+        { key: "stat_cost", label: "消耗", sortable: true },
+        { key: "top_account_name", label: "归属账户", sortable: true },
+        { key: "top_plan_name", label: "归属计划", sortable: true },
+        { key: "top_anchor_name", label: "达人", sortable: true },
+      ];
+  const totalRows = Number(pagination.total_count || enrichedRows.length || 0);
+  const totalPages = Math.max(1, Number(pagination.total_pages || (totalRows > 0 ? Math.ceil(totalRows / MATERIAL_PAGE_SIZE) : 1)));
+  const currentPage = Math.min(Math.max(Number(pagination.page || state.teamMaterialPage) || 1, 1), totalPages);
+  state.teamMaterialPage = currentPage;
+  teamMaterialTable.innerHTML = `
+    ${makeHeader(columns, state.teamMaterialSort, "team-material-sort")}
+    <tbody>
+      ${enrichedRows.map((row) => `
+        <tr>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.material_name || "未命名素材")}</div>
+            <div class="cell-subline cell-subline-stack mono">
+              <span class="cell-subitem" title="素材 ID：${escapeHtml(row.material_id || "-")}">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
+              <span class="cell-subitem" title="视频 ID：${escapeHtml(row.video_id || "-")}">VID ${escapeHtml(truncateMiddle(row.video_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td>
+            <div class="cell-secondary compact">${escapeHtml(row.product_info_text || "--")}</div>
+          </td>
+          <td>
+            ${canPreviewMaterial(row)
+              ? `<button
+                  type="button"
+                  class="button ghost compact"
+                  data-action="open-material-preview"
+                  data-material-key="${escapeHtml(row.material_key)}"
+                >查看预览</button>`
+              : '<span class="material-preview-placeholder">暂无</span>'}
+          </td>
+          <td class="mono">${escapeHtml(formatDateTime(row.create_time || ""))}</td>
+          <td class="mono">${formatPercent(row.overall_ctr)}</td>
+          <td class="mono">${formatMoney(row.stat_cost)}</td>
+          ${operatorMode
+            ? ""
+            : `
+          <td>${escapeHtml(row.top_account_name || "--")}</td>
+          <td>${escapeHtml(row.top_plan_name || "--")}</td>
+          `}
+          <td>${escapeHtml(row.top_anchor_name || "--")}</td>
+        </tr>
+      `).join("")}
+    </tbody>
+  `;
+  teamMaterialTable.querySelectorAll("th[data-key]").forEach((header) => {
+    header.addEventListener("click", async () => {
+      const key = header.dataset.key;
+      const column = columns.find((item) => item.key === key);
+      if (!column || !column.sortable) return;
+      state.teamMaterialSort = toggleSort(state.teamMaterialSort, key);
+      state.teamMaterialPage = 1;
+      saveSort("team-material-sort-v2", state.teamMaterialSort);
+      try {
+        await refreshTeamMaterialSection(false);
+      } catch (error) {
+        window.alert(error.message || "团队素材排序失败");
+      }
+    });
+  });
+  renderTeamMaterialInteractions(enrichedRows);
+  renderTeamMaterialPager(
+    totalRows,
+    currentPage,
+    totalPages,
+    Number(pagination.start_index || (totalRows ? 1 : 0)),
+    Number(pagination.end_index || enrichedRows.length),
+  );
+}
+
+function renderTeamMaterialInteractions(rows) {
+  if (!teamMaterialTable) return;
+  teamMaterialTable.querySelectorAll('[data-action="open-material-preview"]').forEach((button) => {
+    const materialKey = String(button.dataset.materialKey || "");
+    const row = rows.find((item) => item.material_key === materialKey);
+    if (!row) return;
+    const replacement = materialPreviewTriggerMarkup(row);
+    if (replacement.startsWith("<span")) {
+      button.outerHTML = replacement;
+      return;
+    }
+    if (replacement.includes("material-preview-thumb")) {
+      button.outerHTML = replacement;
+    }
+  });
+  teamMaterialTable.querySelectorAll('[data-action="open-material-preview"]').forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const materialKey = String(button.dataset.materialKey || "");
+      if (!materialKey) return;
+      openMaterialPreview(materialKey);
+    });
+  });
+  teamMaterialTable.querySelectorAll(".material-preview-thumb").forEach((thumb) => {
+    thumb.addEventListener("error", () => {
+      const trigger = thumb.closest(".material-preview-trigger");
+      if (!trigger) return;
+      downgradeMaterialPreviewTrigger(trigger);
+    }, { once: true });
+  });
+}
+
+function fillCommentAccountFilter(accounts) {
+  if (!commentAccountFilter) return;
+  const current = String(commentAccountFilter.value || "");
+  const options = ['<option value="">全部账户</option>']
+    .concat((accounts || []).map((item) => (
+      `<option value="${escapeHtml(item.advertiser_id)}">${escapeHtml(item.advertiser_name || item.advertiser_id)}</option>`
+    )));
+  commentAccountFilter.innerHTML = options.join("");
+  if ([...commentAccountFilter.options].some((option) => option.value === current)) {
+    commentAccountFilter.value = current;
+  } else {
+    commentAccountFilter.value = "";
+  }
+}
+
+function renderCommentPager(totalRows, currentPage, totalPages, startIndex, endIndex) {
+  if (!commentTablePager) return;
+  if (totalRows <= COMMENT_PAGE_SIZE) {
+    commentTablePager.innerHTML = "";
+    commentTablePager.classList.add("hidden");
+    return;
+  }
+  const pages = materialPagerPages(totalPages, currentPage);
+  commentTablePager.classList.remove("hidden");
+  commentTablePager.innerHTML = `
+    <div class="table-pager-summary">显示 ${formatNumber(startIndex)}-${formatNumber(endIndex)} / ${formatNumber(totalRows)} 条评论</div>
+    <div class="table-pager-actions">
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage - 1}"
+        ${currentPage <= 1 ? "disabled" : ""}
+      >上一页</button>
+      ${pages.map((page, index) => `
+        ${index > 0 && page - pages[index - 1] > 1 ? '<span class="table-pager-ellipsis">...</span>' : ""}
+        <button
+          type="button"
+          class="button ghost compact table-page-button ${page === currentPage ? "is-active" : ""}"
+          data-page="${page}"
+          ${page === currentPage ? 'aria-current="page"' : ""}
+        >${formatNumber(page)}</button>
+      `).join("")}
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage + 1}"
+        ${currentPage >= totalPages ? "disabled" : ""}
+      >下一页</button>
+    </div>
+  `;
+  commentTablePager.querySelectorAll("button[data-page]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextPage = Number(button.dataset.page || 0);
+      if (!nextPage || nextPage === state.commentPage) return;
+      state.commentPage = nextPage;
+      renderCommentTable(commentRowsForCurrentFilter());
+    });
+  });
+}
+
+function closeCommentReplyModal() {
+  state.commentReplyTarget = null;
+  if (commentReplyInput) commentReplyInput.value = "";
+  setInlineFeedback(commentReplyStatus, "", "neutral");
+  if (!commentReplyModal) return;
+  commentReplyModal.classList.add("hidden");
+  commentReplyModal.setAttribute("aria-hidden", "true");
+}
+
+function closeRelationDetailModal() {
+  if (!relationDetailModal) return;
+  relationDetailModal.classList.add("hidden");
+  relationDetailModal.setAttribute("aria-hidden", "true");
+  if (relationDetailBody) relationDetailBody.innerHTML = "";
+}
+
+function relationMetricValue(value, formatter = (item) => item) {
+  if (value === null || value === undefined || value === "") {
+    return "--";
+  }
+  return formatter(value);
+}
+
+function relationMetricCardMarkup(label, value, className = "") {
+  return `
+    <div class="relation-card-metric">
+      <span>${escapeHtml(label)}</span>
+      <strong class="${className}">${escapeHtml(String(value))}</strong>
+    </div>
+  `;
+}
+
+function relationPlanCardMarkup(item) {
+  const planId = Number(item?.ad_id || 0);
+  const planName = String(item?.ad_name || "").trim() || (planId ? `计划 ${planId}` : "未命名计划");
+  const advertiserName = String(item?.advertiser_name || "").trim();
+  const payAmount = formatAlignedMetric(item, "supportsPayAmount", item?.pay_amount, formatMoney);
+  const orderCount = formatAlignedMetric(item, "supportsOrderCount", item?.order_count, formatNumber);
+  const roi = formatAlignedMetric(item, "supportsPayRoi", item?.roi, formatRate);
+  return `
+    <article class="relation-card">
+      <div class="relation-card-head">
+        <div>
+          <div class="cell-primary">${escapeHtml(planName)}</div>
+          <div class="cell-subline mono">
+            <span class="cell-subitem">PID ${escapeHtml(String(planId || "-"))}</span>
+            ${advertiserName ? `<span class="cell-subitem">${escapeHtml(advertiserName)}</span>` : ""}
+          </div>
+          <div class="cell-subline">${renderPlanSourceBadge(item)}</div>
+        </div>
+        ${item?.stat_cost !== null && item?.stat_cost !== undefined ? `<span class="pill">消耗 ${formatMoney(item.stat_cost)}</span>` : ""}
+      </div>
+      <div class="relation-card-metrics">
+        ${relationMetricCardMarkup("支付", payAmount, "mono")}
+        ${relationMetricCardMarkup("订单", orderCount, "mono")}
+        ${relationMetricCardMarkup("ROI", roi, "mono")}
+      </div>
+    </article>
+  `;
+}
+
+function relationAccountCardMarkup(item) {
+  const advertiserId = Number(item?.advertiser_id || 0);
+  const advertiserName = String(item?.advertiser_name || "").trim() || (advertiserId ? `账户 ${advertiserId}` : "未命名账户");
+  const topPlanName = String(item?.top_plan_name || "").trim();
+  const planCount = relationMetricValue(item?.plan_count, formatNumber);
+  const statCost = relationMetricValue(item?.stat_cost, formatMoney);
+  const payAmount = formatAlignedMetric(item, "supportsPayAmount", item?.pay_amount, formatMoney);
+  const orderCount = formatAlignedMetric(item, "supportsOrderCount", item?.order_count, formatNumber);
+  return `
+    <article class="relation-card">
+      <div class="relation-card-head">
+        <div>
+          <div class="cell-primary">${escapeHtml(advertiserName)}</div>
+          <div class="cell-subline mono">
+            <span class="cell-subitem">AID ${escapeHtml(String(advertiserId || "-"))}</span>
+            ${topPlanName ? `<span class="cell-subitem">代表计划 ${escapeHtml(topPlanName)}</span>` : ""}
+          </div>
+          <div class="cell-subline">${renderPlanSourceBadge(item)}</div>
+        </div>
+        ${item?.plan_count !== null && item?.plan_count !== undefined ? `<span class="pill">计划 ${formatNumber(item.plan_count)}</span>` : ""}
+      </div>
+      <div class="relation-card-metrics">
+        ${relationMetricCardMarkup("消耗", statCost, "mono")}
+        ${relationMetricCardMarkup("支付", payAmount, "mono")}
+        ${relationMetricCardMarkup("订单", orderCount, "mono")}
+      </div>
+    </article>
+  `;
+}
+
+function openRelationDetailModal({ title, meta, kind, items, emptyText }) {
+  if (!relationDetailModal || !relationDetailBody) return;
+  if (relationDetailTitle) {
+    relationDetailTitle.textContent = title || "关联明细";
+  }
+  if (relationDetailMeta) {
+    relationDetailMeta.textContent = meta || "按当前筛选结果展示关联明细。";
+  }
+  if (!items.length) {
+    relationDetailBody.innerHTML = `<div class="relation-empty">${escapeHtml(emptyText || "当前范围内没有关联明细。")}</div>`;
+  } else {
+    relationDetailBody.innerHTML = `<div class="relation-list">${items.map((item) => (
+      kind === "account" ? relationAccountCardMarkup(item) : relationPlanCardMarkup(item)
+    )).join("")}</div>`;
+  }
+  relationDetailModal.classList.remove("hidden");
+  relationDetailModal.setAttribute("aria-hidden", "false");
+}
+
+function openAccountPlanRelationDetail(row) {
+  const payload = rangePayload(sectionFilter("account"), "account");
+  const advertiserId = Number(row?.advertiser_id || 0);
+  const plans = buildPlanRelationItems((payload?.plans || []).filter((item) => Number(item?.advertiser_id || 0) === advertiserId));
+  openRelationDetailModal({
+    title: `${String(row?.advertiser_name || "").trim() || "账户"} 关联计划`,
+    meta: `${formatDateWindowMeta(payload)} · AID ${advertiserId || "-"}`,
+    kind: "plan",
+    items: plans,
+    emptyText: "当前筛选范围内没有查询到这个账户的关联计划。",
+  });
+}
+
+function openProductRelationDetail(row, kind) {
+  const payload = rangePayload(sectionFilter("breakdown"), "breakdown");
+  const productKey = String(row?.product_key || productKeyForItem(row));
+  const plans = (payload?.plans || []).filter((item) => productKeyForItem(item) === productKey);
+  const label = String(row?.product_name || row?.product_id || "当前商品").trim() || "当前商品";
+  if (kind === "account") {
+    openRelationDetailModal({
+      title: `${label} 覆盖账户`,
+      meta: `${formatDateWindowMeta(payload)} · 由当前商品命中的计划汇总`,
+      kind: "account",
+      items: buildAccountRelationItemsFromPlans(plans),
+      emptyText: "当前筛选范围内没有查询到这个商品覆盖的账户。",
+    });
+    return;
+  }
+  openRelationDetailModal({
+    title: `${label} 关联计划`,
+    meta: `${formatDateWindowMeta(payload)} · 由当前商品命中的计划汇总`,
+    kind: "plan",
+    items: buildPlanRelationItems(plans),
+    emptyText: "当前筛选范围内没有查询到这个商品关联的计划。",
+  });
+}
+
+function openMaterialRelationDetail(row, kind) {
+  const payload = materialRangePayload(sectionFilter("material"));
+  const label = String(row?.material_name || row?.material_id || "当前素材").trim() || "当前素材";
+  if (kind === "account") {
+    openRelationDetailModal({
+      title: `${label} 覆盖账户`,
+      meta: `${formatDateWindowMeta(payload)} · 基于当前素材汇总关系`,
+      kind: "account",
+      items: resolveAccountRelationItemsByIds(row?.advertiser_ids || []),
+      emptyText: "当前素材没有可展示的关联账户。",
+    });
+    return;
+  }
+  openRelationDetailModal({
+    title: `${label} 关联计划`,
+    meta: `${formatDateWindowMeta(payload)} · 基于当前素材汇总关系`,
+    kind: "plan",
+    items: resolvePlanRelationItemsByIds(row?.plan_ids || []),
+    emptyText: "当前素材没有可展示的关联计划。",
+  });
+}
+
+function openCommentReplyModal(row) {
+  if (!row || !commentReplyModal) return;
+  state.commentReplyTarget = {
+    advertiser_id: Number(row.advertiser_id || 0),
+    comment_id: String(row.comment_id || ""),
+  };
+  if (commentReplyTitle) {
+    commentReplyTitle.textContent = "回复评论";
+  }
+  if (commentReplyMeta) {
+    const commentText = String(row.text || "").trim();
+    const previewText = commentText.length > 48 ? `${commentText.slice(0, 48)}...` : commentText;
+    commentReplyMeta.textContent = `${row.advertiser_name || "-"} · ${row.create_time || "-"} · ${previewText || "无评论内容"}`;
+  }
+  if (commentReplyInput) {
+    commentReplyInput.value = "";
+    commentReplyInput.focus();
+  }
+  setInlineFeedback(commentReplyStatus, "回复将直接发送到巨量评论管理。", "neutral");
+  commentReplyModal.classList.remove("hidden");
+  commentReplyModal.setAttribute("aria-hidden", "false");
+}
+
+async function submitCommentReply() {
+  const target = state.commentReplyTarget;
+  if (!target) return;
+  const replyText = String(commentReplyInput?.value || "").trim();
+  if (!replyText) {
+    setInlineFeedback(commentReplyStatus, "请输入回复内容。", "error");
+    commentReplyInput?.focus();
+    return;
+  }
+  if (commentReplySubmit) commentReplySubmit.disabled = true;
+  setInlineFeedback(commentReplyStatus, "正在发布回复…", "neutral");
+  try {
+    const response = await fetch("/api/comments/reply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        advertiser_id: target.advertiser_id,
+        comment_id: target.comment_id,
+        reply_text: replyText,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || "回复评论失败");
+    }
+    closeCommentReplyModal();
+    await refreshCommentSection(true);
+  } catch (error) {
+    setInlineFeedback(commentReplyStatus, error.message || "回复评论失败。", "error");
+  } finally {
+    if (commentReplySubmit) commentReplySubmit.disabled = false;
+  }
+}
+
+async function hideComment(row) {
+  if (!row || String(row.hide_status || "").trim().toUpperCase() === "HIDE") return;
+  const confirmed = window.confirm("确认隐藏这条评论吗？");
+  if (!confirmed) return;
+  const response = await fetch("/api/comments/hide", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      advertiser_id: Number(row.advertiser_id || 0),
+      comment_id: String(row.comment_id || ""),
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.detail || "隐藏评论失败");
+  }
+  await refreshCommentSection(true);
+}
+
+
+function renderCommentTable(rows) {
+  if (!commentTable) return;
+  commentTable.classList.add("comment-table");
+  const query = String(commentSearch?.value || "").trim().toLowerCase();
+  const visibleRows = rows.filter((row) => {
+    const haystack = [
+      row.text,
+      row.comment_user_name,
+      row.comment_user_id,
+      row.item_title,
+      row.promotion_display_name,
+      row.material_display_name,
+      row.advertiser_name,
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+  const columns = [
+    { key: "text", label: "评论内容", sortable: true },
+    { key: "actions", label: "操作", sortable: false },
+    { key: "reply_status_text", label: "回复状态", sortable: true },
+    { key: "hide_status_text", label: "隐藏状态", sortable: true },
+    { key: "level_type_text", label: "评论层级", sortable: true },
+    { key: "comment_user_name", label: "评论用户", sortable: true },
+    { key: "material_display_name", label: "关联视频素材", sortable: true },
+    { key: "reply_count", label: "相关回复数", sortable: true },
+    { key: "like_count", label: "点赞数", sortable: true },
+    { key: "item_title", label: "视频标题", sortable: true },
+    { key: "video_owner_aweme_id", label: "视频所属抖音号", sortable: true },
+    { key: "comment_type_text", label: "评论类型", sortable: true },
+    { key: "promotion_display_name", label: "评论来源计划", sortable: true },
+    { key: "create_time", label: "评论时间", sortable: true },
+  ];
+  const columnWidths = [
+    "240px",
+    "112px",
+    "84px",
+    "84px",
+    "84px",
+    "160px",
+    "240px",
+    "76px",
+    "76px",
+    "300px",
+    "112px",
+    "96px",
+    "160px",
+    "150px",
+  ];
+  const sortedRows = sortRows(visibleRows, state.commentSort);
+  const totalRows = sortedRows.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / COMMENT_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(Number(state.commentPage) || 1, 1), totalPages);
+  const pageStart = totalRows ? (currentPage - 1) * COMMENT_PAGE_SIZE : 0;
+  const pageRows = sortedRows.slice(pageStart, pageStart + COMMENT_PAGE_SIZE);
+  state.commentPage = currentPage;
+  commentTable.innerHTML = `
+    <colgroup>
+      ${columnWidths.map((width) => `<col style="width: ${width};">`).join("")}
+    </colgroup>
+    ${makeHeader(columns, state.commentSort, "comment-sort")}
+    <tbody>
+      ${pageRows.map((row) => `
+        <tr data-comment-id="${escapeHtml(row.comment_id)}" data-advertiser-id="${escapeHtml(row.advertiser_id)}">
+          <td>
+            <div class="cell-primary comment-cell-copy">${escapeHtml(row.text || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">CID ${escapeHtml(truncateMiddle(row.comment_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td>
+            <div class="comment-action-buttons">
+              <button
+                type="button"
+                class="button ghost compact"
+                data-action="reply-comment"
+                data-comment-id="${escapeHtml(row.comment_id)}"
+                data-advertiser-id="${escapeHtml(row.advertiser_id)}"
+              >回复评论</button>
+              <button
+                type="button"
+                class="button ghost compact"
+                data-action="hide-comment"
+                data-comment-id="${escapeHtml(row.comment_id)}"
+                data-advertiser-id="${escapeHtml(row.advertiser_id)}"
+                ${String(row.hide_status || "").trim().toUpperCase() === "HIDE" ? "disabled" : ""}
+              >${String(row.hide_status || "").trim().toUpperCase() === "HIDE" ? "已隐藏" : "隐藏评论"}</button>
+            </div>
+          </td>
+          <td>${escapeHtml(row.reply_status_text || "-")}</td>
+          <td>${escapeHtml(row.hide_status_text || "-")}</td>
+          <td>${escapeHtml(row.level_type_text || "-")}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.comment_user_name || "未知用户")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">${escapeHtml(row.comment_user_id || "-")}</span>
+            </div>
+          </td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.material_display_name || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">MID ${escapeHtml(truncateMiddle(row.material_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td class="mono">${formatNumber(row.reply_count || 0)}</td>
+          <td class="mono">${formatNumber(row.like_count || 0)}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.item_title || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">VID ${escapeHtml(truncateMiddle(row.item_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td class="mono">${escapeHtml(row.video_owner_aweme_id || "-")}</td>
+          <td>${escapeHtml(row.comment_type_text || "-")}</td>
+          <td>
+            <div class="cell-primary">${escapeHtml(row.promotion_display_name || "-")}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">PID ${escapeHtml(truncateMiddle(row.promotion_id || "-", 8, 6))}</span>
+            </div>
+          </td>
+          <td class="mono">${escapeHtml(row.create_time || "-")}</td>
+        </tr>
+      `).join("")}
+    </tbody>
+  `;
+  commentTable.querySelectorAll("th[data-key]").forEach((header) => {
+    header.addEventListener("click", () => {
+      const key = header.dataset.key;
+      const column = columns.find((item) => item.key === key);
+      if (!column || !column.sortable) return;
+      state.commentSort = toggleSort(state.commentSort, key);
+      saveSort("comment-sort", state.commentSort);
+      renderCommentTable(rows);
+    });
+  });
+  commentTable.querySelectorAll('[data-action="reply-comment"]').forEach((button) => {
+    button.addEventListener("click", () => {
+      const commentId = String(button.dataset.commentId || "");
+      const advertiserId = Number(button.dataset.advertiserId || 0);
+      const row = visibleRows.find(
+        (item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId,
+      );
+      if (!row) return;
+      openCommentReplyModal(row);
+    });
+  });
+  commentTable.querySelectorAll('[data-action="hide-comment"]').forEach((button) => {
+    button.addEventListener("click", async () => {
+      const commentId = String(button.dataset.commentId || "");
+      const advertiserId = Number(button.dataset.advertiserId || 0);
+      const row = visibleRows.find(
+        (item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId,
+      );
+      if (!row) return;
+      try {
+        await hideComment(row);
+      } catch (error) {
+        window.alert(error.message || "隐藏评论失败");
+      }
+    });
+  });
+  renderCommentPager(
+    totalRows,
+    currentPage,
+    totalPages,
+    totalRows ? pageStart + 1 : 0,
+    pageStart + pageRows.length,
+  );
+}
+
+async function fetchMaterialRankings(force = false, filterOverride = null) {
+  const filter = normalizeRangeFilter(filterOverride || sectionFilter("material"));
   const cacheKey = performanceFilterKey(filter);
+  const query = materialServerQueryState("material");
+  const querySignature = materialPayloadSignature("material");
   const cachedPayload = state.materialPayloads[cacheKey];
+  const allowAgeCache = filter.mode !== "day";
   if (!force && cachedPayload) {
     const expectedSnapshot = latestMaterialSnapshotToken();
     const cachedSnapshot = String(cachedPayload.snapshot_time || "").trim();
     const cachedAt = Number(state.materialPayloadFetchedAt[cacheKey] || 0);
     const freshBySnapshot = Boolean(expectedSnapshot) && cachedSnapshot === expectedSnapshot;
-    const freshByAge = !expectedSnapshot && cachedAt > 0 && Date.now() - cachedAt < MATERIAL_CACHE_TTL_MS;
-    if (freshBySnapshot || freshByAge) {
+    const freshByAge = cachedAt > 0 && Date.now() - cachedAt < MATERIAL_CACHE_TTL_MS;
+    if (
+      cachedPayload.querySignature === querySignature
+      && (freshBySnapshot || (allowAgeCache && freshByAge) || (!expectedSnapshot && freshByAge))
+    ) {
       return cachedPayload;
     }
   }
-  const params = new URLSearchParams();
-  params.set("range", filter.mode);
-  if (filter.mode === "custom") {
-    params.set("start_date", filter.start);
-    params.set("end_date", filter.end);
+  if (!force && state.materialRequestPromises[cacheKey]?.querySignature === querySignature) {
+    return state.materialRequestPromises[cacheKey].promise;
   }
-  const response = await fetch(`/api/material-rankings?${params.toString()}`).catch(() => null);
-  if (!response || !response.ok) {
-    const errorPayload = response ? await response.json().catch(() => ({})) : {};
-    if (cachedPayload) {
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    params.set("range", filter.mode);
+    if (filter.mode === "custom") {
+      params.set("start_date", filter.start);
+      params.set("end_date", filter.end);
+    }
+    params.set("page", String(query.page));
+    params.set("page_size", String(query.pageSize));
+    params.set("sort_key", query.sortKey);
+    params.set("sort_dir", query.sortDir);
+    if (query.search) {
+      params.set("search", query.search);
+    }
+    const response = await fetch(`/api/material-rankings?${params.toString()}`).catch(() => null);
+    if (!response || !response.ok) {
+      const errorPayload = response ? await response.json().catch(() => ({})) : {};
+      if (cachedPayload && cachedPayload.querySignature === querySignature) {
+        return cachedPayload;
+      }
+      throw new Error(errorPayload.detail || "material rankings fetch failed");
+    }
+    const payload = await response.json();
+    payload.querySignature = querySignature;
+    state.materialPayloads[cacheKey] = payload;
+    state.materialPayloadFetchedAt[cacheKey] = Date.now();
+    return payload;
+  })();
+  state.materialRequestPromises[cacheKey] = { querySignature, promise: requestPromise };
+  try {
+    return await requestPromise;
+  } finally {
+    delete state.materialRequestPromises[cacheKey];
+  }
+}
+
+async function fetchTeamMaterialRankings(force = false, filterOverride = null) {
+  const filter = normalizeRangeFilter(filterOverride || sectionFilter("teamMaterial"));
+  const cacheKey = performanceFilterKey(filter);
+  const query = materialServerQueryState("teamMaterial");
+  const querySignature = materialPayloadSignature("teamMaterial");
+  const cachedPayload = state.teamMaterialPayloads[cacheKey];
+  const allowAgeCache = filter.mode !== "day";
+  if (!force && cachedPayload) {
+    const expectedSnapshot = latestMaterialSnapshotToken();
+    const cachedSnapshot = String(cachedPayload.snapshot_time || "").trim();
+    const cachedAt = Number(state.teamMaterialPayloadFetchedAt[cacheKey] || 0);
+    const freshBySnapshot = Boolean(expectedSnapshot) && cachedSnapshot === expectedSnapshot;
+    const freshByAge = cachedAt > 0 && Date.now() - cachedAt < MATERIAL_CACHE_TTL_MS;
+    if (
+      cachedPayload.querySignature === querySignature
+      && (freshBySnapshot || (allowAgeCache && freshByAge) || (!expectedSnapshot && freshByAge))
+    ) {
       return cachedPayload;
     }
-    throw new Error(errorPayload.detail || "material rankings fetch failed");
   }
-  const payload = await response.json();
-  state.materialPayloads[cacheKey] = payload;
-  state.materialPayloadFetchedAt[cacheKey] = Date.now();
-  return payload;
+  if (!force && state.teamMaterialRequestPromises[cacheKey]?.querySignature === querySignature) {
+    return state.teamMaterialRequestPromises[cacheKey].promise;
+  }
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    params.set("range", filter.mode);
+    if (filter.mode === "custom") {
+      params.set("start_date", filter.start);
+      params.set("end_date", filter.end);
+    }
+    params.set("page", String(query.page));
+    params.set("page_size", String(query.pageSize));
+    params.set("sort_key", query.sortKey);
+    params.set("sort_dir", query.sortDir);
+    if (query.search) {
+      params.set("search", query.search);
+    }
+    const response = await fetch(`/api/team-material-rankings?${params.toString()}`).catch(() => null);
+    if (!response || !response.ok) {
+      const errorPayload = response ? await response.json().catch(() => ({})) : {};
+      if (cachedPayload && cachedPayload.querySignature === querySignature) {
+        return cachedPayload;
+      }
+      throw new Error(errorPayload.detail || "team material rankings fetch failed");
+    }
+    const payload = await response.json();
+    payload.querySignature = querySignature;
+    state.teamMaterialPayloads[cacheKey] = payload;
+    state.teamMaterialPayloadFetchedAt[cacheKey] = Date.now();
+    return payload;
+  })();
+  state.teamMaterialRequestPromises[cacheKey] = { querySignature, promise: requestPromise };
+  try {
+    return await requestPromise;
+  } finally {
+    delete state.teamMaterialRequestPromises[cacheKey];
+  }
+}
+
+async function fetchComments(force = false) {
+  const filter = sectionFilter("comment");
+  const advertiserId = commentRequestAdvertiserId();
+  const cacheKey = commentCacheKey(filter, advertiserId);
+  const cachedPayload = state.commentPayloads[cacheKey];
+  const cachedAt = Number(state.commentPayloadFetchedAt[cacheKey] || 0);
+  if (!force && cachedPayload && cachedAt > 0 && Date.now() - cachedAt < COMMENT_CACHE_TTL_MS) {
+    return cachedPayload;
+  }
+  if (state.commentRequestPromises[cacheKey]) {
+    return state.commentRequestPromises[cacheKey];
+  }
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    params.set("range", filter.mode);
+    if (filter.mode === "custom") {
+      params.set("start_date", filter.start);
+      params.set("end_date", filter.end);
+    }
+    if (advertiserId > 0) {
+      params.set("advertiser_id", String(advertiserId));
+    }
+    if (force) {
+      params.set("force", "1");
+    }
+    const response = await fetch(`/api/comments?${params.toString()}`).catch(() => null);
+    if (!response || !response.ok) {
+      const errorPayload = response ? await response.json().catch(() => ({})) : {};
+      if (cachedPayload) {
+        return cachedPayload;
+      }
+      throw new Error(errorPayload.detail || "comments fetch failed");
+    }
+    const payload = await response.json();
+    state.commentPayloads[cacheKey] = payload;
+    state.commentPayloadFetchedAt[cacheKey] = Date.now();
+    return payload;
+  })();
+  state.commentRequestPromises[cacheKey] = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    delete state.commentRequestPromises[cacheKey];
+  }
 }
 
 function fillPlanAccountFilter(accountNames) {
@@ -2716,7 +5109,7 @@ function clearPlanAssetSummary() {
 }
 
 function planAssetCacheKey(adId, snapshotTime) {
-  return `${snapshotTime || "latest"}:${adId}`;
+  return `${requestDisplayScope()}:${snapshotTime || "latest"}:${adId}`;
 }
 
 async function fetchPlanAssets(adId) {
@@ -2725,7 +5118,11 @@ async function fetchPlanAssets(adId) {
   if (state.planAssetCache[cacheKey]) {
     return state.planAssetCache[cacheKey];
   }
-  const query = snapshotTime ? `?snapshot_time=${encodeURIComponent(snapshotTime)}` : "";
+  const params = appendDisplayScopeParam(new URLSearchParams());
+  if (snapshotTime) {
+    params.set("snapshot_time", snapshotTime);
+  }
+  const query = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`/api/plans/${encodeURIComponent(adId)}/assets${query}`);
   if (!response.ok) {
     throw new Error("assets fetch failed");
@@ -2763,7 +5160,7 @@ function renderPlanAssetSummaryPayload(payload) {
         <span class="detail-eyebrow">商品与素材摘要</span>
         <h4 class="detail-shell-title">计划资产补充信息</h4>
         <div class="detail-meta-row">
-          ${detailMetaPill(`明细快照 ${escapeHtml(payload?.snapshot_time || "-")}`)}
+          ${detailMetaPill(`素材快照 ${escapeHtml(payload?.snapshot_time || "-")}`)}
           ${detailMetaPill(`素材类型 ${formatNumber(materialTypeCount)}`)}
         </div>
       </div>
@@ -2793,7 +5190,7 @@ function renderPlanAssetSummaryPayload(payload) {
               <span>消耗 ${formatMoney(item.stat_cost)}</span>
             </div>
           </article>
-        `).join("") : '<div class="asset-item">当前没有同步到商品明细。</div>'}
+        `).join("") : '<div class="asset-item">当前没有同步到商品信息。</div>'}
       </div>
     </div>
     <div class="detail-grid-section">
@@ -2814,7 +5211,7 @@ function renderPlanAssetSummaryPayload(payload) {
               <span>ROI ${formatRate(item.roi)}</span>
             </div>
           </article>
-        `).join("") : '<div class="asset-item">当前没有同步到素材明细。</div>'}
+        `).join("") : '<div class="asset-item">当前没有同步到素材信息。</div>'}
       </div>
     </div>
   `;
@@ -2839,15 +5236,22 @@ async function renderPlanAssets(adId) {
 async function renderPlanDetail(adId) {
   if (!planDetail || !planAssetSummary) return;
   const planFilter = sectionFilter("plan");
-  const rows = rangePayload(planFilter)?.plans || [];
+  const rows = rangePayload(planFilter, "plan")?.plans || [];
   const sourceRow = rows.find((item) => item.ad_id === adId);
   if (!sourceRow) return;
   const row = enrichPlanRow(sourceRow);
   const roiGap = Number(row.roi || 0) - Number(row.roi_goal || 0);
   const currentRangeLabel = rangeLabel(planFilter);
+  const totalPayText = formatAlignedMetric(row, "supportsTotalPayAmount", row.total_pay_amount, formatMoney);
+  const payRoiText = formatAlignedMetric(row, "supportsPayRoi", row.roi, formatRate);
+  const payAmountText = formatAlignedMetric(row, "supportsPayAmount", row.pay_amount, formatMoney);
+  const orderCountText = formatAlignedMetric(row, "supportsOrderCount", row.order_count, formatNumber);
+  const payOrderCostText = formatAlignedMetric(row, "supportsPayOrderCost", row.pay_order_cost, formatMoney, Number(row.order_count || 0) > 0);
+  const settledAmountRateText = formatAlignedMetric(row, "supportsSettledAmountRate", row.settled_amount_rate, formatPercent, Number(row.total_pay_amount || 0) > 0);
+  const refundRateText = formatAlignedMetric(row, "supportsRefundRate1h", row.refund_rate_1h, formatPercent, Number(row.total_pay_amount || 0) > 0);
   planDetailStage?.classList.remove("hidden");
   planDetail.className = "detail-panel";
-  const rangeSummary = `${currentRangeLabel}内整体支付 ROI ${formatRate(row.roi)}，整体成交 ${formatMoney(row.total_pay_amount)}，净成交 ${formatMoney(row.settled_pay_amount)}，1 小时内退款率 ${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}`;
+  const rangeSummary = `${currentRangeLabel}内整体支付 ROI ${payRoiText}，整体成交 ${totalPayText}，净成交 ${formatMoney(row.settled_pay_amount)}，1 小时内退款率 ${refundRateText}`;
   planDetail.innerHTML = `
     <div class="detail-shell-head">
       <div class="detail-shell-copy">
@@ -2856,6 +5260,7 @@ async function renderPlanDetail(adId) {
         <div class="detail-meta-row">
           ${detailMetaPill(escapeHtml(row.advertiser_name || "-"))}
           ${detailMetaPill(escapeHtml(row.product_name || "未关联商品"))}
+          ${renderPlanSourceBadge(row)}
           ${renderMarketingGoalBadge(row)}
           ${renderPlanStatusBadge(row)}
         </div>
@@ -2863,20 +5268,20 @@ async function renderPlanDetail(adId) {
     </div>
     <div class="detail-highlight-grid">
       ${detailHighlightCard("消耗", formatMoney(row.stat_cost), "mono")}
-      ${detailHighlightCard("整体成交金额", formatMoney(row.total_pay_amount), "mono")}
+      ${detailHighlightCard("整体成交金额", totalPayText, "mono")}
       ${detailHighlightCard("净成交金额", formatMoney(row.settled_pay_amount), "mono")}
-      ${detailHighlightCard("整体支付 ROI", formatRate(row.roi), "mono")}
+      ${detailHighlightCard("整体支付 ROI", payRoiText, "mono")}
     </div>
     <div class="detail-grid-section">
       <div class="detail-section-title">效果拆分</div>
       <div class="detail-metric-grid">
         ${detailMetricCard("净成交 ROI", formatRate(row.settled_roi), "mono")}
-        ${detailMetricCard("支付金额", formatMoney(row.pay_amount), "mono")}
-        ${detailMetricCard("整体成交订单数", formatNumber(row.order_count), "mono")}
+        ${detailMetricCard("支付金额", payAmountText, "mono")}
+        ${detailMetricCard("整体成交订单数", orderCountText, "mono")}
         ${detailMetricCard("净成交订单数", formatNumber(row.settled_order_count), "mono")}
-        ${detailMetricCard("整体成交订单成本", Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-", "mono")}
-        ${detailMetricCard("净成交金额结算率", Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-", "mono")}
-        ${detailMetricCard("1 小时内退款率", Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-", "mono")}
+        ${detailMetricCard("整体成交订单成本", payOrderCostText, "mono")}
+        ${detailMetricCard("净成交金额结算率", settledAmountRateText, "mono")}
+        ${detailMetricCard("1 小时内退款率", refundRateText, "mono")}
         ${detailMetricCard("目标 ROI", formatRate(row.roi_goal), "mono")}
         ${detailMetricCard("ROI 差值", `${roiGap >= 0 ? "+" : ""}${formatRate(roiGap)}`, `mono ${roiGap >= 0 ? "positive" : "negative"}`)}
       </div>
@@ -2923,7 +5328,9 @@ function renderPlanInteractions(plans) {
   if (!planDetail || !planAssetSummary) return;
   planTable.querySelectorAll("tbody tr").forEach((rowEl) => {
     rowEl.addEventListener("click", () => {
-      setSelectedPlan(Number(rowEl.dataset.planId));
+      const planId = Number(rowEl.dataset.planId || 0);
+      if (!planId) return;
+      setSelectedPlan(planId);
       renderPlanTable(plans);
     });
   });
@@ -2972,7 +5379,9 @@ function deprecatedRenderPlanTable(plans) {
     { key: "status_text", label: "投放状态", sortable: true },
   ];
   const enrichedRows = plans.map((row) => enrichPlanRow(row));
-  const rows = enrichedRows.filter((row) => {
+  const scopedRows = enrichedRows.filter((row) => !accountFilter || row.advertiser_name === accountFilter);
+  const aggregateRow = buildPlanAggregateRow(scopedRows);
+  const rows = scopedRows.filter((row) => {
     const haystack = [
       row.ad_name,
       row.product_name,
@@ -2985,8 +5394,7 @@ function deprecatedRenderPlanTable(plans) {
       row.status_text,
     ].join(" ").toLowerCase();
     const matchQuery = haystack.includes(query);
-    const matchAccount = !accountFilter || row.advertiser_name === accountFilter;
-    return matchQuery && matchAccount;
+    return matchQuery;
   });
   const sortedRows = sortRows(rows, state.planSort);
   const supportsPlanDetail = Boolean(planDetail && planAssetSummary);
@@ -2994,8 +5402,32 @@ function deprecatedRenderPlanTable(plans) {
   planTable.innerHTML = `
     ${makeHeader(columns, state.planSort, "plan-sort")}
     <tbody>
+      ${aggregateRow ? `
+        <tr>
+          <td>
+            <div class="cell-primary">${escapeHtml(aggregateRow.ad_name)}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">${escapeHtml(aggregateRow.product_name || "")}</span>
+            </div>
+          </td>
+          <td>${renderPlanSourceBadge(aggregateRow)}</td>
+          <td class="mono">${formatMoney(aggregateRow.stat_cost)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsTotalPayAmount", aggregateRow.total_pay_amount, formatMoney)}</td>
+          <td class="mono">${formatMoney(aggregateRow.settled_pay_amount)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsPayRoi", aggregateRow.roi, formatRate)}</td>
+          <td class="mono">${formatRate(aggregateRow.settled_roi)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsOrderCount", aggregateRow.order_count, formatNumber)}</td>
+          <td class="mono">${formatNumber(aggregateRow.settled_order_count)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsPayOrderCost", aggregateRow.pay_order_cost, formatMoney, Number(aggregateRow.order_count || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsSettledAmountRate", aggregateRow.settled_amount_rate, formatPercent, Number(aggregateRow.total_pay_amount || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsRefundRate1h", aggregateRow.refund_rate_1h, formatPercent, Number(aggregateRow.total_pay_amount || 0) > 0)}</td>
+          <td><div class="cell-primary">${escapeHtml(aggregateRow.metric_source_text || "-")}</div></td>
+          <td>${escapeHtml(aggregateRow.advertiser_name)}</td>
+          <td><span class="pill">${escapeHtml(aggregateRow.status_text)}</span></td>
+        </tr>
+      ` : ""}
       ${sortedRows.map((row) => `
-        <tr data-plan-id="${row.ad_id}" class="${supportsPlanDetail && state.selectedPlanId === row.ad_id ? "active-row" : ""}">
+        <tr ${row.isAggregate ? "" : `data-plan-id="${row.ad_id}"`} class="${supportsPlanDetail && state.selectedPlanId === row.ad_id ? "active-row" : ""}">
           <td>
             <div class="cell-primary">${escapeHtml(row.ad_name)}</div>
             <div class="cell-subline mono">
@@ -3004,15 +5436,15 @@ function deprecatedRenderPlanTable(plans) {
           </td>
           <td>${renderPlanSourceBadge(row)}</td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
-          <td class="mono">${formatMoney(row.total_pay_amount)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsTotalPayAmount", row.total_pay_amount, formatMoney)}</td>
           <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
-          <td class="mono">${formatRate(row.roi)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsPayRoi", row.roi, formatRate)}</td>
           <td class="mono">${formatRate(row.settled_roi)}</td>
-          <td class="mono">${formatNumber(row.order_count)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsOrderCount", row.order_count, formatNumber)}</td>
           <td class="mono">${formatNumber(row.settled_order_count)}</td>
-          <td class="mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</td>
-          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</td>
-          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsPayOrderCost", row.pay_order_cost, formatMoney, Number(row.order_count || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsSettledAmountRate", row.settled_amount_rate, formatPercent, Number(row.total_pay_amount || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsRefundRate1h", row.refund_rate_1h, formatPercent, Number(row.total_pay_amount || 0) > 0)}</td>
           <td>
             <div class="cell-primary">${escapeHtml(row.product_name || "-")}</div>
             <div class="cell-subline">
@@ -3050,8 +5482,8 @@ function renderPlanTable(plans) {
     state.planSort = { ...state.planSort, key: "marketing_goal_text" };
     saveSort("plan-sort", state.planSort);
   }
-  const query = planSearch.value.trim().toLowerCase();
-  const accountFilter = planAccountFilter.value;
+  const planPayload = rangePayload(sectionFilter("plan"), "plan");
+  const pagination = planPayload?.plans_pagination || {};
   const columns = [
     { key: "ad_name", label: "计划", sortable: true },
     { key: "plan_source_text", label: "投放类型", sortable: true },
@@ -3070,29 +5502,41 @@ function renderPlanTable(plans) {
     { key: "status_text", label: "投放状态", sortable: true },
   ];
   const enrichedRows = plans.map((row) => enrichPlanRow(row));
-  const rows = enrichedRows.filter((row) => {
-    const haystack = [
-      row.ad_name,
-      row.product_name,
-      row.advertiser_name,
-      row.anchor_name,
-      row.ad_id,
-      row.product_id,
-      row.plan_source_text,
-      row.marketing_goal_text,
-      row.status_text,
-    ].join(" ").toLowerCase();
-    const matchQuery = haystack.includes(query);
-    const matchAccount = !accountFilter || row.advertiser_name === accountFilter;
-    return matchQuery && matchAccount;
-  });
-  const sortedRows = sortRows(rows, state.planSort);
+  const aggregateRow = planPayload?.plans_aggregate ? enrichPlanRow(planPayload.plans_aggregate) : null;
   const supportsPlanDetail = Boolean(planDetail && planAssetSummary);
+  const totalRows = Number(pagination.total_count || enrichedRows.length || 0);
+  const totalPages = Math.max(1, Number(pagination.total_pages || (totalRows > 0 ? Math.ceil(totalRows / PLAN_PAGE_SIZE) : 1)));
+  const currentPage = Math.min(Math.max(Number(pagination.page || state.planPage) || 1, 1), totalPages);
+  state.planPage = currentPage;
 
   planTable.innerHTML = `
     ${makeHeader(columns, state.planSort, "plan-sort")}
     <tbody>
-      ${sortedRows.map((row) => `
+      ${aggregateRow ? `
+        <tr>
+          <td>
+            <div class="cell-primary">${escapeHtml(aggregateRow.ad_name)}</div>
+            <div class="cell-subline mono">
+              <span class="cell-subitem">${escapeHtml(aggregateRow.product_name || "")}</span>
+            </div>
+          </td>
+          <td>${renderPlanSourceBadge(aggregateRow)}</td>
+          <td class="mono">${formatMoney(aggregateRow.stat_cost)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsTotalPayAmount", aggregateRow.total_pay_amount, formatMoney)}</td>
+          <td class="mono">${formatMoney(aggregateRow.settled_pay_amount)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsPayRoi", aggregateRow.roi, formatRate)}</td>
+          <td class="mono">${formatRate(aggregateRow.settled_roi)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsOrderCount", aggregateRow.order_count, formatNumber)}</td>
+          <td class="mono">${formatNumber(aggregateRow.settled_order_count)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsPayOrderCost", aggregateRow.pay_order_cost, formatMoney, Number(aggregateRow.order_count || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsSettledAmountRate", aggregateRow.settled_amount_rate, formatPercent, Number(aggregateRow.total_pay_amount || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(aggregateRow, "supportsRefundRate1h", aggregateRow.refund_rate_1h, formatPercent, Number(aggregateRow.total_pay_amount || 0) > 0)}</td>
+          <td><div class="cell-primary">${escapeHtml(aggregateRow.metric_source_text || "-")}</div></td>
+          <td>${escapeHtml(aggregateRow.advertiser_name)}</td>
+          <td><span class="pill">${escapeHtml(aggregateRow.status_text || "聚合")}</span></td>
+        </tr>
+      ` : ""}
+      ${enrichedRows.map((row) => `
         <tr data-plan-id="${row.ad_id}" class="${supportsPlanDetail && state.selectedPlanId === row.ad_id ? "active-row" : ""}">
           <td>
             <div class="cell-primary">${escapeHtml(row.ad_name)}</div>
@@ -3102,15 +5546,15 @@ function renderPlanTable(plans) {
           </td>
           <td>${renderPlanSourceBadge(row)}</td>
           <td class="mono">${formatMoney(row.stat_cost)}</td>
-          <td class="mono">${formatMoney(row.total_pay_amount)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsTotalPayAmount", row.total_pay_amount, formatMoney)}</td>
           <td class="mono">${formatMoney(row.settled_pay_amount)}</td>
-          <td class="mono">${formatRate(row.roi)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsPayRoi", row.roi, formatRate)}</td>
           <td class="mono">${formatRate(row.settled_roi)}</td>
-          <td class="mono">${formatNumber(row.order_count)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsOrderCount", row.order_count, formatNumber)}</td>
           <td class="mono">${formatNumber(row.settled_order_count)}</td>
-          <td class="mono">${Number(row.order_count || 0) > 0 ? formatMoney(row.pay_order_cost) : "-"}</td>
-          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.settled_amount_rate) : "-"}</td>
-          <td class="mono">${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsPayOrderCost", row.pay_order_cost, formatMoney, Number(row.order_count || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsSettledAmountRate", row.settled_amount_rate, formatPercent, Number(row.total_pay_amount || 0) > 0)}</td>
+          <td class="mono">${formatAlignedMetric(row, "supportsRefundRate1h", row.refund_rate_1h, formatPercent, Number(row.total_pay_amount || 0) > 0)}</td>
           <td>
             <div class="cell-primary">${escapeHtml(row.product_name || "-")}</div>
             <div class="cell-subline">
@@ -3126,20 +5570,49 @@ function renderPlanTable(plans) {
   `;
 
   planTable.querySelectorAll("th[data-key]").forEach((header) => {
-    header.addEventListener("click", () => {
+    header.addEventListener("click", async () => {
       const key = header.dataset.key;
       const column = columns.find((item) => item.key === key);
       if (!column || !column.sortable) return;
       state.planSort = toggleSort(state.planSort, key);
+      state.planPage = 1;
       saveSort("plan-sort", state.planSort);
-      renderPlanTable(plans);
+      try {
+        await refreshPerformanceSection("plan", false);
+      } catch (error) {
+        window.alert(error.message || "计划排序失败");
+      }
     });
   });
 
-  renderPlanInteractions(plans);
+  renderPlanInteractions(enrichedRows);
+  renderAsyncTablePager(
+    planTablePager,
+    totalRows,
+    currentPage,
+    totalPages,
+    Number(pagination.start_index || (totalRows ? 1 : 0)),
+    Number(pagination.end_index || enrichedRows.length),
+    PLAN_PAGE_SIZE,
+    `显示 ${formatNumber(Number(pagination.start_index || (totalRows ? 1 : 0)))}-${formatNumber(Number(pagination.end_index || enrichedRows.length))} / ${formatNumber(totalRows)}，按页加载计划排行。`,
+    async (nextPage) => {
+      state.planPage = nextPage;
+      await refreshPerformanceSection("plan", false);
+    },
+  );
 }
 
 function renderRuleTable(rules) {
+  const filteredRules = filteredAlertRules(rules);
+  if (ruleListMeta) {
+    const filterLabel = String(ruleStatusFilter?.value || "all");
+    const statusText = filterLabel === "enabled" ? "仅看启用" : filterLabel === "disabled" ? "仅看关闭" : "全部状态";
+    const query = String(ruleSearchInput?.value || "").trim();
+    ruleListMeta.textContent = query
+      ? `${statusText} · 命中 ${formatNumber(filteredRules.length)} / ${formatNumber(rules.length)} 条规则`
+      : `${statusText} · 当前共 ${formatNumber(filteredRules.length)} 条规则`;
+    ruleListMeta.dataset.tone = filteredRules.length ? "neutral" : "warn";
+  }
   ruleTable.innerHTML = `
     <thead>
       <tr>
@@ -3152,8 +5625,8 @@ function renderRuleTable(rules) {
       </tr>
     </thead>
     <tbody>
-      ${rules.length ? rules.map((rule) => `
-        <tr>
+      ${filteredRules.length ? filteredRules.map((rule) => `
+        <tr class="${Number(rule.id) === Number(state.editingRuleId || 0) ? "is-editing" : ""}">
           <td>
             <div class="cell-primary">${escapeHtml(entityLabel(rule.entity_type))}</div>
             <div class="cell-subline">
@@ -3176,7 +5649,7 @@ function renderRuleTable(rules) {
             <button class="button ghost compact delete-rule" data-id="${rule.id}">删除</button>
           </td>
         </tr>
-      `).join("") : '<tr><td colspan="6" class="empty-cell">还没有预警规则，先从账户余额、共享钱包、消耗或爆单规则开始。</td></tr>'}
+      `).join("") : `<tr><td colspan="6" class="empty-cell">${rules.length ? "当前筛选条件下没有命中规则。" : "还没有预警规则，先从账户余额、共享钱包、消耗或爆单规则开始。"}</td></tr>`}
     </tbody>
   `;
 
@@ -3188,15 +5661,17 @@ function renderRuleTable(rules) {
       fillRuleForm(rule);
       setActiveView("signals");
       ruleForm.scrollIntoView({ behavior: "smooth", block: "start" });
+      renderRuleTable(state.alertRules || []);
     });
   });
 
   ruleTable.querySelectorAll(".toggle-rule").forEach((button) => {
     button.addEventListener("click", async () => {
       const id = Number(button.dataset.id);
-      const rule = rules.find((item) => item.id === id);
+      const rule = rules.find((item) => Number(item.id) === id);
       if (!rule) return;
-      await fetch(`/api/alert-rules/${id}`, {
+      button.disabled = true;
+      const response = await fetch(`/api/alert-rules/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3211,15 +5686,34 @@ function renderRuleTable(rules) {
           note: rule.note,
         }),
       });
-      await fetchDashboard();
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        window.alert(errorPayload.detail || "切换规则状态失败");
+        button.disabled = false;
+        return;
+      }
+      await fetchDashboard(true);
     });
   });
 
   ruleTable.querySelectorAll(".delete-rule").forEach((button) => {
     button.addEventListener("click", async () => {
       const id = Number(button.dataset.id);
-      await fetch(`/api/alert-rules/${id}`, { method: "DELETE" });
-      await fetchDashboard();
+      const rule = rules.find((item) => Number(item.id) === id);
+      if (!rule) return;
+      if (!window.confirm(`确认删除${entityLabel(rule.entity_type)}规则“${metricLabel(rule.metric)}”吗？`)) return;
+      button.disabled = true;
+      const response = await fetch(`/api/alert-rules/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        window.alert(errorPayload.detail || "删除规则失败");
+        button.disabled = false;
+        return;
+      }
+      if (Number(state.editingRuleId || 0) === id) {
+        resetRuleFormState();
+      }
+      await fetchDashboard(true);
     });
   });
 }
@@ -3243,12 +5737,101 @@ function roleLabel(role) {
   return role || "--";
 }
 
+function confirmAccountMutation(payload, keywordSeeds = []) {
+  const editing = Boolean(state.selectedUserId);
+  const title = editing ? "\u4fdd\u5b58\u8d26\u53f7\u53d8\u66f4" : "\u65b0\u5efa\u8d26\u53f7";
+  const lines = [
+    `${title}\u540e\u5c06\u7acb\u5373\u751f\u6548\u3002`,
+    "",
+    `\u540d\u79f0\uff1a${payload.display_name || payload.username || "--"}`,
+    `\u767b\u5f55\u540d\uff1a${payload.username || "--"}`,
+    `\u89d2\u8272\uff1a${roleLabel(payload.role)}`,
+    `\u72b6\u6001\uff1a${payload.enabled ? "\u542f\u7528" : "\u505c\u7528"}`,
+  ];
+  if (payload.role === "supervisor") {
+    lines.push(`\u7d20\u6750\u4e0a\u4f20\uff1a${payload.upload_materials_enabled ? "\u5f00\u542f" : "\u5173\u95ed"}`);
+  }
+  if (payload.role === "operator") {
+    lines.push(`\u9884\u8bbe\u5173\u952e\u8bcd\uff1a${formatNumber(keywordSeeds.length)} \u6761`);
+  }
+  lines.push("");
+  lines.push(editing ? "\u786e\u8ba4\u4fdd\u5b58\u5417\uff1f" : "\u786e\u8ba4\u65b0\u5efa\u5417\uff1f");
+  return window.confirm(lines.join("\n"));
+}
+
+function roleTone(role) {
+  if (role === "admin") return "admin";
+  if (role === "supervisor") return "supervisor";
+  if (role === "operator") return "operator";
+  return "neutral";
+}
+
 function userScopeSummary(user) {
   if (!user) return "--";
   if (user.role === "admin") return "全部账户";
   if (user.role === "supervisor") return `${formatNumber(user.scope_count || 0)} 个账户`;
   if (user.role === "operator") return "按关键词";
   return "--";
+}
+
+function userAvatarText(user) {
+  const source = String(user?.display_name || user?.username || "?").trim();
+  return escapeHtml(source.slice(0, 1).toUpperCase() || "?");
+}
+
+function userCapabilitySummary(user) {
+  if (!user) return "--";
+  if (user.role === "admin") return "全量访问，默认允许上传素材";
+  if (user.role === "supervisor") {
+    return user.upload_materials_enabled ? "管理勾选账户并允许上传素材" : "管理勾选账户，上传权限关闭";
+  }
+  if (user.role === "operator") {
+    return `按关键词归属素材，当前 ${formatNumber(user.keyword_count || 0)} 条规则`;
+  }
+  return "--";
+}
+
+function uploadPermissionSummary(user) {
+  if (!user) return "--";
+  if (user.role === "admin") return "默认允许";
+  if (user.role === "supervisor") return user.upload_materials_enabled ? "已开启" : "已关闭";
+  return "不适用";
+}
+
+function renderAccessOverview() {
+  if (!accessOverview) return;
+  const users = Array.isArray(state.users) ? state.users : [];
+  const adminCount = users.filter((item) => item.role === "admin").length;
+  const supervisorCount = users.filter((item) => item.role === "supervisor").length;
+  const operatorCount = users.filter((item) => item.role === "operator").length;
+  const enabledCount = users.filter((item) => Boolean(item.enabled)).length;
+  const uploadEnabledCount = users.filter((item) => item.role === "admin" || (item.role === "supervisor" && item.upload_materials_enabled)).length;
+  accessOverview.innerHTML = [
+    {
+      label: "已配置账号",
+      value: formatNumber(users.length),
+      detail: users.length ? `启用 ${formatNumber(enabledCount)} 个` : "等待创建账号",
+      tone: users.length ? "" : "muted",
+    },
+    {
+      label: "角色分布",
+      value: `${formatNumber(adminCount)} / ${formatNumber(supervisorCount)} / ${formatNumber(operatorCount)}`,
+      detail: "管理员 / 主管 / 运营",
+      tone: "",
+    },
+    {
+      label: "上传能力",
+      value: formatNumber(uploadEnabledCount),
+      detail: "管理员与已开上传的主管",
+      tone: uploadEnabledCount ? "accent" : "muted",
+    },
+  ].map((item) => `
+    <article class="access-overview-card ${item.tone ? `is-${item.tone}` : ""}">
+      <span class="access-overview-label">${item.label}</span>
+      <strong class="access-overview-value">${item.value}</strong>
+      <span class="access-overview-detail">${item.detail}</span>
+    </article>
+  `).join("");
 }
 
 function syncUserRoleFields() {
@@ -3291,8 +5874,16 @@ function currentMaterialRows() {
   return (materialRangePayload(sectionFilter("material"))?.items || []).map((row) => enrichMaterialRow(row));
 }
 
+function currentTeamMaterialRows() {
+  return (teamMaterialRangePayload(sectionFilter("teamMaterial"))?.items || []).map((row) => enrichMaterialRow(row));
+}
+
 function selectedMaterialRow(materialKey) {
-  return currentMaterialRows().find((item) => item.material_key === materialKey) || null;
+  const key = String(materialKey || "").trim();
+  if (!key) return null;
+  return currentMaterialRows().find((item) => item.material_key === key)
+    || currentTeamMaterialRows().find((item) => item.material_key === key)
+    || null;
 }
 
 function canPreviewMaterial(row) {
@@ -3300,6 +5891,9 @@ function canPreviewMaterial(row) {
   return Boolean(
     String(row.video_url || "").trim()
     || String(row.cover_url || "").trim()
+    || String(row.video_id || "").trim()
+    || String(row.material_id || "").trim()
+    || String(row.material_key || "").trim()
     || materialAwemeLink(row)
   );
 }
@@ -3311,7 +5905,8 @@ function materialPreviewTriggerMarkup(row) {
   const materialKey = escapeHtml(row.material_key);
   const materialName = escapeHtml(row.material_name || "素材预览");
   const coverUrl = String(row.cover_url || "").trim();
-  if (coverUrl) {
+  const thumbnailUrl = isLikelyDirectPreviewCoverUrl(coverUrl) ? coverUrl : "";
+  if (thumbnailUrl) {
     return `
       <button
         type="button"
@@ -3320,7 +5915,7 @@ function materialPreviewTriggerMarkup(row) {
         data-material-key="${materialKey}"
         title="预览 ${materialName}"
       >
-        <img class="material-preview-thumb" src="${escapeHtml(coverUrl)}" alt="${materialName}" loading="lazy" />
+        <img class="material-preview-thumb" src="${escapeHtml(thumbnailUrl)}" alt="${materialName}" loading="lazy" />
         <span class="material-preview-badge">预览</span>
       </button>
     `;
@@ -3350,9 +5945,80 @@ function materialAwemeLink(row) {
   return awemeId ? `https://www.douyin.com/video/${encodeURIComponent(awemeId)}` : "";
 }
 
-function materialPreviewCurveCacheKey(row, filter) {
+function isLikelyDirectPreviewCoverUrl(url) {
+  const text = String(url || "").trim();
+  if (!text) return false;
+  try {
+    const parsed = new URL(text, window.location.origin);
+    const protocol = String(parsed.protocol || "").trim().toLowerCase();
+    const host = String(parsed.hostname || "").trim().toLowerCase();
+    if (!host) return false;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isLikelyPublicVideoUrl(url) {
+  const text = String(url || "").trim();
+  if (!text) return false;
+  try {
+    const parsed = new URL(text, window.location.origin);
+    const protocol = String(parsed.protocol || "").trim().toLowerCase();
+    const host = String(parsed.hostname || "").trim().toLowerCase();
+    if (!host) return false;
+    if (host.endsWith("cc.oceanengine.com")) return false;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function needsResolvedPreviewVideoUrl(url) {
+  const text = String(url || "").trim();
+  if (!text) return false;
+  try {
+    const parsed = new URL(text, window.location.origin);
+    const host = String(parsed.hostname || "").trim().toLowerCase();
+    return host.endsWith("cc.oceanengine.com");
+  } catch {
+    return false;
+  }
+}
+
+function stabilizePreviewVideoElement(video) {
+  if (!video) return;
+  const originalSrc = String(video.dataset.originalSrc || video.getAttribute("src") || "").trim();
+  if (!needsResolvedPreviewVideoUrl(originalSrc)) return;
+  if (video.dataset.stableSrcApplied === "1") return;
+  const currentSrc = String(video.currentSrc || "").trim();
+  if (!currentSrc || currentSrc === originalSrc) return;
+  if (!isLikelyPublicVideoUrl(currentSrc) || needsResolvedPreviewVideoUrl(currentSrc)) return;
+  const resumeTime = Number.isFinite(video.currentTime) ? Number(video.currentTime) : 0;
+  const shouldResume = !video.paused && !video.ended;
+  video.dataset.stableSrcApplied = "1";
+  video.src = currentSrc;
+  video.load();
+  video.addEventListener("loadedmetadata", () => {
+    if (resumeTime > 0) {
+      try {
+        video.currentTime = resumeTime;
+      } catch {}
+    }
+    if (shouldResume) {
+      video.play().catch(() => {});
+    }
+  }, { once: true });
+}
+
+function materialPreviewSourceSectionKey() {
+  return state.activeView === "team-materials" ? "teamMaterial" : "material";
+}
+
+function materialPreviewSourceCacheKey(row, filter) {
   const normalized = normalizeRangeFilter(filter);
   return [
+    requestDisplayScope(),
     String(row?.material_key || "").trim(),
     normalized.mode,
     normalized.start || "",
@@ -3360,11 +6026,161 @@ function materialPreviewCurveCacheKey(row, filter) {
   ].join(":");
 }
 
+async function fetchMaterialPreviewSource(row, force = false) {
+  const filter = sectionFilter(materialPreviewSourceSectionKey());
+  const cacheKey = materialPreviewSourceCacheKey(row, filter);
+  if (!force && state.materialPreviewSourceCache[cacheKey]) {
+    return state.materialPreviewSourceCache[cacheKey];
+  }
+  const params = appendDisplayScopeParam(new URLSearchParams());
+  params.set("range", filter.mode);
+  if (filter.mode === "custom") {
+    params.set("start_date", filter.start);
+    params.set("end_date", filter.end);
+  }
+  const payload = {
+    material_key: String(row?.material_key || "").trim(),
+    material_id: String(row?.material_id || "").trim(),
+    video_id: String(row?.video_id || "").trim(),
+    aweme_item_id: String(row?.aweme_item_id || "").trim(),
+    video_url: String(row?.video_url || "").trim(),
+    cover_url: String(row?.cover_url || "").trim(),
+    material_type: String(row?.material_type || "").trim(),
+    top_account_name: String(row?.top_account_name || "").trim(),
+    top_plan_name: String(row?.top_plan_name || "").trim(),
+  };
+  const response = await fetch(`/api/material-preview-source?${params.toString()}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => null);
+  if (!response || !response.ok) {
+    const errorPayload = response ? await response.json().catch(() => ({})) : {};
+    throw new Error(errorPayload.detail || "preview source fetch failed");
+  }
+  const resolved = await response.json();
+  state.materialPreviewSourceCache[cacheKey] = resolved;
+  return resolved;
+}
+
+function materialPreviewMediaStageMarkup(row, options = {}) {
+  const directVideoUrl = String(options.videoUrl ?? row?.video_url ?? "").trim();
+  const coverUrl = String(options.coverUrl ?? row?.cover_url ?? "").trim();
+  const safeCoverUrl = isLikelyDirectPreviewCoverUrl(coverUrl) ? coverUrl : "";
+  const message = String(options.message || "").trim();
+  const canDirectPlay = isLikelyPublicVideoUrl(directVideoUrl);
+  if (canDirectPlay) {
+    return `
+      <div class="preview-media-stage">
+        <video class="preview-video" data-original-src="${escapeHtml(directVideoUrl)}" src="${escapeHtml(directVideoUrl)}" ${safeCoverUrl ? `poster="${escapeHtml(safeCoverUrl)}"` : ""} controls playsinline preload="metadata"></video>
+      </div>
+    `;
+  }
+  if (safeCoverUrl) {
+    return `
+      <div class="preview-media-stage">
+        <img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row?.material_name || "素材封面")}" />
+        ${message ? `<div class="preview-empty">${escapeHtml(message)}</div>` : ""}
+      </div>
+    `;
+  }
+  return `
+    <div class="preview-media-stage">
+      <div class="preview-empty">${escapeHtml(message || "当前素材没有可直接预览的地址。")}</div>
+    </div>
+  `;
+}
+
+async function hydrateMaterialPreviewSource(row) {
+  if (!materialPreviewBody) return;
+  const materialKey = String(row?.material_key || "").trim();
+  if (!materialKey) return;
+  const requestToken = ++state.materialPreviewMediaRequestToken;
+  try {
+    const resolved = await fetchMaterialPreviewSource(row);
+    if (!materialPreviewBody || materialPreviewBody.dataset.materialKey !== materialKey) return;
+    if (state.materialPreviewMediaRequestToken !== requestToken) return;
+    const previewMediaShell = materialPreviewBody.querySelector(".preview-media-shell");
+    const previewCurvePanel = materialPreviewBody.querySelector('[data-role="preview-curve-panel"]');
+    if (!previewMediaShell) return;
+    const mergedRow = {
+      ...row,
+      video_url: String(resolved.public_video_url || resolved.video_url || row.video_url || "").trim(),
+      cover_url: String(resolved.cover_url || row.cover_url || "").trim(),
+      aweme_item_id: String(resolved.aweme_item_id || row.aweme_item_id || "").trim(),
+    };
+    previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
+      mergedRow,
+      {
+        videoUrl: mergedRow.video_url,
+        coverUrl: mergedRow.cover_url,
+        message: resolved.is_public_video_url
+          ? ""
+          : (resolved.reason || "当前素材只返回站内预览地址，无法在本页面直连播放。"),
+      },
+    );
+    if (previewCurvePanel) {
+      previewMediaShell.appendChild(previewCurvePanel);
+    }
+    const previewVideo = previewMediaShell.querySelector(".preview-video");
+    const previewCover = previewMediaShell.querySelector(".preview-cover");
+    previewVideo?.addEventListener("loadedmetadata", () => {
+      stabilizePreviewVideoElement(previewVideo);
+    });
+    previewVideo?.addEventListener("playing", () => {
+      stabilizePreviewVideoElement(previewVideo);
+    }, { once: true });
+    previewVideo?.addEventListener("error", () => {
+      if (!previewMediaShell) return;
+      previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
+        mergedRow,
+        {
+          coverUrl: mergedRow.cover_url,
+          message: resolved.reason || "已解析到视频地址，但当前浏览器仍无法直接播放。",
+        },
+      );
+      if (previewCurvePanel) {
+        previewMediaShell.appendChild(previewCurvePanel);
+      }
+    }, { once: true });
+    previewCover?.addEventListener("error", () => {
+      if (!previewMediaShell) return;
+      previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
+        mergedRow,
+        {
+          message: resolved.reason || "当前素材没有可站外访问的预览地址，请尝试打开抖音作品。",
+        },
+      );
+      if (previewCurvePanel) {
+        previewMediaShell.appendChild(previewCurvePanel);
+      }
+    }, { once: true });
+  } catch {
+    if (!materialPreviewBody || materialPreviewBody.dataset.materialKey !== materialKey) return;
+  }
+}
+
+function materialPreviewCurveCacheKey(row, filter) {
+  const normalized = normalizeRangeFilter(filter);
+  return [
+    requestDisplayScope(),
+    String(row?.material_key || "").trim(),
+    String(row?.snapshot_time || "").trim(),
+    normalized.mode,
+    normalized.start || "",
+    normalized.end || "",
+  ].join(":");
+}
+
 function materialPreviewCurveRequest(row) {
-  const filter = sectionFilter("material");
-  const params = new URLSearchParams();
+  const filter = sectionFilter(materialPreviewSourceSectionKey());
+  const params = appendDisplayScopeParam(new URLSearchParams());
   params.set("material_key", String(row?.material_key || "").trim());
   params.set("range", filter.mode);
+  const snapshotTime = String(row?.snapshot_time || "").trim();
+  if (snapshotTime) {
+    params.set("snapshot_time", snapshotTime);
+  }
   if (filter.mode === "custom") {
     params.set("start_date", filter.start);
     params.set("end_date", filter.end);
@@ -3517,11 +6333,23 @@ async function fetchMaterialPreviewCurve(row, force = false) {
     return state.materialPreviewCurveCache[request.cacheKey];
   }
   const response = await fetch(request.url).catch(() => null);
-  if (!response || !response.ok) {
-    const errorPayload = response ? await response.json().catch(() => ({})) : {};
-    throw new Error(errorPayload.detail || "峰形数据请求失败");
+  const responseText = response ? await response.text().catch(() => "") : "";
+  let payload = null;
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      if (response?.ok) {
+        throw new Error("Preview curve returned a non-JSON response");
+      }
+    }
   }
-  const payload = await response.json();
+  if (!response || !response.ok) {
+    throw new Error(payload?.detail || "Preview curve request failed");
+  }
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Preview curve response payload is invalid");
+  }
   state.materialPreviewCurveCache[request.cacheKey] = payload;
   return payload;
 }
@@ -3553,6 +6381,7 @@ async function loadMaterialPreviewCurve(row) {
 function closeMaterialPreview() {
   if (!materialPreviewModal) return;
   state.materialPreviewRequestToken += 1;
+  state.materialPreviewMediaRequestToken += 1;
   materialPreviewModal.classList.add("hidden");
   materialPreviewModal.setAttribute("aria-hidden", "true");
   if (materialPreviewBody) {
@@ -3563,43 +6392,68 @@ function closeMaterialPreview() {
 
 function openMaterialPreviewFromRow(row) {
   if (!row || !materialPreviewModal || !materialPreviewBody) return;
+  const operatorMode = isOperator();
   row = enrichMaterialRow(row);
   const directVideoUrl = String(row.video_url || "").trim();
   const coverUrl = String(row.cover_url || "").trim();
+  const safeDirectVideoUrl = isLikelyPublicVideoUrl(directVideoUrl) ? directVideoUrl : "";
+  const safeCoverUrl = isLikelyDirectPreviewCoverUrl(coverUrl) ? coverUrl : "";
+  const canResolvePreview = Boolean(
+    String(row.material_key || "").trim()
+    || String(row.material_id || "").trim()
+    || String(row.video_id || "").trim()
+    || String(row.aweme_item_id || "").trim()
+  );
   const awemeLink = materialAwemeLink(row);
   if (materialPreviewTitle) {
     materialPreviewTitle.textContent = row.material_name || "素材预览";
   }
   if (materialPreviewMeta) {
-    materialPreviewMeta.textContent = [row.top_account_name || "", row.top_plan_name || "", row.top_anchor_name || ""].filter(Boolean).join(" / ") || "素材预览";
+    materialPreviewMeta.textContent = [
+      ...(operatorMode ? [] : [row.top_account_name || "", row.top_plan_name || ""]),
+      row.top_anchor_name || "",
+    ].filter(Boolean).join(" / ") || "素材预览";
   }
-  const previewBlock = directVideoUrl
-    ? `<video class="preview-video" src="${escapeHtml(directVideoUrl)}" ${coverUrl ? `poster="${escapeHtml(coverUrl)}"` : ""} controls playsinline preload="metadata"></video>`
-    : coverUrl
-      ? `<img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row.material_name || "素材封面")}" />`
-      : '<div class="preview-empty">当前素材没有可直接预览的地址。</div>';
+  const previewBlock = materialPreviewMediaStageMarkup(
+    row,
+    {
+      videoUrl: safeDirectVideoUrl,
+      coverUrl: safeCoverUrl,
+      message: safeDirectVideoUrl || safeCoverUrl
+        ? ""
+        : (coverUrl ? "正在优先解析公网直链..." : "当前素材没有可直接预览的地址。"),
+    },
+  );
   const extraActions = [
     awemeLink ? `<a class="button ghost compact" href="${escapeHtml(awemeLink)}" target="_blank" rel="noreferrer">打开抖音作品</a>` : "",
-    directVideoUrl ? `<a class="button ghost compact" href="${escapeHtml(directVideoUrl)}" target="_blank" rel="noreferrer">打开原始视频</a>` : "",
+    safeDirectVideoUrl ? `<a class="button ghost compact" href="${escapeHtml(safeDirectVideoUrl)}" target="_blank" rel="noreferrer">打开原始视频</a>` : "",
   ].filter(Boolean).join("");
-  materialPreviewBody.innerHTML = `
-    <div class="preview-media-shell">
-      <div class="preview-media-stage">${previewBlock}</div>
-      <div class="preview-curve-panel" data-role="preview-curve-panel">${materialPreviewCurveLoadingMarkup()}</div>
-    </div>
-    <div class="preview-detail-grid">
+  const detailStatsMarkup = operatorMode
+    ? `
+      <div class="preview-stat"><span>达人</span><strong>${escapeHtml(row.top_anchor_name || "--")}</strong></div>
+      <div class="preview-stat"><span>消耗</span><strong class="mono">${formatMoney(row.stat_cost)}</strong></div>
+      <div class="preview-stat"><span>整体点击率</span><strong class="mono">${formatPercent(row.overall_ctr)}</strong></div>
+    `
+    : `
       <div class="preview-stat"><span>归属账户</span><strong>${escapeHtml(row.top_account_name || "--")}</strong></div>
       <div class="preview-stat"><span>归属计划</span><strong>${escapeHtml(row.top_plan_name || "--")}</strong></div>
       <div class="preview-stat"><span>达人</span><strong>${escapeHtml(row.top_anchor_name || "--")}</strong></div>
       <div class="preview-stat"><span>消耗</span><strong class="mono">${formatMoney(row.stat_cost)}</strong></div>
       <div class="preview-stat"><span>整体成交</span><strong class="mono">${formatMaterialTotalPayAmount(row)}</strong></div>
       <div class="preview-stat"><span>净成交</span><strong class="mono">${formatMaterialSettledPayAmount(row)}</strong></div>
-      <div class="preview-stat"><span>支付金额</span><strong class="mono">${formatMoney(row.pay_amount)}</strong></div>
       <div class="preview-stat"><span>订单</span><strong class="mono">${formatNumber(row.order_count)}</strong></div>
       <div class="preview-stat"><span>支付ROI</span><strong class="mono">${formatRate(row.roi)}</strong></div>
       <div class="preview-stat"><span>覆盖计划</span><strong class="mono">${formatNumber(row.plan_count)}</strong></div>
       <div class="preview-stat"><span>素材 ID</span><strong class="mono">${escapeHtml(row.material_id || "--")}</strong></div>
       <div class="preview-stat"><span>视频 ID</span><strong class="mono">${escapeHtml(row.video_id || "--")}</strong></div>
+    `;
+  materialPreviewBody.innerHTML = `
+    <div class="preview-media-shell">
+      ${previewBlock}
+      <div class="preview-curve-panel" data-role="preview-curve-panel">${materialPreviewCurveLoadingMarkup()}</div>
+    </div>
+    <div class="preview-detail-grid">
+      ${detailStatsMarkup}
     </div>
     ${extraActions ? `<div class="preview-actions">${extraActions}</div>` : ""}
   `;
@@ -3609,14 +6463,13 @@ function openMaterialPreviewFromRow(row) {
   const previewCover = materialPreviewBody.querySelector(".preview-cover");
   previewVideo?.addEventListener("error", () => {
     if (!previewMediaShell) return;
-    previewMediaShell.innerHTML = coverUrl
-      ? `
-        <div class="preview-media-stage">
-          <img class="preview-cover" src="${escapeHtml(coverUrl)}" alt="${escapeHtml(row.material_name || "素材封面")}" />
-          <div class="preview-empty">当前视频地址无法直接播放，已降级为封面预览。</div>
-        </div>
-      `
-      : '<div class="preview-media-stage"><div class="preview-empty">当前视频地址无法直接播放，请尝试下方入口。</div></div>';
+    previewMediaShell.innerHTML = materialPreviewMediaStageMarkup(
+      row,
+      {
+        coverUrl: safeCoverUrl,
+        message: "当前视频地址无法直接播放，已降级为封面预览。",
+      },
+    );
     if (previewCurvePanel) {
       previewMediaShell.appendChild(previewCurvePanel);
     }
@@ -3637,6 +6490,8 @@ function openMaterialPreviewFromRow(row) {
   }, { once: true });
   materialPreviewModal.classList.remove("hidden");
   materialPreviewModal.setAttribute("aria-hidden", "false");
+  materialPreviewBody.dataset.materialKey = String(row.material_key || "").trim();
+  void hydrateMaterialPreviewSource(row);
   void loadMaterialPreviewCurve(row);
 }
 
@@ -3663,7 +6518,7 @@ async function fetchUserKeywords(userId, force = false) {
 async function fetchUserMatchedMaterials(userId, force = false) {
   if (!userId || !isAdmin()) return [];
   if (!force && state.userMatchedMaterials[userId]) return state.userMatchedMaterials[userId];
-  const response = await fetch(`/api/users/${userId}/matched-materials?range=day`);
+  const response = await fetch(`/api/users/${userId}/matched-materials?range=month`);
   const payload = await response.json();
   state.userMatchedMaterials[userId] = payload.items || [];
   return state.userMatchedMaterials[userId];
@@ -3795,7 +6650,7 @@ function syncAccessRolePanels() {
   if (!user) {
     setInlineFeedback(scopeEditorMeta, "先选账号，再配范围。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "新建运营时可直接填关键词，也可后续追加。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "先选运营，再看命中素材。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "先选运营，再看近30天命中素材。", "neutral");
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
     return;
@@ -3805,7 +6660,7 @@ function syncAccessRolePanels() {
   } else if (isOperator) {
     setInlineFeedback(scopeEditorMeta, "运营不配置账户范围，只看关键词命中结果。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "新建运营时可直接填关键词，也可后续追加。", "neutral");
-    setInlineFeedback(operatorMaterialStatus, "只按素材名称关键词命中，默认收起。", "neutral");
+    setInlineFeedback(operatorMaterialStatus, "展示近30天内按素材名称关键词命中的素材，默认收起。", "neutral");
   } else {
     setInlineFeedback(scopeEditorMeta, "管理员默认全量可见。", "neutral");
     setInlineFeedback(operatorKeywordStatus, "当前角色不使用运营关键词。", "neutral");
@@ -3827,20 +6682,39 @@ function applyRoleViewPolicy() {
   const admin = isAdmin();
   const supervisor = isSupervisor();
   const operator = isOperator();
+  const customerCenterShell = customerCenterChip?.closest(".customer-center-shell");
+  if (document.body) {
+    document.body.classList.toggle("role-admin", admin);
+    document.body.classList.toggle("role-supervisor", supervisor);
+    document.body.classList.toggle("role-operator", operator);
+  }
+  if (operator) {
+    state.oceanEnginePopoverOpen = false;
+  }
+  if (customerCenterShell) {
+    customerCenterShell.classList.toggle("hidden", operator);
+  }
   const accessTab = viewTabs?.querySelector('[data-view="access"]');
   const signalsTab = viewTabs?.querySelector('[data-view="signals"]');
+  const overviewTab = viewTabs?.querySelector('[data-view="overview"]');
   const accountTab = viewTabs?.querySelector('[data-view="accounts"]');
   const planTab = viewTabs?.querySelector('[data-view="plans"]');
   const breakdownTab = viewTabs?.querySelector('[data-view="breakdown"]');
   const materialsTab = viewTabs?.querySelector('[data-view="materials"]');
+  const teamMaterialsTab = viewTabs?.querySelector('[data-view="team-materials"]');
+  const commentsTab = viewTabs?.querySelector('[data-view="comments"]');
   const uploadsTab = viewTabs?.querySelector('[data-view="uploads"]');
   const tabOrder = admin
-    ? ["overview", "accounts", "plans", "materials", "breakdown", "uploads", "access", "signals"]
+    ? ["overview", "accounts", "plans", "materials", "comments", "breakdown", "uploads", "access", "signals"]
     : supervisor
       ? (canUseUploadModule()
-        ? ["overview", "accounts", "plans", "materials", "breakdown", "uploads"]
-        : ["overview", "accounts", "plans", "materials", "breakdown"])
-      : ["overview", "materials", "breakdown"];
+        ? ["overview", "accounts", "plans", "materials", "comments", "breakdown", "uploads"]
+        : ["overview", "accounts", "plans", "materials", "comments", "breakdown"])
+      : ["breakdown", "materials", "team-materials"];
+  if (overviewTab) {
+    overviewTab.classList.toggle("hidden", operator);
+    overviewTab.textContent = "总览";
+  }
   if (accessTab) {
     accessTab.classList.toggle("hidden", !admin);
     accessTab.textContent = "账号权限";
@@ -3861,15 +6735,17 @@ function applyRoleViewPolicy() {
   if (materialsTab) {
     materialsTab.textContent = operator ? "我的素材" : "素材";
   }
+  if (teamMaterialsTab) {
+    teamMaterialsTab.classList.toggle("hidden", !operator);
+    teamMaterialsTab.textContent = "团队素材";
+  }
+  if (commentsTab) {
+    commentsTab.classList.toggle("hidden", operator);
+    commentsTab.textContent = "评论";
+  }
   if (uploadsTab) {
     uploadsTab.classList.toggle("hidden", !canUseUploadModule());
     uploadsTab.textContent = "批量上传";
-  }
-  if (syncButton) {
-    syncButton.classList.toggle("hidden", !admin);
-  }
-  if (syncExtendedButton) {
-    syncExtendedButton.classList.toggle("hidden", !admin);
   }
   if (productRankPanel) {
     productRankPanel.classList.add("hidden");
@@ -3892,21 +6768,30 @@ function applyRoleViewPolicy() {
   if (materialsPanelTitle) {
     materialsPanelTitle.textContent = operator ? "我的素材" : "素材排行";
   }
+  if (teamMaterialsPanelTitle) {
+    teamMaterialsPanelTitle.textContent = "团队素材";
+  }
+  if (commentsPanelTitle) {
+    commentsPanelTitle.textContent = "评论";
+  }
   if (materialSearch) {
     materialSearch.placeholder = operator ? "搜索素材名称" : "搜索素材";
+  }
+  if (teamMaterialSearch) {
+    teamMaterialSearch.placeholder = operator ? "搜索素材 / 达人" : "搜索素材 / 归属账户 / 计划 / 达人";
   }
   if (heroCopy) {
     heroCopy.textContent = admin
       ? "账户、计划、素材、运营。"
       : supervisor
         ? "范围内账户、计划、素材。"
-        : "我的素材、团队排名。";
+        : "我的素材、团队素材、团队排名。";
   }
   const allowedViews = admin
-    ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "uploads", "access", "signals"])
+    ? new Set(["overview", "accounts", "breakdown", "plans", "materials", "comments", "uploads", "access", "signals"])
     : supervisor
-      ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials"])
-      : new Set(["overview", "breakdown", "materials"]);
+      ? new Set(canUseUploadModule() ? ["overview", "accounts", "breakdown", "plans", "materials", "comments", "uploads"] : ["overview", "accounts", "breakdown", "plans", "materials", "comments"])
+      : new Set(["breakdown", "materials", "team-materials"]);
   if (viewTabs) {
     tabOrder.forEach((view) => {
       const tab = viewTabs.querySelector(`[data-view="${view}"]`);
@@ -3914,7 +6799,7 @@ function applyRoleViewPolicy() {
     });
   }
   if (!allowedViews.has(state.activeView)) {
-    const fallback = allowedViews.has("overview") ? "overview" : Array.from(allowedViews)[0] || "overview";
+    const fallback = Array.from(allowedViews)[0] || "overview";
     setActiveView(fallback);
   }
   userFormReset && (userFormReset.disabled = !admin);
@@ -3981,10 +6866,11 @@ function setScopeControlsState({
 }
 
 function resetUserFormState() {
+  state.userEditorMode = "create";
   state.selectedUserId = null;
   state.selectedUserScopeIds = [];
-  state.userKeywords = {};
-  state.userMatchedMaterials = {};
+  invalidateUserKeywordCache();
+  invalidateUserMatchedMaterialCache();
   if (userForm) userForm.reset();
   const roleInput = userForm?.querySelector('select[name="role"]');
   if (roleInput) roleInput.value = "operator";
@@ -4007,17 +6893,20 @@ function resetUserFormState() {
     "neutral",
   );
   setInlineFeedback(operatorKeywordStatus, "新建运营时可直接填关键词，也可后续追加。", "neutral");
-  setInlineFeedback(operatorMaterialStatus, "先选运营，再看命中素材。", "neutral");
+  setInlineFeedback(operatorMaterialStatus, "先选运营，再看近30天命中素材。", "neutral");
   setOperatorMaterialVisibility(false);
   renderScopeChecklist();
   renderUserKeywordTable();
   renderUserMatchedMaterialTable();
   syncAccessRolePanels();
+  renderAccessOverview();
+  syncUserFormActionButtons();
   if (isAdmin()) focusFirstInput(userForm, 'input[name="username"]');
 }
 
 function fillUserForm(user) {
   if (!userForm) return;
+  state.userEditorMode = user ? "edit" : "create";
   userForm.querySelector('input[name="username"]').value = user?.username || "";
   userForm.querySelector('input[name="display_name"]').value = user?.display_name || "";
   userForm.querySelector('select[name="role"]').value = user?.role || "operator";
@@ -4032,39 +6921,88 @@ function fillUserForm(user) {
     user ? `当前编辑：${user.username} · ${roleLabel(user.role)}` : "新建账号时可同时填写关键词。",
     "neutral",
   );
+  syncUserFormActionButtons();
   syncAccessRolePanels();
+  renderAccessOverview();
+}
+
+function hasPendingUserFormInput() {
+  if (!userForm) return false;
+  const textSelectors = [
+    'input[name="username"]',
+    'input[name="display_name"]',
+    'input[name="password"]',
+    'textarea[name="keyword_seed"]',
+  ];
+  if (textSelectors.some((selector) => String(userForm.querySelector(selector)?.value || "").trim())) {
+    return true;
+  }
+  const roleValue = String(userForm.querySelector('select[name="role"]')?.value || "operator");
+  if (roleValue !== "operator") return true;
+  if (Boolean(userForm.querySelector('input[name="enabled"]')?.checked) !== true) return true;
+  if (Boolean(userForm.querySelector('input[name="upload_materials_enabled"]')?.checked) !== false) return true;
+  return false;
+}
+
+function syncUserFormActionButtons() {
+  const editing = state.userEditorMode !== "create" && Number(state.selectedUserId || 0) > 0;
+  if (userFormSubmitButton) {
+    userFormSubmitButton.textContent = editing ? "保存修改" : "创建账号";
+  }
+  if (userFormReset) {
+    userFormReset.textContent = editing ? "切换新建" : "清空表单";
+  }
 }
 
 function renderUserTable() {
   if (!userTable) return;
   if (!isAdmin()) {
     userTable.innerHTML = '<tbody><tr><td class="empty-cell">当前账号为只读角色，不能配置后台账号。</td></tr></tbody>';
+    renderAccessOverview();
     return;
   }
   userTable.innerHTML = `
     <thead>
       <tr>
-        <th>用户名</th>
-        <th>显示名</th>
-        <th>角色</th>
-        <th>数据范围</th>
-        <th>关键词</th>
-        <th>上传</th>
+        <th>成员</th>
+        <th>角色与能力</th>
+        <th>可见范围</th>
         <th>状态</th>
       </tr>
     </thead>
     <tbody>
       ${state.users.length ? state.users.map((item) => `
         <tr data-user-id="${item.id}" class="${Number(state.selectedUserId) === Number(item.id) ? "active-row" : ""}">
-          <td>${escapeHtml(item.username)}</td>
-          <td>${escapeHtml(item.display_name || "--")}</td>
-          <td>${escapeHtml(roleLabel(item.role))}</td>
-          <td>${escapeHtml(userScopeSummary(item))}</td>
-          <td class="mono">${item.role === "operator" ? formatNumber(item.keyword_count || 0) : "--"}</td>
-          <td>${item.role === "admin" ? '<span class="pill active">允许</span>' : item.role === "supervisor" ? `<span class="pill ${item.upload_materials_enabled ? "active" : ""}">${item.upload_materials_enabled ? "允许" : "关闭"}</span>` : "--"}</td>
-          <td><span class="pill">${item.enabled ? "启用" : "停用"}</span></td>
+          <td>
+            <div class="access-user-cell">
+              <span class="access-user-avatar role-${escapeHtml(roleTone(item.role))}">${userAvatarText(item)}</span>
+              <div class="access-user-copy">
+                <strong class="access-user-name">${escapeHtml(item.display_name || item.username)}</strong>
+                <span class="access-user-subline mono">@${escapeHtml(item.username)}</span>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div class="access-user-tags">
+              <span class="pill role-${escapeHtml(roleTone(item.role))}">${escapeHtml(roleLabel(item.role))}</span>
+              ${item.role === "admin"
+                ? '<span class="pill active">默认可上传</span>'
+                : item.role === "supervisor"
+                  ? `<span class="pill ${item.upload_materials_enabled ? "active" : ""}">${item.upload_materials_enabled ? "可上传" : "仅查看"}</span>`
+                  : '<span class="pill">关键词归属</span>'}
+            </div>
+            <div class="access-user-note">${escapeHtml(userCapabilitySummary(item))}</div>
+          </td>
+          <td>
+            <div class="access-user-note strong">${escapeHtml(userScopeSummary(item))}</div>
+            <div class="access-user-subline">${item.role === "operator" ? `关键词 ${formatNumber(item.keyword_count || 0)} 条` : item.role === "supervisor" ? `账户 ${formatNumber(item.scope_count || 0)} 个` : "默认覆盖全部账户"}</div>
+          </td>
+          <td>
+            <span class="pill ${item.enabled ? "active" : ""}">${item.enabled ? "启用" : "停用"}</span>
+            <div class="access-user-subline">${escapeHtml(String(item.updated_at || item.created_at || "--").slice(0, 16).replace("T", " "))}</div>
+          </td>
         </tr>
-      `).join("") : '<tr><td colspan="7" class="empty-cell">还没有后台账号。</td></tr>'}
+      `).join("") : '<tr><td colspan="4" class="empty-cell">还没有后台账号。</td></tr>'}
     </tbody>
   `;
   userTable.querySelectorAll("tbody tr[data-user-id]").forEach((row) => {
@@ -4072,6 +7010,7 @@ function renderUserTable() {
       await selectUserManager(Number(row.dataset.userId));
     });
   });
+  renderAccessOverview();
 }
 
 function renderScopeChecklist() {
@@ -4154,7 +7093,8 @@ async function fetchUsers(force = false) {
 
 async function fetchCatalogAccounts(force = false) {
   if (!force && state.catalogAccounts.length) return state.catalogAccounts;
-  const response = await fetch("/api/catalog/accounts");
+  const params = appendDisplayScopeParam(new URLSearchParams());
+  const response = await fetch(`/api/catalog/accounts?${params.toString()}`);
   const payload = await response.json();
   state.catalogAccounts = payload.items || [];
   return state.catalogAccounts;
@@ -4171,6 +7111,7 @@ async function fetchUserScopes(userId, force = false) {
 }
 
 async function selectUserManager(userId) {
+  state.userEditorMode = "edit";
   state.selectedUserId = userId;
   resetScopeSearch();
   const user = selectedUserRecord();
@@ -4184,6 +7125,7 @@ async function selectUserManager(userId) {
   }
   if (user?.role === "operator") {
     await fetchUserKeywords(userId, true);
+    invalidateUserMatchedMaterialCache(userId);
     state.userMatchedMaterials[userId] = [];
   }
   renderScopeChecklist();
@@ -4198,6 +7140,14 @@ async function selectUserManager(userId) {
 }
 
 async function ensureAccessData(force = false) {
+  if (!isAdmin()) {
+    await refreshSessionState().catch(() => null);
+    if (!isAdmin()) {
+      invalidateUsersCache();
+      renderUserTable();
+      return;
+    }
+  }
   await Promise.all([fetchUsers(force), fetchCatalogAccounts(force)]);
   renderUserTable();
   if (state.selectedUserId) {
@@ -4224,29 +7174,262 @@ async function ensureAccessData(force = false) {
   syncAccessRolePanels();
 }
 
-async function fetchPerformance(filter, force = false) {
-  const normalized = normalizeRangeFilter(filter);
-  const cacheKey = performanceFilterKey(normalized);
-  if (!force && state.rangePayloads[cacheKey]) {
-    return state.rangePayloads[cacheKey];
-  }
-  const params = new URLSearchParams();
-  params.set("range", normalized.mode);
-  if (normalized.mode === "custom") {
-    params.set("start_date", normalized.start);
-    params.set("end_date", normalized.end);
-  }
-  const response = await fetch(`/api/performance?${params.toString()}`).catch(() => null);
+async function refreshSessionState() {
+  const response = await fetch("/api/session/me").catch(() => null);
   if (!response || !response.ok) {
-    const errorPayload = response ? await response.json().catch(() => ({})) : {};
-    if (state.rangePayloads[cacheKey]) {
-      return state.rangePayloads[cacheKey];
-    }
-    throw new Error(errorPayload.detail || `performance fetch failed for ${cacheKey}`);
+    state.session = null;
+    applyRoleViewPolicy();
+    return null;
   }
-  const payload = await response.json();
-  state.rangePayloads[cacheKey] = payload;
-  return payload;
+  const payload = await response.json().catch(() => ({}));
+  state.session = payload || null;
+  applyRoleViewPolicy();
+  return state.session;
+}
+
+async function ensureAdminSessionOrNotify(message = "当前会话不是管理员，请重新登录管理员账号") {
+  if (isAdmin()) return true;
+  await refreshSessionState().catch(() => null);
+  if (isAdmin()) return true;
+  window.alert(message);
+  return false;
+}
+
+async function parseAccessJsonResponse(response, fallbackMessage, options = {}) {
+  const payload = await response.json().catch(() => ({}));
+  if (response.ok) {
+    return payload;
+  }
+  if (response.status === 401 || response.status === 403) {
+    await refreshSessionState().catch(() => null);
+    if (response.status === 401) {
+      throw new Error("登录状态已失效，请重新登录");
+    }
+    if (options.requireAdmin && !isAdmin()) {
+      throw new Error("当前会话不是管理员，请重新登录管理员账号");
+    }
+  }
+  throw new Error(payload.detail || fallbackMessage);
+}
+
+// Override the legacy access-data loaders with TTL and in-flight dedupe.
+async function fetchUsers(force = false) {
+  if (!isAdmin()) {
+    invalidateUsersCache();
+    return [];
+  }
+  if (!force && hasFreshClientCache(state.usersFetchedAt, ACCESS_CACHE_TTL_MS)) {
+    return state.users;
+  }
+  if (state.usersRequestPromise) {
+    return state.usersRequestPromise;
+  }
+  const requestPromise = (async () => {
+    const response = await fetch("/api/users");
+    const payload = await parseAccessJsonResponse(response, "加载账号列表失败", { requireAdmin: true });
+    state.users = payload.items || [];
+    const createMode = state.userEditorMode === "create";
+    state.usersFetchedAt = Date.now();
+    if (state.selectedUserId && !state.users.some((item) => Number(item.id) === Number(state.selectedUserId))) {
+      state.selectedUserId = null;
+    }
+    if (!createMode && !state.selectedUserId && state.users.length) {
+      state.selectedUserId = Number(state.users[0].id);
+    }
+    return state.users;
+  })();
+  state.usersRequestPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    if (state.usersRequestPromise === requestPromise) {
+      state.usersRequestPromise = null;
+    }
+  }
+}
+
+async function fetchCatalogAccounts(force = false) {
+  if (!force && hasFreshClientCache(state.catalogAccountsFetchedAt, ACCESS_CACHE_TTL_MS)) {
+    return state.catalogAccounts;
+  }
+  if (state.catalogAccountsRequestPromise) {
+    return state.catalogAccountsRequestPromise;
+  }
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    const response = await fetch(`/api/catalog/accounts?${params.toString()}`);
+    const payload = await parseAccessJsonResponse(response, "加载账户目录失败");
+    state.catalogAccounts = payload.items || [];
+    state.catalogAccountsFetchedAt = Date.now();
+    return state.catalogAccounts;
+  })();
+  state.catalogAccountsRequestPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    if (state.catalogAccountsRequestPromise === requestPromise) {
+      state.catalogAccountsRequestPromise = null;
+    }
+  }
+}
+
+async function fetchUserScopes(userId, force = false) {
+  if (!userId || !isAdmin()) return [];
+  const normalizedUserId = Number(userId || 0);
+  if (!force && hasFreshClientCache(state.userScopesFetchedAt[normalizedUserId], ACCESS_CACHE_TTL_MS)) {
+    return state.userScopes[normalizedUserId] || [];
+  }
+  if (state.userScopeRequestPromises[normalizedUserId]) {
+    return state.userScopeRequestPromises[normalizedUserId];
+  }
+  const requestPromise = (async () => {
+    const response = await fetch(`/api/users/${normalizedUserId}/account-scopes`);
+    const payload = await parseAccessJsonResponse(response, "加载账号范围失败", { requireAdmin: true });
+    state.userScopes[normalizedUserId] = payload.advertiser_ids || [];
+    state.userScopesFetchedAt[normalizedUserId] = Date.now();
+    return state.userScopes[normalizedUserId];
+  })();
+  state.userScopeRequestPromises[normalizedUserId] = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    if (state.userScopeRequestPromises[normalizedUserId] === requestPromise) {
+      delete state.userScopeRequestPromises[normalizedUserId];
+    }
+  }
+}
+
+async function fetchUserKeywords(userId, force = false) {
+  if (!userId || !isAdmin()) return [];
+  const normalizedUserId = Number(userId || 0);
+  if (!force && hasFreshClientCache(state.userKeywordsFetchedAt[normalizedUserId], ACCESS_CACHE_TTL_MS)) {
+    return state.userKeywords[normalizedUserId] || [];
+  }
+  if (state.userKeywordRequestPromises[normalizedUserId]) {
+    return state.userKeywordRequestPromises[normalizedUserId];
+  }
+  const requestPromise = (async () => {
+    const response = await fetch(`/api/users/${normalizedUserId}/keywords`);
+    const payload = await parseAccessJsonResponse(response, "加载运营关键词失败", { requireAdmin: true });
+    state.userKeywords[normalizedUserId] = payload.items || [];
+    state.userKeywordsFetchedAt[normalizedUserId] = Date.now();
+    return state.userKeywords[normalizedUserId];
+  })();
+  state.userKeywordRequestPromises[normalizedUserId] = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    if (state.userKeywordRequestPromises[normalizedUserId] === requestPromise) {
+      delete state.userKeywordRequestPromises[normalizedUserId];
+    }
+  }
+}
+
+async function fetchUserMatchedMaterials(userId, force = false) {
+  if (!userId || !isAdmin()) return [];
+  const normalizedUserId = Number(userId || 0);
+  if (
+    !force
+    && hasFreshClientCache(
+      state.userMatchedMaterialsFetchedAt[normalizedUserId],
+      USER_MATCHED_MATERIALS_CACHE_TTL_MS,
+    )
+  ) {
+    return state.userMatchedMaterials[normalizedUserId] || [];
+  }
+  if (state.userMatchedMaterialRequestPromises[normalizedUserId]) {
+    return state.userMatchedMaterialRequestPromises[normalizedUserId];
+  }
+  const requestPromise = (async () => {
+    const response = await fetch(`/api/users/${normalizedUserId}/matched-materials?range=month`);
+    const payload = await parseAccessJsonResponse(response, "加载匹配素材失败", { requireAdmin: true });
+    state.userMatchedMaterials[normalizedUserId] = payload.items || [];
+    state.userMatchedMaterialsFetchedAt[normalizedUserId] = Date.now();
+    return state.userMatchedMaterials[normalizedUserId];
+  })();
+  state.userMatchedMaterialRequestPromises[normalizedUserId] = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    if (state.userMatchedMaterialRequestPromises[normalizedUserId] === requestPromise) {
+      delete state.userMatchedMaterialRequestPromises[normalizedUserId];
+    }
+  }
+}
+
+async function fetchPerformance(filter, force = false, options = {}) {
+  const fresh = Boolean(options?.fresh);
+  const normalized = normalizeRangeFilter(filter);
+  const sectionKey = normalizePerformanceSectionKey(options?.section);
+  const payloadKey = performancePayloadKey(normalized, sectionKey);
+  const requestKey = `${payloadKey}:${fresh ? "fresh" : "default"}`;
+  const querySignature = performancePayloadSignature(sectionKey);
+  const cachedPayload = state.rangePayloads[payloadKey];
+  const cachedAt = Number(state.rangePayloadFetchedAt[payloadKey] || 0);
+  if (
+    !force
+    && cachedPayload
+    && cachedPayload.querySignature === querySignature
+    && cachedAt > 0
+    && Date.now() - cachedAt < PERFORMANCE_CACHE_TTL_MS
+  ) {
+    return cachedPayload;
+  }
+  if (!fresh && state.rangeRequestPromises[`${payloadKey}:fresh`]) {
+    const freshRequest = state.rangeRequestPromises[`${payloadKey}:fresh`];
+    if (freshRequest?.querySignature === querySignature) {
+      return freshRequest.promise;
+    }
+  }
+  if (state.rangeRequestPromises[requestKey]?.querySignature === querySignature) {
+    return state.rangeRequestPromises[requestKey].promise;
+  }
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    params.set("range", normalized.mode);
+    if (normalized.mode === "custom") {
+      params.set("start_date", normalized.start);
+      params.set("end_date", normalized.end);
+    }
+    if (sectionKey) {
+      params.set("section", sectionKey);
+    }
+    if (sectionKey === "account" || sectionKey === "plan") {
+      const query = performanceServerQueryState(sectionKey);
+      params.set("page", String(query.page));
+      params.set("page_size", String(query.pageSize));
+      params.set("sort_key", query.sortKey);
+      params.set("sort_dir", query.sortDir);
+      if (query.search) {
+        params.set("search", query.search);
+      }
+      if (query.accountFilter) {
+        params.set("account_filter", query.accountFilter);
+      }
+    }
+    if (fresh) {
+      params.set("fresh", "1");
+    }
+    const response = await fetch(`/api/performance?${params.toString()}`).catch(() => null);
+    if (!response || !response.ok) {
+      const errorPayload = response ? await response.json().catch(() => ({})) : {};
+      if (state.rangePayloads[payloadKey]?.querySignature === querySignature) {
+        return state.rangePayloads[payloadKey];
+      }
+      throw new Error(errorPayload.detail || `performance fetch failed for ${payloadKey}`);
+    }
+    const payload = await response.json();
+    payload.querySignature = querySignature;
+    state.rangePayloads[payloadKey] = payload;
+    state.rangePayloadFetchedAt[payloadKey] = Date.now();
+    return payload;
+  })();
+  state.rangeRequestPromises[requestKey] = { querySignature, promise: requestPromise };
+  try {
+    return await requestPromise;
+  } finally {
+    delete state.rangeRequestPromises[requestKey];
+  }
 }
 
 function renderPerformanceSections() {
@@ -4254,9 +7437,9 @@ function renderPerformanceSections() {
   syncSectionRangeControls("plan");
   syncSectionRangeControls("breakdown");
 
-  const accountPayload = rangePayload(sectionFilter("account"));
-  const planPayload = rangePayload(sectionFilter("plan"));
-  const breakdownPayload = rangePayload(sectionFilter("breakdown"));
+  const accountPayload = rangePayload(sectionFilter("account"), "account");
+  const planPayload = rangePayload(sectionFilter("plan"), "plan");
+  const breakdownPayload = rangePayload(sectionFilter("breakdown"), "breakdown");
 
   accountRangeMeta.textContent = formatDateWindowMeta(accountPayload);
   planRangeMeta.textContent = formatDateWindowMeta(planPayload);
@@ -4282,41 +7465,172 @@ function renderPerformanceSections() {
 }
 
 async function refreshPerformanceSections(force = false) {
-  const uniqueFilters = new Map();
-  ["account", "plan", "breakdown"].forEach((sectionKey) => {
-    const filter = sectionFilter(sectionKey);
-    uniqueFilters.set(performanceFilterKey(filter), filter);
-  });
-  await Promise.all([...uniqueFilters.values()].map((filter) => fetchPerformance(filter, force)));
+  await Promise.all(
+    ["account", "plan", "breakdown"].map((sectionKey) => (
+      fetchPerformance(sectionFilter(sectionKey), force, { section: sectionKey })
+    )),
+  );
   renderPerformanceSections();
+}
+
+async function refreshPerformanceSection(sectionKey, force = false, options = {}) {
+  const normalizedSectionKey = String(sectionKey || "").trim();
+  if (!PERFORMANCE_SECTION_CONFIG[normalizedSectionKey]) return;
+  await fetchPerformance(sectionFilter(normalizedSectionKey), force, { ...options, section: normalizedSectionKey });
+  schedulePerformanceRangeWarmup(normalizedSectionKey);
+  renderPerformanceSections();
+}
+
+async function ensureActiveViewData(force = false) {
+  const activeView = String(state.activeView || "").trim();
+  const performanceSection = performanceSectionForView(activeView);
+  if (performanceSection) {
+    await refreshPerformanceSection(performanceSection, force);
+    return;
+  }
+  if (activeView === "materials") {
+    await refreshMaterialSection(force);
+    return;
+  }
+  if (activeView === "team-materials") {
+    await refreshTeamMaterialSection(force);
+    return;
+  }
+  if (activeView === "comments") {
+    await refreshCommentSection(force);
+    return;
+  }
+  if (activeView === "access") {
+    await ensureAccessData(force);
+    return;
+  }
+  if (activeView === "uploads" && canUseUploadModule()) {
+    await fetchUploadTargets(force);
+    await fetchUploadJobs(force);
+  }
 }
 
 async function refreshMaterialSection(force = false) {
   syncSectionRangeControls("material");
   const payload = await fetchMaterialRankings(force);
+  scheduleMaterialRangeWarmup("material");
   renderMaterialTable(payload?.items || []);
   syncSelectedMaterial(payload?.items || []);
   const meta = payload?.meta || {};
+  const pagination = payload?.pagination || {};
   const rangeText = formatDateWindowMeta(payload);
-  const materialCount = Array.isArray(payload?.items) ? payload.items.length : Number(meta.material_row_count || 0);
+  const materialCount = Number(pagination.total_count || (Array.isArray(payload?.items) ? payload.items.length : Number(meta.material_row_count || 0)));
   const syncText = payload?.snapshot_time
-    ? `${rangeText} · 汇总 ${formatNumber(payload?.snapshot_count || 0)} 个日快照 · 最近明细同步 ${payload.snapshot_time} · 素材 ${formatNumber(materialCount)} 条 · 错误 ${formatNumber(meta.error_count || 0)}`
+    ? `${rangeText} · 汇总 ${formatNumber(payload?.snapshot_count || 0)} 个日快照 · 最近素材热链 ${payload.snapshot_time} · 素材 ${formatNumber(materialCount)} 条 · 错误 ${formatNumber(meta.error_count || 0)}`
     : `${rangeText} · 当前时间范围内暂无素材快照`;
   materialSyncMeta.textContent = syncText;
+}
+
+async function refreshTeamMaterialSection(force = false) {
+  syncSectionRangeControls("teamMaterial");
+  const payload = await fetchTeamMaterialRankings(force);
+  scheduleMaterialRangeWarmup("teamMaterial");
+  renderTeamMaterialTable(payload?.items || []);
+  const meta = payload?.meta || {};
+  const pagination = payload?.pagination || {};
+  const rangeText = formatDateWindowMeta(payload);
+  const materialCount = Number(pagination.total_count || (Array.isArray(payload?.items) ? payload.items.length : Number(meta.material_row_count || 0)));
+  const syncText = payload?.snapshot_time
+    ? `${rangeText} · 汇总 ${formatNumber(payload?.snapshot_count || 0)} 个日快照 · 最近素材热链 ${payload.snapshot_time} · 素材 ${formatNumber(materialCount)} 条 · 错误 ${formatNumber(meta.error_count || 0)}`
+    : `${rangeText} · 当前时间范围内暂无团队素材`;
+  if (teamMaterialSyncMeta) {
+    teamMaterialSyncMeta.textContent = syncText;
+  }
+}
+
+async function refreshCommentSection(force = false) {
+  syncSectionRangeControls("comment");
+  const payload = await fetchComments(force);
+  fillCommentAccountFilter(payload?.accounts || []);
+  renderCommentTable(payload?.items || []);
+  const meta = payload?.meta || {};
+  const rangeText = formatDateWindowMeta(payload);
+  const commentCount = Array.isArray(payload?.items) ? payload.items.length : Number(meta.comment_count || 0);
+  const accountCount = Array.isArray(payload?.accounts) ? payload.accounts.length : Number(meta.account_count || 0);
+  const visibleCount = Number(meta.visible_count || 0);
+  const visibleSuffix = visibleCount > 0 && visibleCount !== commentCount ? ` · 可见 ${formatNumber(visibleCount)} 条` : "";
+  const syncSuffix = payload?.comment_sync_pending
+    ? payload?.comment_sync_queued
+      ? " · 后台补同步已入队"
+      : " · 后台补同步进行中"
+    : "";
+  commentSyncMeta.textContent = `${rangeText} · 评论 ${formatNumber(commentCount)} 条 · 账户 ${formatNumber(accountCount)} 个 · 错误 ${formatNumber(meta.error_count || 0)}${visibleSuffix}${syncSuffix}`;
+}
+
+async function refreshTodaySummaryFromDatabase(sectionKey) {
+  setSectionFilter(sectionKey, { mode: "day" });
+  if (sectionKey === "account") {
+    state.accountPage = 1;
+  }
+  if (sectionKey === "plan") {
+    state.planPage = 1;
+  }
+  await Promise.all([
+    fetchDashboard(true, { fresh: true }),
+    refreshPerformanceSection(sectionKey, true, { fresh: true }),
+  ]);
+}
+
+async function queueTodaySummaryRefresh() {
+  const response = await fetch("/api/sync", { method: "POST" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.detail || payload?.message || "今日汇总刷新提交失败");
+  }
+  return payload;
+}
+
+async function runTodayPageRefresh(button, loadingText, callback) {
+  if (button) {
+    button.disabled = true;
+    button.textContent = loadingText;
+  }
+  try {
+    await callback();
+  } finally {
+    window.setTimeout(() => {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "刷新今日";
+      }
+    }, 1200);
+  }
 }
 
 async function applyQuickRange(sectionKey, mode) {
   const current = sectionFilter(sectionKey);
   if (current.mode === mode) return;
   setRangeEditorOpen(sectionKey, false);
+  clearRangeEditorDraft(sectionKey);
   setSectionFilter(sectionKey, { mode });
   try {
+    if (sectionKey === "account") {
+      state.accountPage = 1;
+    }
+    if (sectionKey === "plan") {
+      state.planPage = 1;
+    }
     if (sectionKey === "material") {
       state.materialPage = 1;
       await refreshMaterialSection(false);
       return;
     }
-    await refreshPerformanceSections(true);
+    if (sectionKey === "teamMaterial") {
+      state.teamMaterialPage = 1;
+      await refreshTeamMaterialSection(false);
+      return;
+    }
+    if (sectionKey === "comment") {
+      state.commentPage = 1;
+      await refreshCommentSection(false);
+      return;
+    }
+    await refreshPerformanceSection(sectionKey, false);
   } catch (error) {
     window.alert(error.message || "切换时间范围失败");
   }
@@ -4325,8 +7639,9 @@ async function applyQuickRange(sectionKey, mode) {
 async function applyCustomRange(sectionKey) {
   const config = PERFORMANCE_SECTION_CONFIG[sectionKey];
   if (!config) return;
-  const start = String(config.startEl?.value || "").trim();
-  const end = String(config.endEl?.value || "").trim();
+  const draft = ensureRangeEditorDraft(sectionKey);
+  const start = String(draft.start ?? config.startEl?.value ?? "").trim();
+  const end = String(draft.end ?? config.endEl?.value ?? "").trim();
   if (!isValidDateInput(start) || !isValidDateInput(end)) {
     window.alert("请选择完整的开始日期和结束日期");
     return;
@@ -4338,15 +7653,103 @@ async function applyCustomRange(sectionKey) {
   setRangeEditorOpen(sectionKey, true);
   setSectionFilter(sectionKey, { mode: "custom", start, end });
   try {
+    if (sectionKey === "account") {
+      state.accountPage = 1;
+    }
+    if (sectionKey === "plan") {
+      state.planPage = 1;
+    }
     if (sectionKey === "material") {
       state.materialPage = 1;
       await refreshMaterialSection(false);
       return;
     }
-    await refreshPerformanceSections(true);
+    if (sectionKey === "teamMaterial") {
+      state.teamMaterialPage = 1;
+      await refreshTeamMaterialSection(false);
+      return;
+    }
+    if (sectionKey === "comment") {
+      state.commentPage = 1;
+      await refreshCommentSection(false);
+      return;
+    }
+    await refreshPerformanceSection(sectionKey, false);
   } catch (error) {
     window.alert(error.message || "查询时间段失败");
   }
+}
+
+function performanceWarmupFilters(sectionKey = "") {
+  const normalizedSectionKey = String(sectionKey || "").trim();
+  if (!["account", "plan", "breakdown"].includes(normalizedSectionKey)) return [];
+  const activeFilter = sectionFilter(normalizedSectionKey);
+  if (activeFilter.mode === "custom") return [];
+  const preferredModes = ["yesterday", "week", "month"];
+  return preferredModes
+    .filter((mode) => mode !== activeFilter.mode)
+    .map((mode) => ({ mode }));
+}
+
+function schedulePerformanceRangeWarmup(sectionKey = "") {
+  const normalizedSectionKey = String(sectionKey || "").trim();
+  clearPerformanceWarmupTimer(normalizedSectionKey);
+  if (!isPageVisible()) return;
+  if (performanceSectionForView() !== normalizedSectionKey) return;
+  const warmupFilters = performanceWarmupFilters(normalizedSectionKey);
+  if (!warmupFilters.length) return;
+  state.performanceWarmupTimers[normalizedSectionKey] = window.setTimeout(() => {
+    delete state.performanceWarmupTimers[normalizedSectionKey];
+    const runWarmup = () => {
+      Promise.all(
+        warmupFilters.map((filter) => fetchPerformance(filter, false, { section: normalizedSectionKey })),
+      ).catch(() => {});
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(runWarmup, { timeout: 1200 });
+      return;
+    }
+    runWarmup();
+  }, PERFORMANCE_WARMUP_DELAY_MS);
+}
+
+function materialWarmupFilters(sectionKey = "") {
+  const normalizedSectionKey = String(sectionKey || "").trim();
+  if (!["material", "teamMaterial"].includes(normalizedSectionKey)) return [];
+  const activeFilter = sectionFilter(normalizedSectionKey);
+  if (activeFilter.mode === "custom") return [];
+  const preferredModes = ["week", "month", "all"];
+  return preferredModes
+    .filter((mode) => mode !== activeFilter.mode)
+    .map((mode) => ({ mode }));
+}
+
+function scheduleMaterialRangeWarmup(sectionKey = "") {
+  const normalizedSectionKey = String(sectionKey || "").trim();
+  clearMaterialWarmupTimer(normalizedSectionKey);
+  if (!isPageVisible()) return;
+  if (performanceSectionForView() !== null) return;
+  const activeView = String(state.activeView || "").trim();
+  if (
+    (normalizedSectionKey === "material" && activeView !== "materials")
+    || (normalizedSectionKey === "teamMaterial" && activeView !== "team-materials")
+  ) {
+    return;
+  }
+  const warmupFilters = materialWarmupFilters(normalizedSectionKey);
+  if (!warmupFilters.length) return;
+  state.materialWarmupTimers[normalizedSectionKey] = window.setTimeout(() => {
+    delete state.materialWarmupTimers[normalizedSectionKey];
+    const runWarmup = () => {
+      const fetcher = normalizedSectionKey === "teamMaterial" ? fetchTeamMaterialRankings : fetchMaterialRankings;
+      Promise.all(warmupFilters.map((filter) => fetcher(false, filter))).catch(() => {});
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(runWarmup, { timeout: 1500 });
+      return;
+    }
+    runWarmup();
+  }, MATERIAL_WARMUP_DELAY_MS);
 }
 
 function bindRangeFilterControls(sectionKey) {
@@ -4365,6 +7768,7 @@ function bindRangeFilterControls(sectionKey) {
   toggle?.addEventListener("click", () => {
     const current = sectionFilter(sectionKey);
     const nextOpen = !(current.mode === "custom" || state.rangeEditorOpen[sectionKey]);
+    if (nextOpen) ensureRangeEditorDraft(sectionKey);
     setRangeEditorOpen(sectionKey, nextOpen);
     syncSectionRangeControls(sectionKey);
     if (nextOpen) {
@@ -4373,8 +7777,23 @@ function bindRangeFilterControls(sectionKey) {
   });
   [config.startEl, config.endEl].forEach((input) => {
     input?.addEventListener("focus", () => {
+      ensureRangeEditorDraft(sectionKey);
       setRangeEditorOpen(sectionKey, true);
       syncSectionRangeControls(sectionKey);
+    });
+    input?.addEventListener("input", () => {
+      setRangeEditorDraftValue(
+        sectionKey,
+        input === config.startEl ? "start" : "end",
+        String(input.value || ""),
+      );
+    });
+    input?.addEventListener("change", () => {
+      setRangeEditorDraftValue(
+        sectionKey,
+        input === config.startEl ? "start" : "end",
+        String(input.value || ""),
+      );
     });
     input?.addEventListener("keydown", async (event) => {
       if (event.key !== "Enter") return;
@@ -4385,45 +7804,132 @@ function bindRangeFilterControls(sectionKey) {
 }
 
 function bindInputs() {
+  const debouncedAccountSearch = debounce(async () => {
+    state.accountPage = 1;
+    try {
+      await refreshPerformanceSection("account", false);
+    } catch (error) {
+      window.alert(error.message || "账户搜索失败");
+    }
+  }, MATERIAL_SEARCH_DEBOUNCE_MS);
+  const debouncedPlanSearch = debounce(async () => {
+    state.planPage = 1;
+    try {
+      await refreshPerformanceSection("plan", false);
+    } catch (error) {
+      window.alert(error.message || "计划搜索失败");
+    }
+  }, MATERIAL_SEARCH_DEBOUNCE_MS);
   const debouncedMaterialSearch = debounce(() => {
     state.materialPage = 1;
-    renderMaterialTable(materialRowsForCurrentFilter());
+    refreshMaterialSection(false).catch((error) => {
+      window.alert(error.message || "素材搜索失败");
+    });
   }, MATERIAL_SEARCH_DEBOUNCE_MS);
+  const debouncedTeamMaterialSearch = debounce(() => {
+    state.teamMaterialPage = 1;
+    refreshTeamMaterialSection(false).catch((error) => {
+      window.alert(error.message || "团队素材搜索失败");
+    });
+  }, MATERIAL_SEARCH_DEBOUNCE_MS);
+  const debouncedCommentSearch = debounce(() => {
+    state.commentPage = 1;
+    renderCommentTable(commentRowsForCurrentFilter());
+  }, COMMENT_SEARCH_DEBOUNCE_MS);
   materialPreviewModal?.addEventListener("click", (event) => {
     const trigger = event.target.closest('[data-action="close-preview"]');
     if (trigger) {
       closeMaterialPreview();
     }
   });
+  commentReplyModal?.addEventListener("click", (event) => {
+    const trigger = event.target.closest('[data-action="close-comment-reply"]');
+    if (trigger) {
+      closeCommentReplyModal();
+    }
+  });
+  relationDetailModal?.addEventListener("click", (event) => {
+    const trigger = event.target.closest('[data-action="close-relation-detail"]');
+    if (trigger) {
+      closeRelationDetailModal();
+    }
+  });
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && materialPreviewModal && !materialPreviewModal.classList.contains("hidden")) {
       closeMaterialPreview();
     }
+    if (event.key === "Escape" && commentReplyModal && !commentReplyModal.classList.contains("hidden")) {
+      closeCommentReplyModal();
+    }
+    if (event.key === "Escape" && relationDetailModal && !relationDetailModal.classList.contains("hidden")) {
+      closeRelationDetailModal();
+    }
+    if (event.key === "Escape" && state.oceanEnginePopoverOpen) {
+      setOceanEnginePopoverOpen(false);
+    }
+  });
+  customerCenterChip?.addEventListener("click", (event) => {
+    if (!isAdmin()) return;
+    event.stopPropagation();
+    const nextOpen = !state.oceanEnginePopoverOpen;
+    setOceanEnginePopoverOpen(nextOpen);
+    if (nextOpen) {
+      window.setTimeout(() => {
+        const allScopeButton = oceanEngineBoundAccounts?.querySelector('[data-action="switch-display-scope-all"]:not(:disabled)');
+        if (allScopeButton) {
+          allScopeButton.focus();
+          return;
+        }
+        const firstSavedCcButton = oceanEngineBoundAccounts?.querySelector('[data-action="switch-bound-customer-center"]:not(:disabled)');
+        if (firstSavedCcButton) {
+          firstSavedCcButton.focus();
+          return;
+        }
+        oceanEngineConfigForm?.querySelector('input[name="customer_center_id"]')?.focus();
+      }, 0);
+    }
+  });
+  oceanEngineBoundAccounts?.addEventListener("click", async (event) => {
+    const allScopeButton = event.target.closest('[data-action="switch-display-scope-all"]');
+    if (allScopeButton && isAdmin()) {
+      await switchOceanEngineDisplayScope(DISPLAY_SCOPE_ALL);
+      return;
+    }
+    const button = event.target.closest('[data-action="switch-bound-customer-center"]');
+    if (!button || !isAdmin()) return;
+    const targetCc = String(button.dataset.customerCenterId || "").trim();
+    if (!targetCc) return;
+    await switchOceanEngineCustomerCenter(targetCc, "已授权 token");
+  });
+  oceanEngineConfigCard?.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+  document.addEventListener("click", () => {
+    if (!state.oceanEnginePopoverOpen) return;
+    setOceanEnginePopoverOpen(false);
   });
   if (viewTabs) {
     viewTabs.querySelectorAll(".view-tab").forEach((button) => {
       button.addEventListener("click", async () => {
+        if (state.oceanEnginePopoverOpen) {
+          setOceanEnginePopoverOpen(false);
+        }
         const view = button.dataset.view || "overview";
         setActiveView(view);
-        if (view === "materials") {
-          await refreshMaterialSection(false);
-        }
-        if (view === "uploads") {
-          await fetchUploadTargets(true);
-          await fetchUploadJobs();
-        }
-        if (view === "access") {
-          await ensureAccessData(true);
-        }
+        ensureActiveViewData(false).catch((error) => {
+          console.error("ensureActiveViewData failed", error);
+        });
       });
     });
   }
 
-  accountSearch?.addEventListener("input", () => renderAccountTable(rangePayload(sectionFilter("account"))?.accounts || []));
-  planSearch?.addEventListener("input", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
-  employeeSearch?.addEventListener("input", () => renderEmployeeTable(breakdownRows(rangePayload(sectionFilter("breakdown")))));
-  productSearch?.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"))?.products || []));
+  accountSearch?.addEventListener("input", debouncedAccountSearch);
+  planSearch?.addEventListener("input", debouncedPlanSearch);
+  employeeSearch?.addEventListener("input", () => renderEmployeeTable(breakdownRows(rangePayload(sectionFilter("breakdown"), "breakdown"))));
+  productSearch?.addEventListener("input", () => renderProductTable(rangePayload(sectionFilter("breakdown"), "breakdown")?.products || []));
   materialSearch?.addEventListener("input", debouncedMaterialSearch);
+  teamMaterialSearch?.addEventListener("input", debouncedTeamMaterialSearch);
+  commentSearch?.addEventListener("input", debouncedCommentSearch);
   operatorMaterialSearch?.addEventListener("input", () => renderUserMatchedMaterialTable());
   toggleOperatorMaterialsButton?.addEventListener("click", async () => {
     const nextVisible = operatorMaterialContent?.classList.contains("hidden");
@@ -4433,7 +7939,23 @@ function bindInputs() {
       renderUserMatchedMaterialTable();
     }
   });
-  planAccountFilter?.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
+  planAccountFilter?.addEventListener("change", async () => {
+    state.planPage = 1;
+    await refreshPerformanceSection("plan", false);
+  });
+  commentAccountFilter?.addEventListener("change", async () => {
+    state.commentPage = 1;
+    await refreshCommentSection(false);
+  });
+  commentReplySubmit?.addEventListener("click", async () => {
+    await submitCommentReply();
+  });
+  commentReplyInput?.addEventListener("keydown", async (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      await submitCommentReply();
+    }
+  });
   uploadSearchForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     await fetchUploadTargets(true);
@@ -4460,11 +7982,17 @@ function bindInputs() {
     renderUploadTargetSummary();
   });
   uploadJobTable?.addEventListener("click", async (event) => {
-    const button = event.target.closest('[data-action="retry-upload-job"]');
+    const retryButton = event.target.closest('[data-action="retry-upload-job"]');
+    const deleteButton = event.target.closest('[data-action="delete-upload-job"]');
+    const button = retryButton || deleteButton;
     if (!button) return;
     const jobId = Number(button.dataset.jobId || 0);
     if (!jobId) return;
-    await retryUploadJob(jobId);
+    if (retryButton) {
+      await retryUploadJob(jobId);
+      return;
+    }
+    await deleteUploadJob(jobId);
   });
   uploadFileInput?.addEventListener("change", () => {
     state.uploadFiles = Array.from(uploadFileInput.files || []);
@@ -4499,7 +8027,7 @@ function bindInputs() {
       if (uploadFileInput) uploadFileInput.value = "";
       renderUploadFileSummary();
       setInlineFeedback(uploadJobStatus, `已创建任务 #${payload.id}，当前为准备状态。`, "success");
-      await fetchUploadJobs();
+      await fetchUploadJobs(true);
     } finally {
       uploadJobSubmit.disabled = false;
     }
@@ -4509,6 +8037,15 @@ function bindInputs() {
   bindRangeFilterControls("plan");
   bindRangeFilterControls("breakdown");
   bindRangeFilterControls("material");
+  bindRangeFilterControls("teamMaterial");
+  bindRangeFilterControls("comment");
+
+  oceanEngineConfigForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(oceanEngineConfigForm);
+    const targetCc = String(form.get("customer_center_id") || "").trim();
+    await switchOceanEngineCustomerCenter(targetCc, "手动输入");
+  });
 
 
   ruleForm?.querySelector('select[name="entity_type"]')?.addEventListener("change", () => {
@@ -4560,17 +8097,32 @@ function bindInputs() {
       summary_account_limit: 6,
       summary_plan_limit: 10,
     };
-    const response = await fetch("/api/notification-settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "保存通知设置失败");
-      return;
+    const submitButton = document.querySelector('button[form="notificationForm"]');
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.textContent = "保存中...";
     }
-    await fetchDashboard();
+    try {
+      const response = await fetch("/api/notification-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        window.alert(errorPayload.detail || "保存通知设置失败");
+        return;
+      }
+      await fetchDashboard(true);
+      if (notificationStatus) {
+        notificationStatus.dataset.tone = "success";
+      }
+    } finally {
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = "保存通知";
+      }
+    }
   });
 
   ruleForm?.addEventListener("submit", async (event) => {
@@ -4598,22 +8150,33 @@ function bindInputs() {
     };
     const method = ruleId ? "PUT" : "POST";
     const url = ruleId ? `/api/alert-rules/${encodeURIComponent(ruleId)}` : "/api/alert-rules";
-    const response = await fetch(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "保存规则失败");
-      return;
+    if (ruleFormSubmitButton) {
+      ruleFormSubmitButton.disabled = true;
+      ruleFormSubmitButton.textContent = ruleId ? "保存中..." : "创建中...";
     }
-    const savedLabel = payload.entity_type ? entityLabel(payload.entity_type) : String(form.get("entity_type") || "规则");
-    resetRuleFormState();
-    await fetchDashboard();
-    if (ruleFormHint) {
-      ruleFormHint.textContent = `已保存${savedLabel}规则。可继续新增，或到下方调整状态。`;
-      ruleFormHint.dataset.tone = "success";
+    try {
+      const response = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        window.alert(errorPayload.detail || "保存规则失败");
+        return;
+      }
+      const savedLabel = payload.entity_type ? entityLabel(payload.entity_type) : String(form.get("entity_type") || "规则");
+      resetRuleFormState();
+      await fetchDashboard(true);
+      if (ruleFormHint) {
+        ruleFormHint.textContent = `已保存${savedLabel}规则。可继续新增，或到下方调整状态。`;
+        ruleFormHint.dataset.tone = "success";
+      }
+    } finally {
+      if (ruleFormSubmitButton) {
+        ruleFormSubmitButton.disabled = false;
+        ruleFormSubmitButton.textContent = state.editingRuleId ? "保存规则" : "新增规则";
+      }
     }
   });
 
@@ -4625,52 +8188,33 @@ function bindInputs() {
     syncRuleTargetSelectionFromSearch();
   });
 
-  syncButton?.addEventListener("click", async () => {
-    syncButton.disabled = true;
-    syncButton.textContent = "刷新中...";
-    try {
-      const response = await fetch("/api/sync", { method: "POST" });
-      if (!response.ok) {
-        throw new Error("刷新任务提交失败");
-      }
-      syncButton.textContent = "已加入队列";
-      window.setTimeout(() => {
-        fetchDashboard().catch(() => {});
-      }, 1500);
-    } finally {
-      window.setTimeout(() => {
-        syncButton.disabled = false;
-        syncButton.textContent = "立即刷新";
-      }, 1200);
-    }
+  ruleForm?.addEventListener("input", () => {
+    renderRulePreview();
   });
 
-  if (syncExtendedButton) {
-    syncExtendedButton.addEventListener("click", async () => {
-      syncExtendedButton.disabled = true;
-      syncExtendedButton.textContent = "同步中...";
-      try {
-        const response = await fetch("/api/sync/extended", { method: "POST" });
-        if (!response.ok) {
-          throw new Error("明细同步任务提交失败");
-        }
-        syncExtendedButton.textContent = "已加入队列";
-        window.setTimeout(() => {
-          fetchDashboard().catch(() => {});
-          refreshMaterialSection(true).catch(() => {});
-        }, 2000);
-      } finally {
-        window.setTimeout(() => {
-          syncExtendedButton.disabled = false;
-          syncExtendedButton.textContent = "刷新素材";
-        }, 1200);
-      }
-    });
-  }
+  ruleForm?.addEventListener("change", () => {
+    renderRulePreview();
+  });
+
+  notificationForm?.addEventListener("input", () => {
+    syncNotificationFormFields();
+  });
+
+  notificationForm?.addEventListener("change", () => {
+    syncNotificationFormFields();
+  });
+
+  ruleStatusFilter?.addEventListener("change", () => {
+    renderRuleTable(state.alertRules || []);
+  });
+
+  ruleSearchInput?.addEventListener("input", () => {
+    renderRuleTable(state.alertRules || []);
+  });
 
   userForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!isAdmin()) return;
+    if (!(await ensureAdminSessionOrNotify())) return;
     const form = new FormData(userForm);
     const keywordSeeds = parseKeywordSeedInput(form.get("keyword_seed"));
     const payload = {
@@ -4681,6 +8225,10 @@ function bindInputs() {
       enabled: form.get("enabled") === "on",
       upload_materials_enabled: form.get("upload_materials_enabled") === "on",
     };
+    if (!confirmAccountMutation(payload, keywordSeeds)) {
+      setInlineFeedback(userEditorStatus, "已取消提交账号变更。", "neutral");
+      return;
+    }
     const url = state.selectedUserId ? `/api/users/${state.selectedUserId}` : "/api/users";
     const method = state.selectedUserId ? "PUT" : "POST";
     const response = await fetch(url, {
@@ -4688,12 +8236,20 @@ function bindInputs() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "保存账号失败");
+    let item;
+    try {
+      item = await parseAccessJsonResponse(response, "保存账号失败", { requireAdmin: true });
+    } catch (error) {
+      window.alert(error.message || "保存账号失败");
       return;
     }
-    const item = await response.json();
+    const mutatedUserId = Number(item?.id || state.selectedUserId || 0);
+    invalidateUsersCache();
+    if (mutatedUserId > 0) {
+      invalidateUserScopeCache(mutatedUserId);
+      invalidateUserKeywordCache(mutatedUserId);
+      invalidateUserMatchedMaterialCache(mutatedUserId);
+    }
     await fetchUsers(true);
     if (item?.id) {
       await selectUserManager(Number(item.id));
@@ -4710,8 +8266,16 @@ function bindInputs() {
             body: JSON.stringify({ keyword, enabled: true }),
           });
           if (keywordResponse.ok) {
+            await keywordResponse.json().catch(() => ({}));
             addedKeywordCount += 1;
             existingKeywords.add(keyword.toLowerCase());
+            continue;
+          }
+          try {
+            await parseAccessJsonResponse(keywordResponse, "保存运营关键词失败", { requireAdmin: true });
+          } catch (error) {
+            window.alert(error.message || "保存运营关键词失败");
+            break;
           }
         }
         await fetchUserKeywords(item.id, true);
@@ -4735,7 +8299,12 @@ function bindInputs() {
   });
 
   userFormReset?.addEventListener("click", () => {
+    if (!state.selectedUserId && hasPendingUserFormInput()) {
+      userForm?.requestSubmit();
+      return;
+    }
     resetUserFormState();
+    setInlineFeedback(userEditorStatus, "已切换到新建账号模式。", "neutral");
     renderUserTable();
   });
 
@@ -4800,7 +8369,8 @@ function bindInputs() {
 
   operatorKeywordForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!isAdmin() || !state.selectedUserId) {
+    if (!(await ensureAdminSessionOrNotify())) return;
+    if (!state.selectedUserId) {
       window.alert("请先选择一个运营账号");
       return;
     }
@@ -4823,45 +8393,57 @@ function bindInputs() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "新增运营关键词失败");
+    try {
+      await parseAccessJsonResponse(response, "新增运营关键词失败", { requireAdmin: true });
+    } catch (error) {
+      window.alert(error.message || "新增运营关键词失败");
       return;
     }
     operatorKeywordForm.reset();
     operatorKeywordForm.querySelector('input[name="enabled"]').checked = true;
+    invalidateUserKeywordCache(state.selectedUserId);
+    invalidateUserMatchedMaterialCache(state.selectedUserId);
     await fetchUserKeywords(state.selectedUserId, true);
     await fetchUserMatchedMaterials(state.selectedUserId, true);
+    await fetchUsers(true);
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
+    renderUserTable();
     setInlineFeedback(operatorKeywordStatus, `已添加关键词“${payload.keyword}”。`, "success");
     focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
-    await fetchDashboard();
+    await fetchDashboard(true);
   });
 
   operatorKeywordTable?.addEventListener("click", async (event) => {
     const button = event.target.closest('[data-action="delete-user-keyword"]');
-    if (!button || !isAdmin()) return;
+    if (!button) return;
+    if (!(await ensureAdminSessionOrNotify())) return;
     const keywordId = Number(button.dataset.keywordId || 0);
     if (!keywordId) return;
     const response = await fetch(`/api/user-keywords/${keywordId}`, { method: "DELETE" });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "删除运营关键词失败");
+    try {
+      await parseAccessJsonResponse(response, "删除运营关键词失败", { requireAdmin: true });
+    } catch (error) {
+      window.alert(error.message || "删除运营关键词失败");
       return;
     }
     if (state.selectedUserId) {
+      invalidateUserKeywordCache(state.selectedUserId);
+      invalidateUserMatchedMaterialCache(state.selectedUserId);
       await fetchUserKeywords(state.selectedUserId, true);
       await fetchUserMatchedMaterials(state.selectedUserId, true);
+      await fetchUsers(true);
     }
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
+    renderUserTable();
     setInlineFeedback(operatorKeywordStatus, "已删除关键词。", "success");
-    await fetchDashboard();
+    await fetchDashboard(true);
   });
 
   saveUserScopesButton?.addEventListener("click", async () => {
-    if (!isAdmin() || !state.selectedUserId) return;
+    if (!(await ensureAdminSessionOrNotify())) return;
+    if (!state.selectedUserId) return;
     const user = selectedUserRecord();
     if (!user || user.role === "admin") {
       window.alert("管理员默认拥有全部权限，无需设置账户范围。");
@@ -4874,78 +8456,222 @@ function bindInputs() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ advertiser_ids: advertiserIds }),
     });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "保存账户范围失败");
+    let payload;
+    try {
+      payload = await parseAccessJsonResponse(response, "保存账户范围失败", { requireAdmin: true });
+    } catch (error) {
+      window.alert(error.message || "保存账户范围失败");
       return;
     }
-    const payload = await response.json();
     state.userScopes[state.selectedUserId] = payload.advertiser_ids || [];
+    state.userScopesFetchedAt[state.selectedUserId] = Date.now();
     state.selectedUserScopeIds = state.userScopes[state.selectedUserId];
+    invalidateUsersCache();
+    await fetchUsers(true);
     renderScopeChecklist();
+    renderUserTable();
     setInlineFeedback(scopeEditorMeta, `已保存账户范围，共 ${formatNumber(state.selectedUserScopeIds.length)} 个账户。`, "success");
   });
 
   resetRuleFormState();
 }
 
-async function fetchDashboard() {
-  const response = await fetch("/api/dashboard");
-  const payload = await response.json();
-  state.payload = payload;
-  state.session = payload.session || null;
-  if (!payload.latest) return;
-  await render(payload);
+async function fetchDashboard(force = false, options = {}) {
+  const fresh = Boolean(options?.fresh);
+  const now = Date.now();
+  if (state.dashboardFetchPromise) {
+    if (fresh && state.dashboardFetchRequestFresh) {
+      return state.dashboardFetchPromise;
+    }
+    if (!fresh && state.dashboardFetchRequestFresh) {
+      return state.dashboardFetchPromise;
+    }
+    if (force || fresh) {
+      state.dashboardFetchQueued = true;
+      state.dashboardFetchQueuedFresh = state.dashboardFetchQueuedFresh || fresh;
+    }
+    return state.dashboardFetchPromise;
+  }
+  if (!force && state.payload && now - Number(state.dashboardFetchedAt || 0) < DASHBOARD_FETCH_DEDUPE_MS) {
+    return state.payload;
+  }
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    if (fresh) {
+      params.set("fresh", "1");
+    }
+    const response = await fetch(`/api/dashboard?${params.toString()}`);
+    const payload = await response.json();
+    state.payload = payload;
+    state.session = payload.session || null;
+    state.oceanEngineConfig = payload.oceanEngineConfig || null;
+    state.dashboardFetchedAt = Date.now();
+    if (!payload.latest) {
+      applyRoleViewPolicy();
+      renderOceanEngineConfig(payload.oceanEngineConfig || { customer_center_id: payload.customerCenterId || "" });
+      return payload;
+    }
+    await render(payload);
+    return payload;
+  })();
+  state.dashboardFetchRequestFresh = fresh;
+  state.dashboardFetchPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    state.dashboardFetchPromise = null;
+    state.dashboardFetchRequestFresh = false;
+    if (state.dashboardFetchQueued) {
+      const queuedFresh = state.dashboardFetchQueuedFresh;
+      state.dashboardFetchQueued = false;
+      state.dashboardFetchQueuedFresh = false;
+      window.setTimeout(() => {
+        fetchDashboard(true, { fresh: queuedFresh }).catch(() => {});
+      }, 0);
+    }
+  }
+}
+
+function isFullRefreshActive(status) {
+  const value = String(status?.status || "").trim().toLowerCase();
+  return value === "queued" || value === "running";
+}
+
+function fullRefreshButtonLabel(status) {
+  const value = String(status?.status || "").trim().toLowerCase();
+  if (value === "queued") return "历史刷新排队中";
+  if (value === "running") return "历史刷新中";
+  return "历史刷新";
+}
+
+function applyFullRefreshStatus() {
+  if (!syncButton) return;
+  const status = state.fullRefreshStatus || null;
+  syncButton.textContent = fullRefreshButtonLabel(status);
+  syncButton.disabled = isFullRefreshActive(status);
+  const titleParts = [];
+  if (status?.stage_label) titleParts.push(String(status.stage_label));
+  if (status?.message) titleParts.push(String(status.message));
+  syncButton.title = titleParts.join(" · ");
+}
+
+function scheduleFullRefreshStatusPoll() {
+  window.clearTimeout(Number(state.fullRefreshStatusPollTimer || 0));
+  state.fullRefreshStatusPollTimer = 0;
+  if (!syncButton || !isAdmin()) {
+    state.fullRefreshStatus = null;
+    applyFullRefreshStatus();
+    return;
+  }
+  if (!isPageVisible() || !isFullRefreshActive(state.fullRefreshStatus)) {
+    applyFullRefreshStatus();
+    return;
+  }
+  state.fullRefreshStatusPollTimer = window.setTimeout(() => {
+    fetchFullRefreshStatus(true).catch(() => {
+      scheduleFullRefreshStatusPoll();
+    });
+  }, 5000);
+}
+
+function didFullRefreshJustComplete(previousStatus, nextStatus) {
+  return (
+    isFullRefreshActive(previousStatus)
+    && !isFullRefreshActive(nextStatus)
+    && String(nextStatus?.status || "").trim().toLowerCase() === "completed"
+  );
+}
+
+async function reloadDataAfterFullRefreshCompletion() {
+  await fetchDashboard(true, { fresh: true });
+  const performanceSection = performanceSectionForView(state.activeView);
+  if (performanceSection) {
+    await refreshPerformanceSection(performanceSection, true, { fresh: true });
+    return;
+  }
+  await ensureActiveViewData(true);
+}
+
+async function fetchFullRefreshStatus(force = false) {
+  if (!syncButton || !isAdmin()) {
+    window.clearTimeout(Number(state.fullRefreshStatusPollTimer || 0));
+    state.fullRefreshStatusPollTimer = 0;
+    state.fullRefreshStatus = null;
+    applyFullRefreshStatus();
+    return null;
+  }
+  if (state.fullRefreshStatusPromise && !force) {
+    return state.fullRefreshStatusPromise;
+  }
+  const requestPromise = (async () => {
+    const previousStatus = state.fullRefreshStatus || null;
+    const response = await fetch("/api/sync/full-refresh/status");
+    if (!response.ok) {
+      throw new Error("历史刷新状态获取失败");
+    }
+    const payload = await response.json();
+    state.fullRefreshStatus = payload || null;
+    applyFullRefreshStatus();
+    scheduleFullRefreshStatusPoll();
+    if (didFullRefreshJustComplete(previousStatus, state.fullRefreshStatus)) {
+      reloadDataAfterFullRefreshCompletion().catch(() => {});
+    }
+    return payload;
+  })();
+  state.fullRefreshStatusPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    state.fullRefreshStatusPromise = null;
+  }
 }
 
 async function render(payload) {
   const latest = payload.latest;
+  state.alertRules = payload.alertRules || [];
   applyRoleViewPolicy();
+  renderOceanEngineConfig(payload.oceanEngineConfig || { customer_center_id: payload.customerCenterId || "" });
   renderOverviewHero(latest);
   renderKpis(latest);
-  renderSystemCards(latest, payload.extendedSync || latest?.extendedSync, payload.tokenInfo || {});
+  renderSystemCards(latest, payload.materialSync || payload.extendedSync || latest?.materialSync || latest?.extendedSync, payload.tokenInfo || {});
   renderAlerts(payload.alertEvents || []);
-  renderSignalOverview(payload.notificationSettings || {}, payload.alertRules || []);
+  renderSignalOverview(payload.notificationSettings || {}, state.alertRules);
   renderNotificationSettings(payload.notificationSettings || {});
-  renderRuleTable(payload.alertRules || []);
+  renderRuleTable(state.alertRules);
   syncRuleFormFields();
   lastSnapshotText.textContent = latest.snapshot_time;
-  refreshHintText.textContent = "采集 1 分钟 · 明细 10 分钟 · 页面 60 秒";
-  try {
-    await refreshPerformanceSections(true);
-  } catch (error) {
-    console.error("refreshPerformanceSections failed", error);
+  applyFullRefreshStatus();
+  if (syncButton && isAdmin()) {
+    fetchFullRefreshStatus().catch(() => {});
+  } else {
+    state.fullRefreshStatus = null;
   }
-  if (state.activeView === "materials") {
-    try {
-      await refreshMaterialSection(false);
-    } catch (error) {
-      console.error("refreshMaterialSection failed", error);
-    }
-  }
-  if (state.activeView === "access") {
-    try {
-      await ensureAccessData(true);
-    } catch (error) {
-      console.error("ensureAccessData failed", error);
-    }
-  }
-  if (state.activeView === "uploads" && canUseUploadModule()) {
-    try {
-      await fetchUploadTargets(true);
-      await fetchUploadJobs();
-    } catch (error) {
-      console.error("upload section load failed", error);
-    }
-  }
+  refreshHintText.textContent = "采集 1 分钟 · 素材 30 分钟 · 页面 60 秒";
   setActiveView(state.activeView);
+  ensureActiveViewData(false).catch((error) => {
+    console.error("ensureActiveViewData failed", error);
+  });
 }
 
 bindInputs();
 setActiveView(state.activeView);
-fetchDashboard();
-window.setInterval(fetchDashboard, 60 * 1000);
+fetchDashboard().catch(() => {});
+if (syncButton && isAdmin()) {
+  fetchFullRefreshStatus().catch(() => {});
+}
 window.setInterval(() => {
+  if (!isPageVisible()) return;
+  fetchDashboard().catch(() => {});
+}, 60 * 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!isPageVisible()) return;
+  fetchDashboard().catch(() => {});
+  if (syncButton && isAdmin()) {
+    fetchFullRefreshStatus(true).catch(() => {});
+  }
+});
+window.setInterval(() => {
+  if (!isPageVisible()) return;
   if (state.activeView === "uploads" && canUseUploadModule()) {
     fetchUploadJobs().catch(() => {});
   }

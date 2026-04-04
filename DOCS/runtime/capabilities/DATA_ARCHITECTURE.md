@@ -53,7 +53,7 @@
 
 接口实现统一放在：
 
-- [report_qianchuan.py](../report_qianchuan.py)
+- [report_qianchuan.py](../../../server_payload/qianchuan_openclaw_reporter/report_qianchuan.py)
 
 原则：
 
@@ -66,7 +66,7 @@
 
 当前发现脚本：
 
-- [tools/discover_qianchuan_capabilities.py](../tools/discover_qianchuan_capabilities.py)
+- [tools/discover_qianchuan_capabilities.py](../../../server_payload/qianchuan_openclaw_reporter/tools/discover_qianchuan_capabilities.py)
 
 它负责：
 

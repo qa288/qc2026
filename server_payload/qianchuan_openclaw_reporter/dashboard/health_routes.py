@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from fastapi.responses import JSONResponse
 
+from dashboard.api_response import api_response
 
 def register_health_routes(app: Any, readiness_payload: Callable[[], dict[str, Any]]) -> None:
     @app.get("/healthz")
@@ -13,4 +14,4 @@ def register_health_routes(app: Any, readiness_payload: Callable[[], dict[str, A
     @app.get("/readyz")
     async def readyz() -> JSONResponse:
         payload = readiness_payload()
-        return JSONResponse(payload, status_code=200 if payload["ok"] else 503)
+        return api_response(payload, status_code=200 if payload["ok"] else 503)

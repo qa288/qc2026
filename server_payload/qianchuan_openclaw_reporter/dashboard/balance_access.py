@@ -9,9 +9,11 @@ class BalanceAccess:
         self,
         json_text: Callable[[Any], str],
         normalize_account_fund_money: Callable[[Any], float],
+        current_customer_center_id: Callable[[], str],
     ) -> None:
         self._json_text = json_text
         self._normalize_account_fund_money = normalize_account_fund_money
+        self._current_customer_center_id = current_customer_center_id
 
     @staticmethod
     def wallet_display_name(wallet_id: str, member_count: int) -> str:
@@ -163,14 +165,16 @@ class BalanceAccess:
         }
 
     def snapshot_account_balances(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         rows = conn.execute(
             """
             SELECT *
             FROM account_balances
             WHERE snapshot_time = ?
+              AND customer_center_id = ?
             ORDER BY available_balance DESC, advertiser_id ASC
             """,
-            (snapshot_time,),
+            (snapshot_time, customer_center_id),
         ).fetchall()
         items: list[dict[str, Any]] = []
         for row in rows:
@@ -185,22 +189,25 @@ class BalanceAccess:
         return items
 
     def snapshot_shared_wallets(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         rows = conn.execute(
             """
             SELECT w.*,
                    COALESCE(rel.member_count, 0) AS member_count
             FROM shared_wallets AS w
             LEFT JOIN (
-                SELECT snapshot_time, main_wallet_id, COUNT(*) AS member_count
+                SELECT snapshot_time, customer_center_id, main_wallet_id, COUNT(*) AS member_count
                 FROM shared_wallet_account_relations
-                GROUP BY snapshot_time, main_wallet_id
+                GROUP BY snapshot_time, customer_center_id, main_wallet_id
             ) AS rel
               ON rel.snapshot_time = w.snapshot_time
+             AND rel.customer_center_id = w.customer_center_id
              AND rel.main_wallet_id = w.main_wallet_id
             WHERE w.snapshot_time = ?
+              AND w.customer_center_id = ?
             ORDER BY w.valid_balance DESC, w.main_wallet_id ASC
             """,
-            (snapshot_time,),
+            (snapshot_time, customer_center_id),
         ).fetchall()
         items = [dict(row) for row in rows]
         for item in items:
@@ -208,13 +215,15 @@ class BalanceAccess:
         return items
 
     def snapshot_wallet_relations(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         rows = conn.execute(
             """
             SELECT *
             FROM shared_wallet_account_relations
             WHERE snapshot_time = ?
+              AND customer_center_id = ?
             ORDER BY main_wallet_id ASC, advertiser_id ASC
             """,
-            (snapshot_time,),
+            (snapshot_time, customer_center_id),
         ).fetchall()
         return [dict(row) for row in rows]

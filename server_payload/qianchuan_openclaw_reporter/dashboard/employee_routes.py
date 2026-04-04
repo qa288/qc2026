@@ -5,13 +5,14 @@ from typing import Any
 from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse
 
+from dashboard.api_response import api_response
 from dashboard.employee_schemas import EmployeeBindingPayload, EmployeeKeywordPayload, EmployeePayload
 
 
 def register_employee_routes(app: Any, service: Any, require_admin: Any) -> None:
     @app.get("/api/employees")
     async def employees(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
-        return JSONResponse({"items": service.list_employees()})
+        return api_response({"items": service.list_employees()})
 
     @app.post("/api/employees")
     async def create_employee(payload: EmployeePayload, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
@@ -19,7 +20,7 @@ def register_employee_routes(app: Any, service: Any, require_admin: Any) -> None
             item = service.create_employee(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(item)
+        return api_response(item)
 
     @app.put("/api/employees/{employee_id}")
     async def update_employee(
@@ -31,11 +32,11 @@ def register_employee_routes(app: Any, service: Any, require_admin: Any) -> None
             item = service.update_employee(employee_id, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(item)
+        return api_response(item)
 
     @app.get("/api/employees/{employee_id}/keywords")
     async def employee_keywords(employee_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
-        return JSONResponse({"items": service.list_employee_keywords(employee_id)})
+        return api_response({"items": service.list_employee_keywords(employee_id)})
 
     @app.post("/api/employees/{employee_id}/keywords")
     async def create_employee_keyword(
@@ -47,7 +48,7 @@ def register_employee_routes(app: Any, service: Any, require_admin: Any) -> None
             item = service.create_employee_keyword(employee_id, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(item)
+        return api_response(item)
 
     @app.put("/api/employee-keywords/{keyword_id}")
     async def update_employee_keyword(
@@ -59,16 +60,16 @@ def register_employee_routes(app: Any, service: Any, require_admin: Any) -> None
             item = service.update_employee_keyword(keyword_id, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(item)
+        return api_response(item)
 
     @app.delete("/api/employee-keywords/{keyword_id}")
     async def delete_employee_keyword(keyword_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
         service.delete_employee_keyword(keyword_id)
-        return JSONResponse({"ok": True})
+        return api_response({"ok": True})
 
     @app.get("/api/employees/{employee_id}/bindings")
     async def employee_bindings(employee_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
-        return JSONResponse({"items": service.list_employee_bindings(employee_id)})
+        return api_response({"items": service.list_employee_bindings(employee_id)})
 
     @app.post("/api/employees/{employee_id}/bindings")
     async def create_employee_binding(
@@ -80,12 +81,12 @@ def register_employee_routes(app: Any, service: Any, require_admin: Any) -> None
             item = service.create_employee_binding(employee_id, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(item)
+        return api_response(item)
 
     @app.delete("/api/employee-bindings/{binding_id}")
     async def delete_employee_binding(binding_id: int, _user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
         service.delete_employee_binding(binding_id)
-        return JSONResponse({"ok": True})
+        return api_response({"ok": True})
 
     @app.get("/api/employee-match-preview")
     async def employee_match_preview(
@@ -98,4 +99,4 @@ def register_employee_routes(app: Any, service: Any, require_admin: Any) -> None
             payload = service.preview_keyword_matches(keyword, scope, allowed)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(payload)
+        return api_response(payload)

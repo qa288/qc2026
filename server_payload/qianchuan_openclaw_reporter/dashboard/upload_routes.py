@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
+from dashboard.api_response import api_response
 
 def register_upload_routes(app: Any, service: Any, require_material_uploader: Any) -> None:
     def queue_upload_job(payload: dict[str, Any], note: str) -> dict[str, Any]:
@@ -15,7 +16,7 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         service.attach_material_upload_task(int(payload["id"]), str(task.id or ""))
         payload["task_id"] = str(task.id or "")
         payload["queued"] = True
-        payload["note"] = str(note or "上传任务已入队，后台正在执行。")
+        payload["note"] = str(note or "Upload job has been queued and is waiting for the worker.")
         return payload
 
     @app.get("/api/upload/targets")
@@ -24,11 +25,11 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         q: str = "",
         user: dict[str, Any] = Depends(require_material_uploader),
     ) -> JSONResponse:
-        return JSONResponse(service._visible_upload_targets(user, scope, q))
+        return api_response(service._visible_upload_targets(user, scope, q))
 
     @app.get("/api/upload/jobs")
     async def upload_jobs(user: dict[str, Any] = Depends(require_material_uploader)) -> JSONResponse:
-        return JSONResponse({"items": service.list_material_upload_jobs(user)})
+        return api_response({"items": service.list_material_upload_jobs(user)})
 
     @app.post("/api/upload/jobs")
     async def create_upload_job(
@@ -41,9 +42,12 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         try:
             plan_ids = [int(item) for item in json.loads(str(target_plan_ids or "[]"))]
         except Exception as exc:
-            raise HTTPException(status_code=400, detail="target_plan_ids 格式错误") from exc
+            raise HTTPException(status_code=400, detail="target_plan_ids format is invalid") from exc
         payload = await service.create_material_upload_job(user, scope, query_text, plan_ids, files)
-        return JSONResponse(queue_upload_job(payload, "上传任务已入队，后台正在执行。"), status_code=202)
+        return api_response(
+            queue_upload_job(payload, "Upload job has been queued and is waiting for the worker."),
+            status_code=202,
+        )
 
     @app.post("/api/upload/jobs/{job_id}/retry")
     async def retry_upload_job(
@@ -51,4 +55,15 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         user: dict[str, Any] = Depends(require_material_uploader),
     ) -> JSONResponse:
         payload = service.retry_material_upload_job(user, int(job_id))
-        return JSONResponse(queue_upload_job(payload, "重试任务已入队，后台正在执行。"), status_code=202)
+        return api_response(
+            queue_upload_job(payload, "Retry job has been queued and is waiting for the worker."),
+            status_code=202,
+        )
+
+    @app.delete("/api/upload/jobs/{job_id}")
+    async def delete_upload_job(
+        job_id: int,
+        user: dict[str, Any] = Depends(require_material_uploader),
+    ) -> JSONResponse:
+        payload = service.delete_material_upload_job(user, int(job_id))
+        return api_response({"ok": True, **payload})

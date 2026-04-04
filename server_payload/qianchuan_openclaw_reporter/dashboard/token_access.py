@@ -47,8 +47,16 @@ class TokenAccess:
                 ),
             )
 
-    def _db_token_payload(self) -> dict[str, Any] | None:
-        config = self._config_loader()
+    def token_payload_for(
+        self,
+        app_id: str,
+        customer_center_id: str,
+        masked: bool = False,
+    ) -> dict[str, Any] | None:
+        normalized_app_id = str(app_id or "").strip()
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        if not normalized_app_id or not normalized_customer_center_id:
+            return None
         with self._db() as conn:
             row = conn.execute(
                 """
@@ -58,11 +66,21 @@ class TokenAccess:
                 WHERE app_id = ? AND customer_center_id = ?
                 LIMIT 1
                 """,
-                (str(config["app_id"]), str(config["customer_center_id"])),
+                (normalized_app_id, normalized_customer_center_id),
             ).fetchone()
         if not row:
             return None
-        return dict(row)
+        payload = dict(row)
+        if not masked:
+            return payload
+        masked_payload = dict(payload)
+        masked_payload["access_token"] = self._mask_token(masked_payload.get("access_token", ""))
+        masked_payload["refresh_token"] = self._mask_token(masked_payload.get("refresh_token", ""))
+        return masked_payload
+
+    def _db_token_payload(self) -> dict[str, Any] | None:
+        config = self._config_loader()
+        return self.token_payload_for(str(config["app_id"]), str(config["customer_center_id"]))
 
     def bootstrap_token_store(self) -> None:
         existing = self._db_token_payload()

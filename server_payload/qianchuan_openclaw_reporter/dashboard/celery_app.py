@@ -6,8 +6,8 @@ from celery.schedules import crontab
 from dashboard.settings import settings
 
 TIMEZONE = settings.timezone
-DETAIL_SYNC_INTERVAL_MINUTES = settings.detail_sync_interval_minutes
-HISTORY_BACKFILL_DAYS = settings.history_backfill_days
+MATERIAL_SYNC_INTERVAL_MINUTES = settings.material_sync_interval_minutes
+COMMENT_SYNC_INTERVAL_MINUTES = settings.comment_sync_interval_minutes
 CELERY_BROKER_URL = settings.celery_broker_url
 CELERY_RESULT_BACKEND = settings.celery_result_backend
 
@@ -23,27 +23,36 @@ celery_app.conf.update(
     task_ignore_result=True,
     imports=("dashboard.tasks",),
     beat_schedule={
-        "dashboard-sync-minute": {
-            "task": "dashboard.sync",
-            "schedule": crontab(minute="*"),
-        },
-        "dashboard-detail-sync": {
-            "task": "dashboard.detail_sync",
-            "schedule": crontab(minute=f"*/{DETAIL_SYNC_INTERVAL_MINUTES}"),
+        **(
+            {
+                "dashboard-sync-minute": {
+                    "task": "dashboard.sync",
+                    "schedule": crontab(minute="*"),
+                },
+                "dashboard-detail-sync": {
+                    "task": "dashboard.detail_sync",
+                    "schedule": crontab(minute=f"*/{MATERIAL_SYNC_INTERVAL_MINUTES}"),
+                },
+            }
+            if settings.enable_hot_sync_schedules
+            else {}
+        ),
+        "dashboard-comment-sync": {
+            "task": "dashboard.comment_sync_hot",
+            "schedule": crontab(minute=f"*/{COMMENT_SYNC_INTERVAL_MINUTES}"),
         },
         "dashboard-alert-dispatch": {
             "task": "dashboard.dispatch_alerts",
             "schedule": crontab(minute="*"),
         },
-        "dashboard-performance-history-backfill": {
-            "task": "dashboard.performance_backfill",
-            "schedule": crontab(hour=2, minute=10),
-            "args": (HISTORY_BACKFILL_DAYS,),
+        "dashboard-nightly-full-refresh": {
+            "task": "dashboard.nightly_history_refresh",
+            "schedule": crontab(hour=2, minute=0),
+            "options": {"queue": "history"},
         },
-        "dashboard-detail-history-backfill": {
-            "task": "dashboard.detail_backfill",
-            "schedule": crontab(hour=2, minute=30),
-            "args": (HISTORY_BACKFILL_DAYS,),
+        "dashboard-oauth-token-refresh": {
+            "task": "dashboard.oauth_token_refresh",
+            "schedule": crontab(hour="*/12", minute=15),
         },
     },
 )

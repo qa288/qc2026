@@ -14,6 +14,7 @@ class UploadAccess:
         role_admin: str,
         allowed_advertiser_ids_for_user: Callable[[dict[str, Any] | None], set[int] | None],
         latest_snapshot: Callable[[set[int] | None], dict[str, Any] | None],
+        current_customer_center_id: Callable[[], str],
         normalize_match_text: Callable[..., str],
         sanitize_material_title: Callable[[str], str],
     ) -> None:
@@ -22,8 +23,29 @@ class UploadAccess:
         self._role_admin = role_admin
         self._allowed_advertiser_ids_for_user = allowed_advertiser_ids_for_user
         self._latest_snapshot = latest_snapshot
+        self._current_customer_center_id = current_customer_center_id
         self._normalize_match_text = normalize_match_text
         self._sanitize_material_title = sanitize_material_title
+
+    @staticmethod
+    def _column_exists_locked(conn: Any, table_name: str, column_name: str) -> bool:
+        table = str(table_name or "").strip()
+        column = str(column_name or "").strip()
+        if not table or not column:
+            return False
+        if getattr(conn, "backend", "") == "postgres":
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+                LIMIT 1
+                """,
+                (table, column),
+            ).fetchone()
+            return bool(row)
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(str(row["name"]) == column for row in rows)
 
     def visible_upload_targets(self, user: dict[str, Any], scope: str, query: str) -> dict[str, Any]:
         allowed = self._allowed_advertiser_ids_for_user(user)
@@ -183,26 +205,68 @@ class UploadAccess:
         if not normalized_ids:
             return {}
         placeholders = ",".join("?" for _ in normalized_ids)
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
         with self._db() as conn:
-            rows = conn.execute(
+            current_rows = conn.execute(
                 f"""
-                SELECT p.ad_id, p.advertiser_id, p.advertiser_name, p.ad_name, p.product_id, p.product_name, p.anchor_name,
-                       p.marketing_goal, p.plan_source, p.status, p.opt_status, p.snapshot_time
-                FROM plan_snapshots p
-                JOIN (
-                    SELECT ad_id, MAX(snapshot_time) AS latest_snapshot_time
-                    FROM plan_snapshots
-                    WHERE ad_id IN ({placeholders})
-                      AND COALESCE(plan_source, 'UNI_PROMOTION') = 'UNI_PROMOTION'
-                    GROUP BY ad_id
-                ) latest
-                  ON latest.ad_id = p.ad_id
-                 AND latest.latest_snapshot_time = p.snapshot_time
-                WHERE COALESCE(p.plan_source, 'UNI_PROMOTION') = 'UNI_PROMOTION'
+                SELECT
+                    ad_id,
+                    advertiser_id,
+                    advertiser_name,
+                    ad_name,
+                    product_id,
+                    product_name,
+                    anchor_name,
+                    marketing_goal,
+                    plan_source,
+                    status,
+                    opt_status,
+                    snapshot_time,
+                    '{{}}' AS raw_json
+                FROM plan_current
+                WHERE ad_id IN ({placeholders})
+                  AND customer_center_id = ?
+                  AND COALESCE(plan_source, 'UNI_PROMOTION') = 'UNI_PROMOTION'
+                ORDER BY ad_id ASC
                 """,
-                normalized_ids,
+                [*normalized_ids, customer_center_id],
             ).fetchall()
-        return {int(row["ad_id"]): dict(row) for row in rows}
+            context_map = {int(row["ad_id"]): dict(row) for row in current_rows}
+            missing_ids = [ad_id for ad_id in normalized_ids if ad_id not in context_map]
+            if missing_ids:
+                daily_placeholders = ",".join("?" for _ in missing_ids)
+                daily_rows = conn.execute(
+                    f"""
+                    SELECT
+                        ad_id,
+                        advertiser_id,
+                        advertiser_name,
+                        ad_name,
+                        product_id,
+                        product_name,
+                        anchor_name,
+                        marketing_goal,
+                        plan_source,
+                        status,
+                        opt_status,
+                        snapshot_time,
+                        '{{}}' AS raw_json
+                    FROM plan_daily
+                    WHERE ad_id IN ({daily_placeholders})
+                      AND customer_center_id = ?
+                      AND COALESCE(plan_source, 'UNI_PROMOTION') = 'UNI_PROMOTION'
+                    ORDER BY ad_id ASC, biz_date DESC, snapshot_time DESC
+                    """,
+                    [*missing_ids, customer_center_id],
+                ).fetchall()
+                for row in daily_rows:
+                    ad_id = int(row["ad_id"] or 0)
+                    if ad_id <= 0 or ad_id in context_map:
+                        continue
+                    context_map[ad_id] = dict(row)
+        for item in context_map.values():
+            item["raw_json"] = str(item.get("raw_json") or "{}")
+        return context_map
 
     def find_advertiser_material_asset_locked(self, conn: Any, advertiser_id: int, file_sha256: str) -> dict[str, Any] | None:
         row = conn.execute(
