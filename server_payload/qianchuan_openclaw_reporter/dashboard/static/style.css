@@ -1623,6 +1623,10 @@ body {
   max-height: clamp(760px, calc(100vh - 220px), 960px);
 }
 
+.account-table-shell .account-matrix-table {
+  min-width: 1540px;
+}
+
 .data-table {
   width: 100%;
   border-collapse: collapse;
@@ -1666,6 +1670,159 @@ body {
 
 .data-table tbody tr.active-row {
   background: rgba(20, 59, 47, 0.08);
+}
+
+.account-matrix-table thead th {
+  background: rgba(248, 251, 255, 0.98);
+  padding: 8px 18px 9px;
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #6f7f92;
+  border-bottom: 1px solid rgba(208, 220, 235, 0.92);
+  white-space: nowrap;
+}
+
+.account-matrix-table thead th:first-child {
+  min-width: 520px;
+}
+
+.account-matrix-table thead th.is-sortable {
+  cursor: pointer;
+}
+
+.account-matrix-table tbody td {
+  padding: 14px 18px;
+  font-size: 14px;
+  border-bottom: 1px solid rgba(218, 227, 239, 0.92);
+  color: #243348;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.account-matrix-table tbody tr:hover {
+  background: rgba(28, 112, 246, 0.025);
+}
+
+.account-matrix-table tbody tr:hover td {
+  background: rgba(248, 251, 255, 0.98);
+}
+
+.account-table-head {
+  display: grid;
+  gap: 3px;
+  min-height: 50px;
+  align-content: start;
+}
+
+.account-table-head-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.2;
+}
+
+.account-table-head-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #6f7f92;
+  line-height: 1.1;
+}
+
+.account-table-head.is-primary .account-table-head-label {
+  color: #61748a;
+}
+
+.account-table-sort-indicator {
+  display: inline-flex;
+  align-items: center;
+  color: #9aa9bb;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.account-table-head-total {
+  min-height: 20px;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: #223149;
+}
+
+.account-table-head-total.is-account-total,
+.account-table-head-total.is-metric-total {
+  font-size: 15px;
+}
+
+.account-table-head-total.is-empty {
+  visibility: hidden;
+}
+
+.account-matrix-account-cell {
+  min-width: 520px;
+}
+
+.account-matrix-name {
+  font-size: 15px;
+  line-height: 1.35;
+  color: #223149;
+}
+
+.account-matrix-meta {
+  gap: 6px 14px;
+  margin-top: 7px;
+  font-size: 12px;
+  color: #707e91;
+}
+
+.account-metric-cell {
+  white-space: nowrap;
+}
+
+.account-metric-value {
+  display: inline-block;
+  min-width: 100%;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: #2c3d54;
+}
+
+.account-plan-count-trigger {
+  font-size: 15px;
+  font-weight: 800;
+  text-underline-offset: 4px;
+}
+
+.account-status-cell {
+  white-space: nowrap;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  min-height: 38px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.status-chip-ok {
+  background: rgba(22, 119, 255, 0.1);
+  color: var(--brand);
+}
+
+.status-chip-fallback {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b76a00;
+}
+
+.status-chip-error {
+  background: rgba(209, 67, 67, 0.14);
+  color: var(--alert);
 }
 
 .comment-table {
@@ -3468,16 +3625,6 @@ body.role-operator .page-shell {
 .plan-source-pill.uni {
   background: rgba(22, 119, 255, 0.1);
   color: var(--brand);
-}
-
-.plan-source-pill.report {
-  background: rgba(202, 111, 30, 0.12);
-  color: #a55a14;
-}
-
-.plan-source-pill.cubic {
-  background: rgba(11, 124, 111, 0.12);
-  color: #0b7c6f;
 }
 
 .marketing-goal-pill.live-room {

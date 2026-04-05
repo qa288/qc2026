@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ app_name }}</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
     <div class="page-shell">
@@ -51,11 +51,12 @@
             <div class="top-meta-pill">
               <span class="top-meta-pill-label">调度</span>
               <strong id="lastSnapshotText">等待数据</strong>
-              <span class="top-meta-pill-sub" id="refreshHintText">自动同步：每 1 分钟</span>
+              <span class="top-meta-pill-sub" id="refreshHintText">采集 1 分钟 · 明细 10 分钟 · 页面缓存 60 秒</span>
             </div>
           </div>
 
           <div class="hero-actions top-actions">
+            <button id="syncButton" class="button primary">页面回填</button>
             <form method="post" action="/logout">
               <button type="submit" class="button ghost">退出登录</button>
             </form>
@@ -144,15 +145,15 @@
                 </div>
                 <div class="toolbar-search-actions">
                   <input id="accountSearch" class="search-input" type="search" placeholder="搜索账户" />
+                  <button id="accountRefreshButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>
           </div>
           <div class="section-range-meta" id="accountRangeMeta">统计范围：加载中</div>
           <div class="table-shell account-table-shell">
-            <table id="accountTable" class="data-table"></table>
+            <table id="accountTable" class="data-table account-matrix-table"></table>
           </div>
-          <div id="accountTablePager" class="table-pager hidden"></div>
         </section>
       </section>
 
@@ -182,6 +183,7 @@
                 </div>
                 <div class="toolbar-search-actions">
                   <input id="employeeSearch" class="search-input" type="search" placeholder="搜索运营" />
+                  <button id="breakdownRefreshButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>
@@ -231,6 +233,7 @@
                   <select id="planAccountFilter" class="select-input">
                     <option value="">全部账户</option>
                   </select>
+                  <button id="planRefreshButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>
@@ -239,7 +242,6 @@
           <div class="table-shell tall">
             <table id="planTable" class="data-table"></table>
           </div>
-          <div id="planTablePager" class="table-pager hidden"></div>
         </section>
       </section>
 
@@ -257,7 +259,6 @@
                     <button type="button" class="range-button" data-range="yesterday">昨日</button>
                     <button type="button" class="range-button" data-range="week">近7天</button>
                     <button type="button" class="range-button" data-range="month">近30天</button>
-                    <button type="button" class="range-button" data-range="all">全部</button>
                   </div>
                   <div class="date-range-inline custom-date-inline">
                     <div class="custom-date-fields">
@@ -270,11 +271,12 @@
                 </div>
                 <div class="toolbar-search-actions">
                   <input id="materialSearch" class="search-input" type="search" placeholder="搜索素材" />
+                  <button id="syncExtendedButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>
           </div>
-          <div class="section-range-meta" id="materialSyncMeta">素材榜统一基于 Redis + current/daily 生成。</div>
+          <div class="section-range-meta" id="materialSyncMeta">素材榜基于最近一次明细同步生成。</div>
           <div class="table-shell tall">
             <table id="materialTable" class="data-table"></table>
           </div>
@@ -308,6 +310,7 @@
                 </div>
                 <div class="toolbar-search-actions">
                   <input id="teamMaterialSearch" class="search-input" type="search" placeholder="搜索归属账户 / 计划 / 达人" />
+                  <button id="teamMaterialRefreshButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>
@@ -349,6 +352,7 @@
                   <select id="commentAccountFilter" class="select-input">
                     <option value="">全部账户</option>
                   </select>
+                  <button id="commentRefreshButton" class="button ghost compact" type="button">刷新今日</button>
                 </div>
               </div>
             </div>
@@ -506,8 +510,8 @@
                     </label>
                   </div>
                   <div class="ownership-form-actions access-button-stack">
-                    <button type="submit" class="button primary compact access-action-button">创建账号</button>
-                    <button type="button" id="userFormReset" class="button ghost compact access-action-button">清空表单</button>
+                    <button type="submit" class="button primary compact access-action-button">保存账号</button>
+                    <button type="button" id="userFormReset" class="button ghost compact access-action-button">新建账号</button>
                   </div>
                 </div>
               </form>
@@ -824,6 +828,6 @@
         <div class="preview-body relation-detail-body" id="relationDetailBody"></div>
       </div>
     </div>
-    <script src="/static/app.js?v={{ asset_version }}"></script>
+    <script src="/static/app.js"></script>
   </body>
 </html>
