@@ -3507,7 +3507,7 @@ function buildMaterialTableColgroup(columns) {
 function applyTableFixedWidth(tableElement, totalWidth) {
   if (!tableElement) return;
   const normalizedWidth = Math.max(Number(totalWidth) || 0, 960);
-  tableElement.style.width = `${normalizedWidth}px`;
+  tableElement.style.width = "100%";
   tableElement.style.minWidth = `${normalizedWidth}px`;
 }
 
