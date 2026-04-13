@@ -2639,7 +2639,7 @@ function breakdownUsesOperators(payload) {
 }
 
 function breakdownRows(payload) {
-  return payload?.operators || [];
+  return Array.isArray(payload?.operators) ? payload.operators : [];
 }
 
 function breakdownEntityName(row) {
@@ -3804,6 +3804,7 @@ function renderProductInteractions(rows) {
 }
 
 function renderEmployeeTable(rows) {
+  rows = Array.isArray(rows) ? rows : [];
   const payload = rangePayload(sectionFilter("breakdown"));
   const operatorMode = breakdownUsesOperators(payload);
   const entityLabel = breakdownEntityLabel(payload);
@@ -4645,7 +4646,7 @@ function renderTeamMaterialTable(payload) {
   const normalizedPayload = Array.isArray(payload) ? { items: payload } : (payload || {});
   teamMaterialTable.className = "data-table team-material-table";
   const pagination = normalizedPayload.pagination || {};
-  const pageRows = (normalizedPayload.items || []).map((row) => enrichMaterialRow(row));
+  const pageRows = (Array.isArray(normalizedPayload.items) ? normalizedPayload.items : []).map((row) => enrichMaterialRow(row));
   if (
     ![
       "material_name",

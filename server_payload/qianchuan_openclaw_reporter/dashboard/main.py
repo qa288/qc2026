@@ -24854,6 +24854,11 @@ class DashboardService:
             aggregated AS (
                 SELECT
                     source.material_key,
+                    COALESCE(MAX(NULLIF(source.material_name, '')), '') AS material_name,
+                    COALESCE(MIN(NULLIF(source.create_time, '')), '') AS create_time,
+                    COALESCE(MAX(NULLIF(source.top_account_name, '')), '') AS top_account_name,
+                    COALESCE(MAX(NULLIF(source.top_plan_name, '')), '') AS top_plan_name,
+                    COALESCE(MAX(NULLIF(source.top_anchor_name, '')), '') AS top_anchor_name,
                     MAX(source.snapshot_time) AS snapshot_time,
                     CAST(ROUND(COALESCE(SUM(source.stat_cost), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
                     CAST(ROUND(COALESCE(SUM(source.pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
@@ -24863,7 +24868,33 @@ class DashboardService:
                     CAST(COALESCE(SUM(source.settled_order_count), 0) AS INTEGER) AS settled_order_count,
                     CAST(COALESCE(SUM(source.overall_show_count), 0) AS INTEGER) AS overall_show_count,
                     CAST(COALESCE(SUM(source.overall_click_count), 0) AS INTEGER) AS overall_click_count,
-                    CAST(ROUND(COALESCE(SUM(source.refund_amount_1h), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS refund_amount_1h
+                    CAST(ROUND(COALESCE(SUM(source.refund_amount_1h), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS refund_amount_1h,
+                    CAST(COALESCE((SELECT COUNT(DISTINCT mpi.plan_id) FROM material_plan_ids mpi WHERE mpi.material_key = source.material_key), 0) AS INTEGER) AS plan_count,
+                    CAST(COALESCE((SELECT COUNT(DISTINCT mai.advertiser_id) FROM material_advertiser_ids mai WHERE mai.material_key = source.material_key), 0) AS INTEGER) AS advertiser_count,
+                    CAST(ROUND(COALESCE(
+                        (COALESCE(SUM(source.overall_click_count), 0)::numeric / NULLIF(COALESCE(SUM(source.overall_show_count), 0)::numeric, 0)) * 100,
+                        0
+                    ), 2) AS DOUBLE PRECISION) AS overall_ctr,
+                    CAST(ROUND(COALESCE(
+                        COALESCE(SUM(source.pay_amount), 0.0)::numeric / NULLIF(COALESCE(SUM(source.stat_cost), 0.0)::numeric, 0),
+                        0
+                    ), 2) AS DOUBLE PRECISION) AS roi,
+                    CAST(ROUND(COALESCE(
+                        COALESCE(SUM(source.settled_pay_amount), 0.0)::numeric / NULLIF(COALESCE(SUM(source.stat_cost), 0.0)::numeric, 0),
+                        0
+                    ), 2) AS DOUBLE PRECISION) AS settled_roi,
+                    CAST(ROUND(COALESCE(
+                        COALESCE(SUM(source.stat_cost), 0.0)::numeric / NULLIF(COALESCE(SUM(source.order_count), 0)::numeric, 0),
+                        0
+                    ), 2) AS DOUBLE PRECISION) AS pay_order_cost,
+                    CAST(ROUND(COALESCE(
+                        (COALESCE(SUM(source.settled_pay_amount), 0.0)::numeric / NULLIF(COALESCE(SUM(source.total_pay_amount), 0.0)::numeric, 0)) * 100,
+                        0
+                    ), 2) AS DOUBLE PRECISION) AS settled_amount_rate,
+                    CAST(ROUND(COALESCE(
+                        (COALESCE(SUM(source.refund_amount_1h), 0.0)::numeric / NULLIF(COALESCE(SUM(source.total_pay_amount), 0.0)::numeric, 0)) * 100,
+                        0
+                    ), 2) AS DOUBLE PRECISION) AS refund_rate_1h
                 FROM source
                 {aggregated_source_filter}
                 GROUP BY source.material_key
