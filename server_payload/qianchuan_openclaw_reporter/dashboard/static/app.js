@@ -138,8 +138,8 @@ const state = {
   planSort: loadSort("plan-sort", { key: "order_count", dir: "desc" }),
   employeeSort: loadSort("employee-sort", { key: "stat_cost", dir: "desc" }),
   productSort: loadSort("product-sort", { key: "order_count", dir: "desc" }),
-  materialSort: loadSort("material-sort", { key: "create_time", dir: "desc" }),
-  teamMaterialSort: loadSort("team-material-sort", { key: "create_time", dir: "desc" }),
+  materialSort: loadSort("material-sort", { key: "stat_cost", dir: "desc" }),
+  teamMaterialSort: loadSort("team-material-sort", { key: "stat_cost", dir: "desc" }),
   commentSort: loadSort("comment-sort", { key: "create_time", dir: "desc" }),
   activeView: loadPreference("active-view", "overview"),
   materialViewMode: loadPreference(MATERIAL_VIEW_MODE_KEY, MATERIAL_VIEW_PERFORMANCE),
@@ -168,6 +168,7 @@ const state = {
   dashboardFetchQueued: false,
   dashboardFetchQueuedOptions: null,
   dashboardFetchedAt: 0,
+  initialActiveViewPromise: null,
   fullRefreshStatus: null,
   fullRefreshStatusPromise: null,
   fullRefreshStatusPollTimer: 0,
@@ -1703,6 +1704,13 @@ function materialViewMode() {
   return normalizeMaterialViewMode(state.materialViewMode);
 }
 
+function defaultMaterialSort(mode = materialViewMode()) {
+  const normalizedMode = normalizeMaterialViewMode(mode);
+  return normalizedMode === MATERIAL_VIEW_LIBRARY
+    ? { key: "create_time", dir: "desc" }
+    : { key: "stat_cost", dir: "desc" };
+}
+
 function materialFilter() {
   return {
     ...sectionFilter("material"),
@@ -1713,8 +1721,9 @@ function materialFilter() {
 
 function materialRequestState(overrides = {}) {
   const normalizedPage = Math.max(1, Number(overrides.page ?? state.materialPage) || 1);
-  const sortKey = String(overrides.sortKey ?? state.materialSort?.key ?? "create_time").trim() || "create_time";
-  const sortDir = String(overrides.sortDir ?? state.materialSort?.dir ?? "desc").trim().toLowerCase() === "asc" ? "asc" : "desc";
+  const fallbackSort = defaultMaterialSort(materialViewMode());
+  const sortKey = String(overrides.sortKey ?? state.materialSort?.key ?? fallbackSort.key).trim() || fallbackSort.key;
+  const sortDir = String(overrides.sortDir ?? state.materialSort?.dir ?? fallbackSort.dir).trim().toLowerCase() === "asc" ? "asc" : "desc";
   const search = String(overrides.search ?? materialSearch?.value ?? "").trim();
   return {
     page: normalizedPage,
@@ -1727,8 +1736,9 @@ function materialRequestState(overrides = {}) {
 
 function teamMaterialRequestState(overrides = {}) {
   const normalizedPage = Math.max(1, Number(overrides.page ?? state.teamMaterialPage) || 1);
-  const sortKey = String(overrides.sortKey ?? state.teamMaterialSort?.key ?? "create_time").trim() || "create_time";
-  const sortDir = String(overrides.sortDir ?? state.teamMaterialSort?.dir ?? "desc").trim().toLowerCase() === "asc" ? "asc" : "desc";
+  const fallbackSort = defaultMaterialSort(MATERIAL_VIEW_PERFORMANCE);
+  const sortKey = String(overrides.sortKey ?? state.teamMaterialSort?.key ?? fallbackSort.key).trim() || fallbackSort.key;
+  const sortDir = String(overrides.sortDir ?? state.teamMaterialSort?.dir ?? fallbackSort.dir).trim().toLowerCase() === "asc" ? "asc" : "desc";
   const search = String(overrides.search ?? teamMaterialSearch?.value ?? "").trim();
   return {
     page: normalizedPage,
@@ -7661,6 +7671,31 @@ async function ensureActiveViewData(force = false) {
   }
 }
 
+function canBootstrapInitialActiveView(view = state.activeView) {
+  const normalizedView = String(view || "").trim();
+  if (["materials", "team-materials", "comments"].includes(normalizedView)) {
+    return true;
+  }
+  return Boolean(performanceSectionForView(normalizedView));
+}
+
+function bootstrapInitialActiveViewData() {
+  if (!canBootstrapInitialActiveView(state.activeView)) {
+    return Promise.resolve(null);
+  }
+  if (state.initialActiveViewPromise) {
+    return state.initialActiveViewPromise;
+  }
+  const requestPromise = ensureActiveViewData(false).catch((error) => {
+    console.error("bootstrapInitialActiveViewData failed", error);
+    return null;
+  });
+  state.initialActiveViewPromise = requestPromise;
+  return requestPromise.finally(() => {
+    state.initialActiveViewPromise = null;
+  });
+}
+
 async function refreshMaterialSection(force = false) {
   syncSectionRangeControls("material");
   syncMaterialViewModeControls();
@@ -8817,6 +8852,7 @@ async function render(payload, options = {}) {
 
 bindInputs();
 setActiveView(state.activeView);
+bootstrapInitialActiveViewData().catch(() => {});
 fetchDashboard().catch(() => {});
 fetchFullRefreshStatus().catch(() => {});
 window.setInterval(() => {

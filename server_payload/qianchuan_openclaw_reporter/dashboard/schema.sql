@@ -479,6 +479,63 @@ CREATE INDEX IF NOT EXISTS idx_material_daily_order_nonzero
 ON material_daily (biz_date, customer_center_id, order_count DESC, material_key)
 WHERE order_count > 0;
 
+CREATE TABLE IF NOT EXISTS material_ranking_index (
+    scope_key TEXT NOT NULL DEFAULT '',
+    range_key TEXT NOT NULL DEFAULT '',
+    start_date TEXT NOT NULL DEFAULT '',
+    end_date TEXT NOT NULL DEFAULT '',
+    sort_key TEXT NOT NULL DEFAULT '',
+    sort_dir TEXT NOT NULL DEFAULT 'desc',
+    material_key TEXT NOT NULL DEFAULT '',
+    rank_no INTEGER NOT NULL DEFAULT 0,
+    page_no INTEGER NOT NULL DEFAULT 0,
+    metric_value REAL NOT NULL DEFAULT 0,
+    stat_cost REAL NOT NULL DEFAULT 0,
+    pay_amount REAL NOT NULL DEFAULT 0,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    order_count INTEGER NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    overall_show_count INTEGER NOT NULL DEFAULT 0,
+    overall_click_count INTEGER NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    plan_count INTEGER NOT NULL DEFAULT 0,
+    advertiser_count INTEGER NOT NULL DEFAULT 0,
+    snapshot_time TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (scope_key, range_key, start_date, end_date, sort_key, sort_dir, material_key)
+);
+CREATE INDEX IF NOT EXISTS idx_material_ranking_index_page
+ON material_ranking_index (scope_key, range_key, start_date, end_date, sort_key, sort_dir, rank_no);
+CREATE INDEX IF NOT EXISTS idx_material_ranking_index_retention
+ON material_ranking_index (end_date, scope_key);
+
+CREATE TABLE IF NOT EXISTS material_ranking_summary (
+    scope_key TEXT NOT NULL DEFAULT '',
+    range_key TEXT NOT NULL DEFAULT '',
+    start_date TEXT NOT NULL DEFAULT '',
+    end_date TEXT NOT NULL DEFAULT '',
+    total_count INTEGER NOT NULL DEFAULT 0,
+    aggregate_stat_cost REAL NOT NULL DEFAULT 0,
+    aggregate_pay_amount REAL NOT NULL DEFAULT 0,
+    aggregate_total_pay_amount REAL NOT NULL DEFAULT 0,
+    aggregate_settled_pay_amount REAL NOT NULL DEFAULT 0,
+    aggregate_order_count INTEGER NOT NULL DEFAULT 0,
+    aggregate_settled_order_count INTEGER NOT NULL DEFAULT 0,
+    aggregate_overall_show_count INTEGER NOT NULL DEFAULT 0,
+    aggregate_overall_click_count INTEGER NOT NULL DEFAULT 0,
+    aggregate_refund_amount_1h REAL NOT NULL DEFAULT 0,
+    aggregate_plan_count INTEGER NOT NULL DEFAULT 0,
+    aggregate_advertiser_count INTEGER NOT NULL DEFAULT 0,
+    snapshot_time TEXT NOT NULL DEFAULT '',
+    snapshot_count INTEGER NOT NULL DEFAULT 0,
+    customer_center_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (scope_key, range_key, start_date, end_date)
+);
+CREATE INDEX IF NOT EXISTS idx_material_ranking_summary_retention
+ON material_ranking_summary (end_date, scope_key);
+
 CREATE TABLE IF NOT EXISTS material_profile (
     customer_center_id TEXT NOT NULL DEFAULT '',
     material_key TEXT NOT NULL,

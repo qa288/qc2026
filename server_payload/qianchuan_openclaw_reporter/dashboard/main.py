@@ -89,6 +89,7 @@ from dashboard.employee_routes import register_employee_routes  # noqa: E402
 from dashboard.employee_schemas import EmployeeBindingPayload, EmployeeKeywordPayload, EmployeePayload  # noqa: E402
 from dashboard.health_routes import register_health_routes  # noqa: E402
 from dashboard.history_access import HistoryAccess  # noqa: E402
+from dashboard import material_ranking_index  # noqa: E402
 from dashboard.migrations import apply_migrations  # noqa: E402
 from dashboard.page_routes import register_page_routes  # noqa: E402
 from dashboard.performance_access import PerformanceAccess  # noqa: E402
@@ -160,6 +161,18 @@ MATERIAL_CACHE_SCOPE_LIVE = "live"
 MATERIAL_CACHE_SCOPE_HISTORY = "history"
 MATERIAL_CACHE_SCOPES = {MATERIAL_CACHE_SCOPE_LIVE, MATERIAL_CACHE_SCOPE_HISTORY}
 MATERIAL_EAGER_CONTEXT_ROW_LIMIT = 2000
+MATERIAL_RANKING_INDEX_RETENTION_DAYS = max(
+    int(str(os.environ.get("MATERIAL_RANKING_INDEX_RETENTION_DAYS") or "60").strip() or "60"),
+    1,
+)
+MATERIAL_RANKING_INDEX_SORT_KEYS = (
+    "stat_cost",
+    "total_pay_amount",
+    "settled_pay_amount",
+    "pay_amount",
+    "order_count",
+)
+MATERIAL_RANKING_INDEX_DEFAULT_PAGE_SIZE = 20
 RANGE_LABEL_MAP = {
     "day": "今日",
     "yesterday": "昨日",
@@ -544,6 +557,7 @@ class DashboardService:
         self._full_refresh_status_local: dict[str, Any] = {}
         self._redis_client: Any | None = None
         self._backfill_queue_marks: dict[str, float] = {}
+        self._material_page_prewarm_marks: dict[str, str] = {}
         self.user_access = UserAccess(
             self.db,
             now_text,
@@ -5007,7 +5021,13 @@ class DashboardService:
             return MATERIAL_CACHE_SCOPE_LIVE
         return MATERIAL_CACHE_SCOPE_HISTORY
 
-    def _material_cache_namespaces(self, scope: str = "all", *, include_query: bool = False) -> list[str]:
+    def _material_cache_namespaces(
+        self,
+        scope: str = "all",
+        *,
+        include_query: bool = False,
+        include_page: bool = False,
+    ) -> list[str]:
         normalized_scope = self._normalize_material_cache_scope(scope)
         scopes = (
             [MATERIAL_CACHE_SCOPE_LIVE, MATERIAL_CACHE_SCOPE_HISTORY]
@@ -5021,6 +5041,8 @@ class DashboardService:
                 namespaces.append(base_namespace)
                 if include_query:
                     namespaces.append(f"{base_namespace}:query")
+                if include_page:
+                    namespaces.append(f"{base_namespace}:page")
         return namespaces
 
     def _prune_local_material_cache_store(
@@ -5053,12 +5075,23 @@ class DashboardService:
         self._prune_local_material_cache_store(self._material_query_cache, scope=normalized_scope)
         self._material_preview_refresh_cache.clear()
         self._preview_video_resolve_cache.clear()
-        refresh_prefixes = [f"{namespace}:" for namespace in self._material_cache_namespaces(normalized_scope, include_query=True)]
+        refresh_prefixes = [
+            f"{namespace}:"
+            for namespace in self._material_cache_namespaces(
+                normalized_scope,
+                include_query=True,
+                include_page=True,
+            )
+        ]
         refresh_prefixes.append("dashboard-overview:")
         self._prune_payload_refresh_markers(refresh_prefixes)
         self._invalidate_cache_namespaces(
             "dashboard-overview",
-            *self._material_cache_namespaces(normalized_scope, include_query=True),
+            *self._material_cache_namespaces(
+                normalized_scope,
+                include_query=True,
+                include_page=True,
+            ),
         )
 
     @staticmethod
@@ -5108,6 +5141,120 @@ class DashboardService:
                     mode=mode,
                     error=str(exc),
                 )
+
+    @staticmethod
+    def _material_performance_page_prewarm_targets() -> list[tuple[str, str]]:
+        return [
+            (DISPLAY_SCOPE_CURRENT, "day"),
+            (DISPLAY_SCOPE_ALL, "day"),
+            (DISPLAY_SCOPE_CURRENT, "week"),
+            (DISPLAY_SCOPE_ALL, "week"),
+            (DISPLAY_SCOPE_CURRENT, "month"),
+            (DISPLAY_SCOPE_ALL, "month"),
+        ]
+
+    @staticmethod
+    def _material_page_prewarm_signature_key() -> str:
+        return "dashboard:material-page-prewarm:performance-page1"
+
+    def _material_page_prewarm_signature(self) -> str:
+        with self.db() as conn:
+            current_meta = self._latest_material_current_meta(conn)
+            all_rows = self._latest_material_current_meta_all_customer_centers(conn)
+        payload = {
+            "current_customer_center_id": str(self._current_customer_center_id() or "").strip(),
+            "current": {
+                "snapshot_time": str((current_meta or {}).get("snapshot_time") or "").strip(),
+                "material_row_count": int((current_meta or {}).get("material_row_count", 0) or 0),
+            },
+            "all": [
+                {
+                    "customer_center_id": str(row.get("customer_center_id") or "").strip(),
+                    "snapshot_time": str(row.get("snapshot_time") or "").strip(),
+                    "material_row_count": int(row.get("material_row_count", 0) or 0),
+                }
+                for row in all_rows
+                if str(row.get("customer_center_id") or "").strip()
+            ],
+        }
+        return hashlib.sha1(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _should_prewarm_material_pages(
+        self,
+        signature: str,
+        *,
+        force_refresh: bool = False,
+    ) -> bool:
+        key = self._material_page_prewarm_signature_key()
+        client = self._redis()
+        previous_signature = ""
+        if client is not None:
+            try:
+                previous_signature = str(client.get(key) or "").strip()
+            except Exception:  # noqa: BLE001
+                previous_signature = ""
+        else:
+            previous_signature = str(self._material_page_prewarm_marks.get(key) or "").strip()
+        if not force_refresh and previous_signature == signature:
+            return False
+        if client is not None:
+            try:
+                client.set(
+                    key,
+                    signature,
+                    ex=max(int(MATERIAL_SYNC_WARM_INTERVAL_MINUTES or 30) * 360, 3600),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        self._material_page_prewarm_marks[key] = signature
+        return True
+
+    def _material_performance_page_cache_namespaces(self) -> list[str]:
+        return [
+            f"{build_material_cache_namespace(MATERIAL_VIEW_PERFORMANCE, scope=MATERIAL_CACHE_SCOPE_LIVE)}:page",
+            f"{build_material_cache_namespace(MATERIAL_VIEW_PERFORMANCE, scope=MATERIAL_CACHE_SCOPE_HISTORY)}:page",
+        ]
+
+    def _prewarm_material_performance_page_caches(self, *, force_refresh: bool = False) -> None:
+        for display_scope, range_key in self._material_performance_page_prewarm_targets():
+            try:
+                self._material_performance_page_payload(
+                    range_key=range_key,
+                    all_customer_centers=self._display_scope_uses_all_customer_centers(display_scope),
+                    page=1,
+                    page_size=20,
+                    sort_key="stat_cost",
+                    sort_dir="desc",
+                    force_refresh=force_refresh,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._emit_material_sync_observation(
+                    "material_page_prewarm_error",
+                    scope=display_scope,
+                    range_key=range_key,
+                    mode=MATERIAL_VIEW_PERFORMANCE,
+                    error=str(exc),
+                )
+
+    def _refresh_material_page_caches_after_hot_sync(self, *, force_refresh: bool = False) -> None:
+        signature = self._material_page_prewarm_signature()
+        if not self._should_prewarm_material_pages(signature, force_refresh=force_refresh):
+            self._emit_material_sync_observation(
+                "material_page_prewarm_skipped",
+                reason="unchanged_signature",
+            )
+            return
+        self.clear_material_runtime_caches(scope=MATERIAL_CACHE_SCOPE_LIVE)
+        namespaces = self._material_performance_page_cache_namespaces()
+        self._prune_payload_refresh_markers([f"{namespace}:" for namespace in namespaces])
+        self._invalidate_cache_namespaces(*namespaces)
+        self._prewarm_material_performance_page_caches(force_refresh=True)
+        self._emit_material_sync_observation(
+            "material_page_prewarm_refreshed",
+            force_refresh=bool(force_refresh),
+        )
 
     @staticmethod
     def _performance_cache_prewarm_targets() -> list[tuple[str, str, str]]:
@@ -24680,6 +24827,38 @@ class DashboardService:
             normalized_dir,
         )
 
+    def refresh_material_ranking_index_for_window(
+        self,
+        *,
+        start_day: str,
+        end_day: str,
+        range_key: str = "day",
+        all_customer_centers: bool = False,
+        sort_keys: list[str] | tuple[str, ...] | None = None,
+        sort_dirs: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        return material_ranking_index.refresh_window(
+            self,
+            start_day=start_day,
+            end_day=end_day,
+            range_key=range_key,
+            all_customer_centers=all_customer_centers,
+            sort_keys=sort_keys,
+            sort_dirs=sort_dirs,
+        )
+
+    def rebuild_material_ranking_indexes(
+        self,
+        *,
+        days: int = MATERIAL_RANKING_INDEX_RETENTION_DAYS,
+        all_customer_centers: bool = False,
+    ) -> dict[str, Any]:
+        return material_ranking_index.rebuild_recent(
+            self,
+            days=days,
+            all_customer_centers=all_customer_centers,
+        )
+
     def _material_performance_page_payload(
         self,
         *,
@@ -24987,6 +25166,43 @@ class DashboardService:
 
             if not source_queries:
                 return empty_payload()
+
+            index_range_key = material_ranking_index.index_range_key(normalized, start_day, end_day)
+            can_use_ranking_index = (
+                bool(index_range_key)
+                and allowed_advertiser_ids is None
+                and not search_text
+                and not material_name_patterns
+                and not require_nonzero_metrics
+                and normalized_sort_key in material_ranking_index.SORT_KEYS
+            )
+            if can_use_ranking_index:
+                with self.db() as index_conn:
+                    indexed_payload = material_ranking_index.payload_from_index(
+                        self,
+                        index_conn,
+                        source_queries=source_queries,
+                        source_params=source_params,
+                        scope_key_value=material_ranking_index.scope_key(
+                            self,
+                            all_customer_centers=all_customer_centers,
+                        ),
+                        index_range_key_value=index_range_key,
+                        start_day=start_day,
+                        end_day=end_day,
+                        normalized=normalized,
+                        range_label=range_label,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        tz_name=tz_name,
+                        page=normalized_page,
+                        page_size=normalized_page_size,
+                        sort_key=normalized_sort_key,
+                        sort_dir=normalized_sort_dir,
+                        all_customer_centers=all_customer_centers,
+                    )
+                if indexed_payload is not None:
+                    return indexed_payload
 
             escaped_search = search_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             search_like = f"%{escaped_search}%"
@@ -28111,8 +28327,9 @@ class DashboardService:
                 if not payload.get("skipped"):
                     self.persist_material_current(payload)
                     self.cleanup_history()
-                    self.clear_material_runtime_caches(scope=MATERIAL_CACHE_SCOPE_LIVE)
-                    self._prewarm_material_range_caches()
+                    self._refresh_material_page_caches_after_hot_sync(
+                        force_refresh=force_refresh,
+                    )
                 return {
                     "ok": bool(payload.get("ok", True)),
                     "skipped": bool(payload.get("skipped", False)),
@@ -28221,8 +28438,9 @@ class DashboardService:
                         )
 
             self.cleanup_history()
-            self.clear_material_runtime_caches(scope=MATERIAL_CACHE_SCOPE_LIVE)
-            self._prewarm_material_range_caches()
+            self._refresh_material_page_caches_after_hot_sync(
+                force_refresh=force_refresh,
+            )
             return {
                 "ok": not errors,
                 "skipped": False,
@@ -28299,8 +28517,9 @@ class DashboardService:
                 return payload
             self.persist_material_current(payload)
             self.cleanup_history()
-            self.clear_material_runtime_caches(scope=MATERIAL_CACHE_SCOPE_LIVE)
-            self._prewarm_material_range_caches()
+            self._refresh_material_page_caches_after_hot_sync(
+                force_refresh=force_refresh,
+            )
             return payload
 
     def queue_startup_history_catchup_probe(self) -> None:

@@ -109,6 +109,15 @@ def sync_dashboard_material_hot(force_refresh: bool = False) -> dict:
     }
 
 
+@celery_app.task(name="dashboard.material_ranking_index_refresh")
+def refresh_material_ranking_index(days: int = 60, all_customer_centers: bool = False) -> dict:
+    _prepare()
+    return service.rebuild_material_ranking_indexes(
+        days=max(int(days or 60), 1),
+        all_customer_centers=bool(all_customer_centers),
+    )
+
+
 @celery_app.task(name="dashboard.full_refresh")
 def full_refresh_dashboard(
     performance_days: int = 0,
