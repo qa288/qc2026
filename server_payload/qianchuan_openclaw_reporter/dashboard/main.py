@@ -13945,6 +13945,7 @@ class DashboardService:
                 "like_count": like_count,
                 "item_title": str(row.get("item_title") or "").strip(),
                 "video_owner_aweme_id": "",
+                "comment_anchor_name": "",
                 "comment_type": comment_type,
                 "comment_type_text": self._comment_type_label(comment_type),
                 "promotion_id": promotion_id,
@@ -13959,37 +13960,178 @@ class DashboardService:
             items.append(item_payload)
         return items, None
 
-    def _comment_plan_name_maps(
+    def _comment_plan_context_maps(
         self,
         conn: Any,
         advertiser_ids: set[int],
         promotion_ids: set[int],
-    ) -> tuple[dict[tuple[int, int], str], dict[int, str]]:
+    ) -> tuple[dict[tuple[int, int], dict[str, str]], dict[int, dict[str, str]]]:
         if not advertiser_ids or not promotion_ids:
             return {}, {}
         advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
         promotion_placeholders = ",".join("?" for _ in promotion_ids)
-        params: list[Any] = [*sorted(promotion_ids), *sorted(advertiser_ids), self._current_customer_center_id()]
+        params: list[Any] = [
+            *sorted(promotion_ids),
+            *sorted(advertiser_ids),
+            self._current_customer_center_id(),
+            *sorted(promotion_ids),
+            *sorted(advertiser_ids),
+            self._current_customer_center_id(),
+        ]
         rows = conn.execute(
             f"""
-            SELECT snapshot_time, advertiser_id, ad_id, ad_name
+            SELECT 0 AS priority, snapshot_time, advertiser_id, ad_id, ad_name, anchor_name, plan_source
+            FROM plan_current
+            WHERE ad_id IN ({promotion_placeholders})
+              AND advertiser_id IN ({advertiser_placeholders})
+              AND customer_center_id = ?
+            UNION ALL
+            SELECT 1 AS priority, snapshot_time, advertiser_id, ad_id, ad_name, anchor_name, plan_source
             FROM plan_snapshots
             WHERE ad_id IN ({promotion_placeholders})
               AND advertiser_id IN ({advertiser_placeholders})
               AND customer_center_id = ?
-            ORDER BY snapshot_time DESC
+            ORDER BY priority ASC, snapshot_time DESC
             """,
             params,
         ).fetchall()
-        exact: dict[tuple[int, int], str] = {}
-        fallback: dict[int, str] = {}
+        exact: dict[tuple[int, int], dict[str, str]] = {}
+        fallback: dict[int, dict[str, str]] = {}
+
+        def merge_context(target: dict[str, str], source: dict[str, str]) -> None:
+            for key, value in source.items():
+                if value and not target.get(key):
+                    target[key] = value
+
         for row in rows:
             advertiser_id = int(row["advertiser_id"])
             ad_id = int(row["ad_id"])
             ad_name = str(row["ad_name"] or ad_id).strip()
-            exact.setdefault((advertiser_id, ad_id), ad_name)
-            fallback.setdefault(ad_id, ad_name)
+            context = {
+                "promotion_id": str(ad_id) if ad_id else "",
+                "promotion_name": ad_name,
+                "comment_anchor_name": str(row["anchor_name"] or "").strip(),
+                "plan_source": str(row["plan_source"] or "").strip(),
+            }
+            key = (advertiser_id, ad_id)
+            if key not in exact:
+                exact[key] = dict(context)
+            else:
+                merge_context(exact[key], context)
+            if ad_id not in fallback:
+                fallback[ad_id] = dict(context)
+            else:
+                merge_context(fallback[ad_id], context)
         return exact, fallback
+
+    def _comment_material_context_maps(
+        self,
+        conn: Any,
+        advertiser_ids: set[int],
+        material_ids: set[str],
+        item_ids: set[str],
+    ) -> dict[str, dict[Any, dict[str, str]]]:
+        result: dict[str, dict[Any, dict[str, str]]] = {
+            "exact_item": {},
+            "fallback_item": {},
+            "exact_material": {},
+            "fallback_material": {},
+        }
+        normalized_material_ids = sorted(str(item).strip() for item in material_ids if str(item).strip())
+        normalized_item_ids = sorted(str(item).strip() for item in item_ids if str(item).strip())
+        if not advertiser_ids or (not normalized_material_ids and not normalized_item_ids):
+            return result
+
+        advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
+        source_queries: list[str] = []
+        params: list[Any] = []
+
+        def append_source(table_name: str, priority: int, has_top_anchor: bool) -> None:
+            match_clauses: list[str] = []
+            source_params: list[Any] = [self._current_customer_center_id(), *sorted(advertiser_ids)]
+            if normalized_material_ids:
+                material_placeholders = ",".join("?" for _ in normalized_material_ids)
+                match_clauses.append(f"COALESCE(mr.material_id, '') IN ({material_placeholders})")
+                source_params.extend(normalized_material_ids)
+            if normalized_item_ids:
+                item_placeholders = ",".join("?" for _ in normalized_item_ids)
+                match_clauses.append(
+                    f"(COALESCE(mr.aweme_item_id, '') IN ({item_placeholders}) OR COALESCE(mr.video_id, '') IN ({item_placeholders}))"
+                )
+                source_params.extend(normalized_item_ids)
+                source_params.extend(normalized_item_ids)
+            top_anchor_expr = "NULLIF(mr.top_anchor_name, '')" if has_top_anchor else "NULL"
+            source_queries.append(
+                f"""
+                SELECT
+                    {priority} AS priority,
+                    mr.snapshot_time,
+                    mr.advertiser_id,
+                    mr.ad_id,
+                    mr.ad_name,
+                    mr.material_id,
+                    mr.material_name,
+                    mr.video_id,
+                    mr.aweme_item_id,
+                    COALESCE({top_anchor_expr}, NULLIF(pc.anchor_name, ''), '') AS comment_anchor_name,
+                    COALESCE(NULLIF(pc.plan_source, ''), '') AS plan_source
+                FROM {table_name} mr
+                LEFT JOIN plan_current pc
+                  ON pc.customer_center_id = mr.customer_center_id
+                 AND pc.advertiser_id = mr.advertiser_id
+                 AND pc.ad_id = mr.ad_id
+                WHERE mr.customer_center_id = ?
+                  AND mr.advertiser_id IN ({advertiser_placeholders})
+                  AND ({' OR '.join(match_clauses)})
+                """
+            )
+            params.extend(source_params)
+
+        append_source("material_relation_current", 0, True)
+        append_source("material_relation_daily", 1, True)
+        append_source("material_snapshots", 2, False)
+
+        rows = conn.execute(
+            f"""
+            {' UNION ALL '.join(source_queries)}
+            ORDER BY priority ASC, snapshot_time DESC
+            """,
+            params,
+        ).fetchall()
+
+        def merge_context(target: dict[str, str], source: dict[str, str]) -> None:
+            for key, value in source.items():
+                if value and not target.get(key):
+                    target[key] = value
+
+        def store(mapping: dict[Any, dict[str, str]], key: Any, context: dict[str, str]) -> None:
+            if key in mapping:
+                merge_context(mapping[key], context)
+            else:
+                mapping[key] = dict(context)
+
+        for row in rows:
+            advertiser_id = int(row["advertiser_id"] or 0)
+            ad_id = int(row["ad_id"] or 0)
+            material_id = str(row["material_id"] or "").strip()
+            aweme_item_id = str(row["aweme_item_id"] or "").strip()
+            video_id = str(row["video_id"] or "").strip()
+            context = {
+                "promotion_id": str(ad_id) if ad_id else "",
+                "promotion_name": str(row["ad_name"] or "").strip(),
+                "material_name": str(row["material_name"] or "").strip(),
+                "comment_anchor_name": str(row["comment_anchor_name"] or "").strip(),
+                "plan_source": str(row["plan_source"] or "").strip(),
+            }
+            if material_id:
+                store(result["exact_material"], (advertiser_id, material_id), context)
+                store(result["fallback_material"], material_id, context)
+            for item_id in (aweme_item_id, video_id):
+                if not item_id:
+                    continue
+                store(result["exact_item"], (advertiser_id, item_id), context)
+                store(result["fallback_item"], item_id, context)
+        return result
 
     def _comment_material_name_maps(
         self,
@@ -14107,6 +14249,7 @@ class DashboardService:
             "like_count": self._safe_int(row.get("like_count", 0)),
             "item_title": str(row.get("item_title") or "").strip(),
             "video_owner_aweme_id": "",
+            "comment_anchor_name": "",
             "comment_type": comment_type,
             "comment_type_text": self._comment_type_label(comment_type),
             "promotion_id": promotion_id,
@@ -15159,6 +15302,7 @@ class DashboardService:
         advertiser_ids: set[int] = set()
         promotion_ids: set[int] = set()
         material_ids: set[str] = set()
+        item_ids: set[str] = set()
         with self.db() as conn:
             stored_rows = self._stored_comment_records(conn, account_ids, comment_start_date, comment_end_date)
             items = [self._comment_item_from_record(row) for row in stored_rows]
@@ -15173,28 +15317,64 @@ class DashboardService:
                 for item in items
                 if str(item.get("material_id") or "").strip()
             }
-            plan_map, fallback_plan_map = self._comment_plan_name_maps(conn, advertiser_ids, promotion_ids)
+            item_ids = {
+                str(item.get("item_id") or "").strip()
+                for item in items
+                if str(item.get("item_id") or "").strip()
+            }
+            plan_map, fallback_plan_map = self._comment_plan_context_maps(conn, advertiser_ids, promotion_ids)
+            material_context_maps = self._comment_material_context_maps(conn, advertiser_ids, material_ids, item_ids)
             material_map, fallback_material_map = self._comment_material_name_maps(conn, advertiser_ids, material_ids)
 
         for item in items:
             advertiser_id_value = int(item.get("advertiser_id", 0) or 0)
             promotion_text = str(item.get("promotion_id") or "").strip()
             material_text = str(item.get("material_id") or "").strip()
-            promotion_name = ""
+            item_text = str(item.get("item_id") or "").strip()
+            material_context: dict[str, str] = {}
+            if item_text:
+                material_context = material_context_maps["exact_item"].get(
+                    (advertiser_id_value, item_text),
+                    {},
+                ) or material_context_maps["fallback_item"].get(item_text, {})
+            if not material_context and material_text:
+                material_context = material_context_maps["exact_material"].get(
+                    (advertiser_id_value, material_text),
+                    {},
+                ) or material_context_maps["fallback_material"].get(material_text, {})
+            plan_context: dict[str, str] = {}
             if promotion_text.isdigit():
                 promotion_id_value = int(promotion_text)
-                promotion_name = plan_map.get((advertiser_id_value, promotion_id_value), "") or fallback_plan_map.get(
+                plan_context = plan_map.get((advertiser_id_value, promotion_id_value), {}) or fallback_plan_map.get(
                     promotion_id_value,
-                    "",
+                    {},
                 )
+            if not promotion_text and str(material_context.get("promotion_id") or "").strip():
+                promotion_text = str(material_context.get("promotion_id") or "").strip()
+                item["promotion_id"] = promotion_text
+            promotion_name = str(
+                plan_context.get("promotion_name")
+                or material_context.get("promotion_name")
+                or "",
+            ).strip()
             material_name = material_map.get((advertiser_id_value, material_text), "") or fallback_material_map.get(
                 material_text,
                 "",
-            )
+            ) or str(material_context.get("material_name") or "").strip()
+            comment_anchor_name = str(
+                plan_context.get("comment_anchor_name")
+                or material_context.get("comment_anchor_name")
+                or "",
+            ).strip()
+            plan_source = str(plan_context.get("plan_source") or material_context.get("plan_source") or "").strip()
             item["promotion_name"] = promotion_name
             item["promotion_display_name"] = promotion_name or (f"计划 {promotion_text}" if promotion_text else "-")
+            item["plan_source"] = plan_source
             item["material_name"] = material_name
             item["material_display_name"] = material_name or (f"素材 {material_text}" if material_text else "-")
+            item["comment_anchor_name"] = comment_anchor_name
+            item["top_anchor_name"] = comment_anchor_name
+            item["video_owner_aweme_id"] = comment_anchor_name or str(item.get("video_owner_aweme_id") or "").strip()
 
         items.sort(
             key=lambda item: (

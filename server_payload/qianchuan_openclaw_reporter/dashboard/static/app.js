@@ -5085,8 +5085,11 @@ function renderCommentTable(rows) {
       row.comment_user_id,
       row.item_title,
       row.promotion_display_name,
+      row.promotion_name,
       row.material_display_name,
       row.advertiser_name,
+      row.comment_anchor_name,
+      row.top_anchor_name,
     ].join(" ").toLowerCase();
     return haystack.includes(query);
   });
@@ -5101,7 +5104,7 @@ function renderCommentTable(rows) {
     { key: "reply_count", label: "相关回复数", sortable: true },
     { key: "like_count", label: "点赞数", sortable: true },
     { key: "item_title", label: "视频标题", sortable: true },
-    { key: "video_owner_aweme_id", label: "视频所属抖音号", sortable: true },
+    { key: "comment_anchor_name", label: "所属达人", sortable: true },
     { key: "comment_type_text", label: "评论类型", sortable: true },
     { key: "promotion_display_name", label: "评论来源计划", sortable: true },
     { key: "create_time", label: "评论时间", sortable: true },
@@ -5185,7 +5188,7 @@ function renderCommentTable(rows) {
               <span class="cell-subitem">VID ${escapeHtml(truncateMiddle(row.item_id || "-", 8, 6))}</span>
             </div>
           </td>
-          <td class="mono">${escapeHtml(row.video_owner_aweme_id || "-")}</td>
+          <td>${escapeHtml(row.comment_anchor_name || row.top_anchor_name || row.video_owner_aweme_id || "-")}</td>
           <td>${escapeHtml(row.comment_type_text || "-")}</td>
           <td>
             <div class="cell-primary">${escapeHtml(row.promotion_display_name || "-")}</div>
