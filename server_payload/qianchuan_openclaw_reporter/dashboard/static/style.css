@@ -14,6 +14,7 @@
   --shadow: 0 12px 32px rgba(15, 34, 72, 0.08);
   --radius: 22px;
   --radius-sm: 16px;
+  --page-shell-max: 2320px;
   --font-ui: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
   --font-display: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
 }
@@ -32,9 +33,10 @@ body {
 }
 
 .page-shell {
-  max-width: 1720px;
+  width: min(100%, var(--page-shell-max));
+  max-width: none;
   margin: 0 auto;
-  padding: 20px 28px 56px;
+  padding: 12px 24px 48px;
 }
 
 .hero {
@@ -1422,6 +1424,10 @@ body {
   max-width: 430px;
 }
 
+.material-mode-switch .range-button {
+  min-width: 52px;
+}
+
 .toolbar-inline-material .toolbar-search-actions > .search-input {
   min-width: 0;
 }
@@ -1619,8 +1625,12 @@ body {
 }
 
 .account-table-shell {
-  min-height: clamp(560px, calc(100vh - 320px), 760px);
-  max-height: clamp(760px, calc(100vh - 220px), 960px);
+  min-height: clamp(660px, calc(100vh - 350px), 900px);
+  max-height: clamp(840px, calc(100vh - 240px), 1080px);
+}
+
+.account-table-shell .account-matrix-table {
+  min-width: 1540px;
 }
 
 .data-table {
@@ -1666,6 +1676,281 @@ body {
 
 .data-table tbody tr.active-row {
   background: rgba(20, 59, 47, 0.08);
+}
+
+.account-matrix-table thead th,
+.aggregate-matrix-table thead th {
+  background: rgba(248, 251, 255, 0.98);
+  padding: 8px 18px 9px;
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #6f7f92;
+  border-bottom: 1px solid rgba(208, 220, 235, 0.92);
+  white-space: nowrap;
+}
+
+.account-matrix-table thead th:first-child {
+  min-width: 520px;
+}
+
+.aggregate-matrix-table thead th:first-child {
+  min-width: 360px;
+}
+
+.account-matrix-table thead th.is-sortable,
+.aggregate-matrix-table thead th.is-sortable {
+  cursor: pointer;
+}
+
+.account-matrix-table tbody td,
+.aggregate-matrix-table tbody td {
+  padding: 14px 18px;
+  font-size: 14px;
+  border-bottom: 1px solid rgba(218, 227, 239, 0.92);
+  color: #243348;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.account-matrix-table tbody tr:hover,
+.aggregate-matrix-table tbody tr:hover {
+  background: rgba(28, 112, 246, 0.025);
+}
+
+.account-matrix-table tbody tr:hover td,
+.aggregate-matrix-table tbody tr:hover td {
+  background: rgba(248, 251, 255, 0.98);
+}
+
+.material-performance-table {
+  min-width: 1940px;
+  table-layout: fixed;
+}
+
+.material-performance-table thead th:first-child {
+  min-width: 320px;
+  width: 320px;
+}
+
+.material-performance-table thead th:nth-child(2) {
+  min-width: 260px;
+  width: 260px;
+}
+
+.material-performance-table thead th:nth-child(3) {
+  min-width: 132px;
+  width: 132px;
+}
+
+.material-performance-table thead th:nth-child(4) {
+  min-width: 122px;
+  width: 122px;
+}
+
+.material-performance-table thead th:nth-child(n+5):nth-child(-n+11) {
+  min-width: 108px;
+  width: 108px;
+}
+
+.material-performance-table thead th:nth-child(12) {
+  min-width: 120px;
+  width: 120px;
+}
+
+.material-performance-table thead th:nth-child(13),
+.material-performance-table thead th:nth-child(14) {
+  min-width: 84px;
+  width: 84px;
+}
+
+.material-performance-table thead th:nth-child(2) .account-table-head-label,
+.material-performance-table thead th:first-child .account-table-head-label {
+  white-space: normal;
+  line-height: 1.25;
+}
+
+.material-performance-table tbody td {
+  vertical-align: top;
+  padding: 16px 14px;
+}
+
+.material-performance-table tbody td:nth-child(1) .cell-primary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  line-height: 1.5;
+  font-size: 15px;
+}
+
+.material-performance-table tbody td:nth-child(1) .cell-subline {
+  gap: 5px 8px;
+}
+
+.material-performance-table tbody td:nth-child(2) .cell-secondary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  overflow: hidden;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.55;
+  min-height: calc(1.55em * 5);
+  color: #42556d;
+}
+
+.material-performance-table tbody td:nth-child(3) {
+  text-align: center;
+}
+
+.material-performance-table tbody td:nth-child(3) .material-preview-trigger {
+  margin: 0 auto;
+  width: 124px;
+  height: 72px;
+  border-radius: 16px;
+}
+
+.material-performance-table tbody td:nth-child(4) {
+  white-space: nowrap;
+  color: #55677c;
+}
+
+.material-performance-table tbody td:nth-child(n+5):nth-child(-n+11) {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.material-performance-table tbody td:nth-child(12) {
+  color: #31465e;
+}
+
+.material-performance-table tbody td:nth-child(13),
+.material-performance-table tbody td:nth-child(14) {
+  text-align: center;
+  white-space: nowrap;
+}
+
+.material-performance-table .relation-trigger {
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.account-table-head {
+  display: grid;
+  gap: 3px;
+  min-height: 50px;
+  align-content: start;
+}
+
+.account-table-head-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.2;
+}
+
+.account-table-head-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #6f7f92;
+  line-height: 1.1;
+}
+
+.account-table-head.is-primary .account-table-head-label {
+  color: #61748a;
+}
+
+.account-table-sort-indicator {
+  display: inline-flex;
+  align-items: center;
+  color: #9aa9bb;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.account-table-head-total {
+  min-height: 20px;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: #223149;
+}
+
+.account-table-head-total.is-account-total,
+.account-table-head-total.is-metric-total {
+  font-size: 15px;
+}
+
+.account-table-head-total.is-empty {
+  visibility: hidden;
+}
+
+.account-matrix-account-cell {
+  min-width: 520px;
+}
+
+.account-matrix-name {
+  font-size: 15px;
+  line-height: 1.35;
+  color: #223149;
+}
+
+.account-matrix-meta {
+  gap: 6px 14px;
+  margin-top: 7px;
+  font-size: 12px;
+  color: #707e91;
+}
+
+.account-metric-cell {
+  white-space: nowrap;
+}
+
+.account-metric-value {
+  display: inline-block;
+  min-width: 100%;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: #2c3d54;
+}
+
+.account-plan-count-trigger {
+  font-size: 15px;
+  font-weight: 800;
+  text-underline-offset: 4px;
+}
+
+.account-status-cell {
+  white-space: nowrap;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  min-height: 38px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.status-chip-ok {
+  background: rgba(22, 119, 255, 0.1);
+  color: var(--brand);
+}
+
+.status-chip-fallback {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b76a00;
+}
+
+.status-chip-error {
+  background: rgba(209, 67, 67, 0.14);
+  color: var(--alert);
 }
 
 .comment-table {
@@ -3192,24 +3477,27 @@ body {
 }
 
 .page-shell {
-  padding: 20px 24px 40px;
+  width: min(100%, var(--page-shell-max));
+  max-width: none;
+  padding: 12px 24px 40px;
 }
 
 body.role-operator .page-shell {
-  max-width: 1720px;
+  width: min(100%, var(--page-shell-max));
+  max-width: none;
   padding-left: 24px;
   padding-right: 24px;
 }
 
 @media (min-width: 1900px) {
   body.role-operator .page-shell {
-    transform: translateX(-12px);
+    transform: none;
   }
 }
 
 .view-section {
   display: none;
-  margin-top: 18px;
+  margin-top: 12px;
 }
 
 .view-section.is-active {
@@ -4049,9 +4337,37 @@ body.role-operator .page-shell {
     grid-template-columns: 1fr;
   }
 
+  .top-nav-row {
+    align-items: flex-start;
+  }
+
+  .worktop-bar {
+    width: 100%;
+  }
+
   .view-tabs {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 8px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    padding-bottom: 2px;
+  }
+
+  .view-tabs::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  .view-tabs::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: rgba(22, 119, 255, 0.2);
+  }
+
+  .view-tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 
   .signal-summary-strip {
@@ -4103,6 +4419,18 @@ body.role-operator .page-shell {
   .login-intro h1,
   .login-card h2 {
     font-size: 30px;
+  }
+
+  .view-section[data-view="materials"] .table-shell,
+  .view-section[data-view="team-materials"] .table-shell {
+    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .view-section[data-view="materials"] .data-table,
+  .view-section[data-view="team-materials"] .data-table {
+    min-width: 1240px;
   }
 
   .kpi-grid {

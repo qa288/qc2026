@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -120,6 +121,35 @@ UNI_PLAN_REPORT_FALLBACK_METRICS = [
     "total_order_settle_count_for_roi2_1h",
     "total_prepay_and_pay_settle_roi2_1h",
 ]
+UNI_CUBIC_PLAN_DIMENSIONS = [
+    "ad_id",
+    "ad_name",
+    "anchor_name",
+    "qianchuan_product_id",
+]
+UNI_CUBIC_PRODUCT_TOPIC = "OVERALL_ROI_PRODUCT_PRODUCT"
+UNI_CUBIC_PRODUCT_DIMENSIONS = [
+    "ad_id",
+    "ad_name",
+    "anchor_name",
+    "qianchuan_product_id",
+    "qianchuan_product_name",
+]
+UNI_CUBIC_PRODUCT_METRICS = [
+    "stat_cost_for_roi2",
+]
+UNI_CUBIC_PLAN_METRICS = [
+    "stat_cost_for_roi2",
+    "total_pay_order_gmv_for_roi2",
+    "total_pay_order_gmv_include_coupon_for_roi2",
+    "total_pay_order_count_for_roi2",
+    "total_prepay_and_pay_order_roi2",
+    "total_order_settle_amount_for_roi2_1h",
+    "total_order_settle_count_for_roi2_1h",
+    "total_prepay_and_pay_settle_roi2_1h",
+    "total_refund_order_gmv_for_roi2_1h_all",
+    "total_refund_order_gmv_for_roi2_1h_rate",
+]
 
 PLAN_PRODUCT_FIELDS = [
     "product_show_count_for_roi2",
@@ -136,6 +166,9 @@ PLAN_MATERIAL_FIELDS = [
     "stat_cost_for_roi2",
     "total_pay_order_count_for_roi2",
     "total_pay_order_gmv_for_roi2",
+    "total_pay_order_gmv_include_coupon_for_roi2",
+    "total_order_settle_amount_for_roi2_1h",
+    "total_order_settle_count_for_roi2_1h",
     "total_prepay_and_pay_order_roi2",
 ]
 
@@ -156,9 +189,13 @@ PLAN_MATERIAL_FIELDS_BY_TYPE = {
 
 PLAN_MATERIAL_TYPES = ["VIDEO", "IMAGE", "TITLE", "CAROUSEL", "LIVE_ROOM"]
 PLAN_SOURCE_UNI_PROMOTION = "UNI_PROMOTION"
+PLAN_SOURCE_UNI_REPORT = "UNI_REPORT"
+PLAN_SOURCE_UNI_CUBIC = "UNI_CUBIC"
 PLAN_SOURCE_STANDARD = "STANDARD"
 PLAN_DELIVERY_TYPE_GLOBAL = "GLOBAL"
 PLAN_DELIVERY_TYPE_CUBIC = "CUBIC"
+PLAN_DELIVERY_METADATA_SOURCE_UNI_MAIN = "UNI_MAIN_LIST"
+PLAN_DELIVERY_METADATA_SOURCE_UNI_REPORT = "UNI_REPORT_DATA"
 TOKEN_LOCK_KEY = os.environ.get("OCEANENGINE_TOKEN_LOCK_KEY", "qianchuan:oauth:refresh")
 TOKEN_LOCK_TIMEOUT_SECONDS = int(os.environ.get("OCEANENGINE_TOKEN_LOCK_TIMEOUT_SECONDS", "120") or 120)
 TOKEN_LOCK_BLOCKING_TIMEOUT_SECONDS = int(
@@ -167,7 +204,78 @@ TOKEN_LOCK_BLOCKING_TIMEOUT_SECONDS = int(
 
 PLAN_MONEY_SCALE = 100000.0
 ACCOUNT_FUND_MONEY_SCALE = 100.0
-RETRYABLE_API_CODES = {40100, 50000}
+RETRYABLE_API_CODES = {40100, 40110, 50000}
+RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+RETRYABLE_TRANSIENT_40000_MESSAGE_FRAGMENTS = (
+    "下游依赖服务相关错误",
+    "GetUniPromMaterial fail",
+)
+TOKEN_FORCE_REFRESH_CODES = {40100, 40105}
+try:
+    RETRY_MAX_DELAY_SECONDS = max(float(os.environ.get("OCEANENGINE_RETRY_MAX_DELAY_SECONDS", "60") or 60.0), 1.0)
+except Exception:
+    RETRY_MAX_DELAY_SECONDS = 60.0
+
+
+def _retry_sleep_seconds(
+    code: int,
+    attempt: int,
+    base_delay: float,
+    response: dict[str, Any] | None = None,
+    *,
+    max_delay_seconds: float = RETRY_MAX_DELAY_SECONDS,
+) -> float:
+    if int(code or 0) == 40110:
+        message_parts = [
+            str((response or {}).get("message") or "").strip(),
+            str((response or {}).get("msg") or "").strip(),
+            str((response or {}).get("help_message") or "").strip(),
+        ]
+        message = " ".join(part for part in message_parts if part).lower()
+        if "5分钟" in message or "5 分钟" in message or "300" in message:
+            return min(300.0, max_delay_seconds)
+        return min(min(120.0, max_delay_seconds), max(5.0, base_delay * (5 ** (attempt - 1))))
+    return min(base_delay * (2 ** (attempt - 1)), max_delay_seconds)
+
+
+def _is_retryable_api_response(
+    code: int,
+    response: dict[str, Any] | None = None,
+    *,
+    status_code: int = 0,
+) -> bool:
+    normalized_code = int(code or 0)
+    normalized_status_code = int(status_code or 0)
+    if normalized_code in RETRYABLE_API_CODES or normalized_status_code in RETRYABLE_HTTP_STATUS_CODES:
+        return True
+    if normalized_code != 40000:
+        return False
+    payload = dict(response or {})
+    message_parts = [
+        str(payload.get("message") or "").strip(),
+        str(payload.get("msg") or "").strip(),
+        str(payload.get("help_message") or "").strip(),
+    ]
+    merged_message = " ".join(part for part in message_parts if part)
+    if not merged_message:
+        return False
+    return any(fragment in merged_message for fragment in RETRYABLE_TRANSIENT_40000_MESSAGE_FRAGMENTS)
+
+
+def _should_force_refresh_access_token(response: dict[str, Any] | None = None) -> bool:
+    payload = dict(response or {})
+    code = int(payload.get("code", 0) or 0)
+    if code in TOKEN_FORCE_REFRESH_CODES:
+        return True
+    message_parts = [
+        str(payload.get("message") or "").strip(),
+        str(payload.get("msg") or "").strip(),
+        str(payload.get("help_message") or "").strip(),
+    ]
+    merged_message = " ".join(part for part in message_parts if part).lower()
+    if not merged_message:
+        return False
+    return "access_token" in merged_message or "access token" in merged_message
 
 DELIVERY_STATUS_LABELS = {
     "DELIVERY_OK": "投放中",
@@ -206,6 +314,15 @@ class AccountSummary:
     roi: float
     order_count: int
     pay_amount: float
+    total_pay_amount: float = 0.0
+    settled_pay_amount: float = 0.0
+    settled_roi: float = 0.0
+    settled_order_count: int = 0
+    pay_order_cost: float = 0.0
+    settled_amount_rate: float = 0.0
+    refund_rate_1h: float = 0.0
+    refund_amount_1h: float = 0.0
+    plan_count: int = 0
     ok: bool = True
     error: str | None = None
 
@@ -240,7 +357,118 @@ class PlanSummary:
 
 
 class ApiError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: int = 0,
+        request_id: str = "",
+        response: dict[str, Any] | None = None,
+        help_message: str = "",
+        status_code: int = 0,
+        retryable: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = int(code or 0)
+        self.request_id = str(request_id or "").strip()
+        self.response = dict(response or {})
+        self.help_message = str(help_message or "").strip()
+        self.status_code = int(status_code or 0)
+        if retryable is None:
+            retryable = _is_retryable_api_response(
+                self.code,
+                self.response,
+                status_code=self.status_code,
+            )
+        self.retryable = bool(retryable)
+
+    @classmethod
+    def from_response(
+        cls,
+        response: dict[str, Any] | None,
+        *,
+        default_message: str = "api request failed",
+        status_code: int = 0,
+    ) -> "ApiError":
+        payload = dict(response or {})
+        code = int(payload.get("code", 0) or 0)
+        message = (
+            str(payload.get("message") or "").strip()
+            or str(payload.get("msg") or "").strip()
+            or str(payload.get("help_message") or "").strip()
+            or default_message
+        )
+        return cls(
+            message,
+            code=code,
+            request_id=str(payload.get("request_id") or payload.get("requestId") or "").strip(),
+            response=payload,
+            help_message=str(payload.get("help_message") or "").strip(),
+            status_code=status_code,
+        )
+
+    @classmethod
+    def from_http_error(cls, exc: urllib.error.HTTPError) -> "ApiError":
+        body_text = exc.read().decode("utf-8", errors="replace")
+        response_payload: dict[str, Any] | None = None
+        try:
+            parsed = json.loads(body_text)
+            if isinstance(parsed, dict):
+                response_payload = parsed
+        except Exception:
+            response_payload = None
+        if isinstance(response_payload, dict):
+            return cls.from_response(
+                response_payload,
+                default_message=f"HTTP {exc.code}",
+                status_code=int(exc.code or 0),
+            )
+        return cls(
+            f"HTTP {exc.code}: {body_text}",
+            status_code=int(exc.code or 0),
+        )
+
+    @classmethod
+    def from_request_failure(cls, exc: Exception) -> "ApiError":
+        return cls(f"request failed: {exc}", retryable=True)
+
+
+def _ensure_api_response_ok(response: dict[str, Any], action: str) -> dict[str, Any]:
+    if int(response.get("code", 0) or 0) != 0:
+        raise ApiError.from_response(response, default_message=f"{action} failed")
+    return response
+
+
+def _resolve_access_token(access_token: Any, *, force_refresh: bool = False) -> str:
+    if callable(access_token):
+        try:
+            return str(access_token(force_refresh=force_refresh))
+        except TypeError:
+            return str(access_token())
+    return str(access_token)
+
+
+def _effective_timeout_seconds(timeout: int, deadline_monotonic: float | None, context: str) -> int:
+    effective_timeout = max(int(timeout or 0), 1)
+    if deadline_monotonic is None:
+        return effective_timeout
+    remaining = float(deadline_monotonic or 0.0) - time.monotonic()
+    if remaining <= 0:
+        raise ApiError(f"{context} deadline exceeded", retryable=False)
+    return max(1, min(effective_timeout, int(remaining) if remaining >= 1 else 1))
+
+
+def _sleep_with_deadline(delay_seconds: float, deadline_monotonic: float | None) -> None:
+    sleep_seconds = max(float(delay_seconds or 0.0), 0.0)
+    if sleep_seconds <= 0:
+        return
+    if deadline_monotonic is None:
+        time.sleep(sleep_seconds)
+        return
+    remaining = float(deadline_monotonic or 0.0) - time.monotonic()
+    if remaining <= 0:
+        return
+    time.sleep(min(sleep_seconds, remaining))
 
 
 @dataclass(frozen=True)
@@ -337,9 +565,10 @@ def build_runtime_config(base_config: dict[str, Any] | None = None) -> dict[str,
         "account_source": "QIANCHUAN",
         "marketing_goal": "ALL",
         "order_platform": "QIANCHUAN",
-        "max_workers": 6,
-        "plan_max_workers": 2,
-        "detail_sync_workers": 2,
+        "max_workers": 3,
+        "plan_max_workers": 3,
+        "detail_sync_workers": 6,
+        "material_sync_workers": 6,
         "detail_sync_plan_limit": 0,
         "detail_material_types": list(PLAN_MATERIAL_TYPES),
         "max_plan_rows": 30,
@@ -364,6 +593,7 @@ def build_runtime_config(base_config: dict[str, Any] | None = None) -> dict[str,
         "max_workers": "MAX_WORKERS",
         "plan_max_workers": "PLAN_MAX_WORKERS",
         "detail_sync_workers": "DETAIL_SYNC_WORKERS",
+        "material_sync_workers": "MATERIAL_SYNC_WORKERS",
         "detail_sync_plan_limit": "DETAIL_SYNC_PLAN_LIMIT",
         "max_plan_rows": "MAX_PLAN_ROWS",
         "plan_page_size": "PLAN_PAGE_SIZE",
@@ -411,8 +641,9 @@ def post_json(url: str, payload: dict[str, Any], timeout: int = 30) -> dict[str,
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ApiError(f"HTTP {exc.code}: {body}") from exc
+        raise ApiError.from_http_error(exc) from exc
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise ApiError.from_request_failure(exc) from exc
 
 
 def post_api_json(url: str, access_token: str, payload: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
@@ -429,8 +660,9 @@ def post_api_json(url: str, access_token: str, payload: dict[str, Any], timeout:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ApiError(f"HTTP {exc.code}: {body}") from exc
+        raise ApiError.from_http_error(exc) from exc
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise ApiError.from_request_failure(exc) from exc
 
 
 def _multipart_form_body(
@@ -478,8 +710,9 @@ def post_api_multipart(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ApiError(f"HTTP {exc.code}: {body}") from exc
+        raise ApiError.from_http_error(exc) from exc
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise ApiError.from_request_failure(exc) from exc
 
 
 def get_json(url: str, access_token: str, params: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
@@ -501,97 +734,195 @@ def get_json(url: str, access_token: str, params: dict[str, Any], timeout: int =
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ApiError(f"HTTP {exc.code}: {body}") from exc
+        raise ApiError.from_http_error(exc) from exc
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise ApiError.from_request_failure(exc) from exc
 
 
 def get_json_with_retries(
     url: str,
-    access_token: str,
+    access_token: Any,
     params: dict[str, Any],
     timeout: int = 30,
     attempts: int = 4,
     base_delay: float = 1.0,
+    deadline_monotonic: float | None = None,
+    max_retry_sleep_seconds: float = RETRY_MAX_DELAY_SECONDS,
 ) -> dict[str, Any]:
     last_error: Exception | None = None
     last_response: dict[str, Any] | None = None
+    force_refresh_token = False
     for attempt in range(1, attempts + 1):
+        retry_code = 0
+        retry_response: dict[str, Any] | None = None
         try:
-            response = get_json(url, access_token, params, timeout=timeout)
+            resolved_access_token = _resolve_access_token(access_token, force_refresh=force_refresh_token)
+            force_refresh_token = False
+            response = get_json(
+                url,
+                resolved_access_token,
+                params,
+                timeout=_effective_timeout_seconds(timeout, deadline_monotonic, f"GET {url}"),
+            )
         except ApiError as exc:
             last_error = exc
-            if attempt >= attempts:
+            if not bool(getattr(exc, "retryable", True)) or attempt >= attempts:
                 raise
         else:
             code = int(response.get("code", 0) or 0)
-            if code not in RETRYABLE_API_CODES or attempt >= attempts:
+            should_force_refresh = callable(access_token) and _should_force_refresh_access_token(response)
+            if should_force_refresh:
+                force_refresh_token = True
+            if should_force_refresh and attempt < attempts:
+                retry_code = 40100
+                retry_response = response
+            elif code not in RETRYABLE_API_CODES or attempt >= attempts:
                 return response
-            last_response = response
-        time.sleep(base_delay * (2 ** (attempt - 1)))
+            else:
+                last_response = response
+                retry_code = code
+                retry_response = response
+        _sleep_with_deadline(
+            _retry_sleep_seconds(
+                retry_code,
+                attempt,
+                base_delay,
+                retry_response,
+                max_delay_seconds=max_retry_sleep_seconds,
+            ),
+            deadline_monotonic,
+        )
     if last_response is not None:
         return last_response
     if last_error is not None:
+        if isinstance(last_error, ApiError):
+            raise last_error
         raise ApiError(str(last_error)) from last_error
     raise ApiError("request failed without response")
 
 
 def post_api_json_with_retries(
     url: str,
-    access_token: str,
+    access_token: Any,
     payload: dict[str, Any],
     timeout: int = 30,
     attempts: int = 4,
     base_delay: float = 1.0,
+    deadline_monotonic: float | None = None,
+    max_retry_sleep_seconds: float = RETRY_MAX_DELAY_SECONDS,
 ) -> dict[str, Any]:
     last_error: Exception | None = None
     last_response: dict[str, Any] | None = None
+    force_refresh_token = False
     for attempt in range(1, attempts + 1):
+        retry_code = 0
+        retry_response: dict[str, Any] | None = None
         try:
-            response = post_api_json(url, access_token, payload, timeout=timeout)
+            resolved_access_token = _resolve_access_token(access_token, force_refresh=force_refresh_token)
+            force_refresh_token = False
+            response = post_api_json(
+                url,
+                resolved_access_token,
+                payload,
+                timeout=_effective_timeout_seconds(timeout, deadline_monotonic, f"POST {url}"),
+            )
         except ApiError as exc:
             last_error = exc
-            if attempt >= attempts:
+            if not bool(getattr(exc, "retryable", True)) or attempt >= attempts:
                 raise
         else:
             code = int(response.get("code", 0) or 0)
-            if code not in RETRYABLE_API_CODES or attempt >= attempts:
+            should_force_refresh = callable(access_token) and _should_force_refresh_access_token(response)
+            if should_force_refresh:
+                force_refresh_token = True
+            if should_force_refresh and attempt < attempts:
+                retry_code = 40100
+                retry_response = response
+            elif code not in RETRYABLE_API_CODES or attempt >= attempts:
                 return response
-            last_response = response
-        time.sleep(base_delay * (2 ** (attempt - 1)))
+            else:
+                last_response = response
+                retry_code = code
+                retry_response = response
+        _sleep_with_deadline(
+            _retry_sleep_seconds(
+                retry_code,
+                attempt,
+                base_delay,
+                retry_response,
+                max_delay_seconds=max_retry_sleep_seconds,
+            ),
+            deadline_monotonic,
+        )
     if last_response is not None:
         return last_response
     if last_error is not None:
+        if isinstance(last_error, ApiError):
+            raise last_error
         raise ApiError(str(last_error)) from last_error
     raise ApiError("request failed without response")
 
 
 def post_api_multipart_with_retries(
     url: str,
-    access_token: str,
+    access_token: Any,
     fields: dict[str, Any],
     files: list[tuple[str, str, str, bytes]],
     timeout: int = 120,
     attempts: int = 3,
     base_delay: float = 1.0,
+    deadline_monotonic: float | None = None,
+    max_retry_sleep_seconds: float = RETRY_MAX_DELAY_SECONDS,
 ) -> dict[str, Any]:
     last_error: Exception | None = None
     last_response: dict[str, Any] | None = None
+    force_refresh_token = False
     for attempt in range(1, attempts + 1):
+        retry_code = 0
+        retry_response: dict[str, Any] | None = None
         try:
-            response = post_api_multipart(url, access_token, fields, files, timeout=timeout)
+            resolved_access_token = _resolve_access_token(access_token, force_refresh=force_refresh_token)
+            force_refresh_token = False
+            response = post_api_multipart(
+                url,
+                resolved_access_token,
+                fields,
+                files,
+                timeout=_effective_timeout_seconds(timeout, deadline_monotonic, f"POST {url}"),
+            )
         except ApiError as exc:
             last_error = exc
-            if attempt >= attempts:
+            if not bool(getattr(exc, "retryable", True)) or attempt >= attempts:
                 raise
         else:
             code = int(response.get("code", 0) or 0)
-            if code not in RETRYABLE_API_CODES or attempt >= attempts:
+            should_force_refresh = callable(access_token) and _should_force_refresh_access_token(response)
+            if should_force_refresh:
+                force_refresh_token = True
+            if should_force_refresh and attempt < attempts:
+                retry_code = 40100
+                retry_response = response
+            elif code not in RETRYABLE_API_CODES or attempt >= attempts:
                 return response
-            last_response = response
-        time.sleep(base_delay * (2 ** (attempt - 1)))
+            else:
+                last_response = response
+                retry_code = code
+                retry_response = response
+        _sleep_with_deadline(
+            _retry_sleep_seconds(
+                retry_code,
+                attempt,
+                base_delay,
+                retry_response,
+                max_delay_seconds=max_retry_sleep_seconds,
+            ),
+            deadline_monotonic,
+        )
     if last_response is not None:
         return last_response
     if last_error is not None:
+        if isinstance(last_error, ApiError):
+            raise last_error
         raise ApiError(str(last_error)) from last_error
     raise ApiError("request failed without response")
 
@@ -613,13 +944,41 @@ class OceanEngineClient:
         token_cache_path: Path,
         latest_token_path: Path | None = None,
         token_persist_callback: Any | None = None,
+        token_resolver_callback: Any | None = None,
+        token_refresh_mode: str = "local_refresh",
     ) -> None:
         self.config = config
         self.token_cache_path = token_cache_path
         self.latest_token_path = latest_token_path or token_cache_path
         self.token_persist_callback = token_persist_callback
+        self.token_resolver_callback = token_resolver_callback
+        normalized_refresh_mode = str(token_refresh_mode or "local_refresh").strip().lower()
+        self.token_refresh_mode = normalized_refresh_mode if normalized_refresh_mode in {"local_refresh", "upstream_only"} else "local_refresh"
         self._token_cache: dict[str, Any] | None = None
         self._redis_client: Any | None = None
+        self._plan_material_requests_per_minute = 0
+        self._plan_material_request_interval_seconds = 0.0
+        self._plan_material_next_request_at = 0.0
+        self._plan_material_rate_lock = threading.Lock()
+
+    def configure_plan_material_rate_limit(self, requests_per_minute: int = 0) -> None:
+        value = max(int(requests_per_minute or 0), 0)
+        self._plan_material_requests_per_minute = value
+        self._plan_material_request_interval_seconds = (60.0 / value) if value > 0 else 0.0
+        self._plan_material_next_request_at = 0.0
+
+    def _wait_for_plan_material_request_slot(self) -> None:
+        interval = float(self._plan_material_request_interval_seconds or 0.0)
+        if interval <= 0:
+            return
+        wait_seconds = 0.0
+        with self._plan_material_rate_lock:
+            now = time.monotonic()
+            next_request_at = max(float(self._plan_material_next_request_at or 0.0), now)
+            wait_seconds = max(next_request_at - now, 0.0)
+            self._plan_material_next_request_at = next_request_at + interval
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
 
     def _load_token_cache(self) -> dict[str, Any]:
         if self._token_cache is not None:
@@ -707,6 +1066,17 @@ class OceanEngineClient:
             return self._normalize_token_record(load_json(self.token_cache_path))
         return self._normalize_token_record({})
 
+    def _resolved_token_payload(self, force_refresh: bool = False) -> dict[str, Any] | None:
+        if not callable(self.token_resolver_callback):
+            return None
+        payload = self.token_resolver_callback(force_refresh=force_refresh)
+        if not isinstance(payload, dict):
+            return None
+        normalized = self._normalize_token_record(payload)
+        if normalized:
+            self._save_token_cache(normalized)
+        return normalized
+
     def exchange_auth_code(self, auth_code: str) -> dict[str, Any]:
         now = int(time.time())
         payload = {
@@ -717,7 +1087,7 @@ class OceanEngineClient:
         }
         response = post_json(ACCESS_TOKEN_URL, payload)
         if response.get("code") != 0:
-            raise ApiError(f"exchange auth_code failed: {response}")
+            raise ApiError.from_response(response, default_message="exchange auth_code failed")
         data = response["data"]
         refreshed = {
             "access_token": data["access_token"],
@@ -729,16 +1099,26 @@ class OceanEngineClient:
         self._save_token_cache(refreshed)
         return self.latest_token_payload()
 
-    def get_access_token(self) -> str:
+    def get_access_token(self, force_refresh: bool = False) -> str:
         cache = self._load_token_cache()
         now = int(time.time())
-        if cache.get("access_token") and cache.get("expires_at", 0) > now + 300:
+        if not force_refresh and cache.get("access_token") and cache.get("expires_at", 0) > now + 300:
             return str(cache["access_token"])
         with self._token_refresh_lock():
             cache = self._reload_token_cache()
             now = int(time.time())
-            if cache.get("access_token") and cache.get("expires_at", 0) > now + 300:
+            if not force_refresh and cache.get("access_token") and cache.get("expires_at", 0) > now + 300:
                 return str(cache["access_token"])
+            resolved = self._resolved_token_payload(force_refresh=force_refresh) or {}
+            access_token = str(resolved.get("access_token") or "").strip()
+            expires_at = int(resolved.get("expires_at") or 0)
+            if access_token and expires_at > now + 60:
+                return access_token
+            if self.token_refresh_mode == "upstream_only":
+                raise ApiError(
+                    "No valid upstream access_token is available; aa must refresh and publish the latest token first.",
+                    retryable=True,
+                )
             refresh_token = str(cache.get("refresh_token") or self.config["refresh_token"])
             payload = {
                 "app_id": self.config["app_id"],
@@ -748,7 +1128,7 @@ class OceanEngineClient:
             }
             response = post_json(REFRESH_URL, payload)
             if response.get("code") != 0:
-                raise ApiError(f"refresh token failed: {response}")
+                raise ApiError.from_response(response, default_message="refresh token failed")
             data = response["data"]
             refreshed = {
                 "access_token": data["access_token"],
@@ -760,8 +1140,69 @@ class OceanEngineClient:
             self._save_token_cache(refreshed)
             return str(refreshed["access_token"])
 
+    def _api_get(
+        self,
+        action: str,
+        url: str,
+        params: dict[str, Any],
+        *,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
+    ) -> dict[str, Any]:
+        response = get_json_with_retries(
+            url,
+            self.get_access_token,
+            params,
+            timeout=timeout,
+            attempts=attempts,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return _ensure_api_response_ok(response, action)
+
+    def _api_post_json(
+        self,
+        action: str,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
+    ) -> dict[str, Any]:
+        response = post_api_json_with_retries(
+            url,
+            self.get_access_token,
+            payload,
+            timeout=timeout,
+            attempts=attempts,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return _ensure_api_response_ok(response, action)
+
+    def _api_post_multipart(
+        self,
+        action: str,
+        url: str,
+        fields: dict[str, Any],
+        files: list[tuple[str, str, str, bytes]],
+        *,
+        timeout: int = 120,
+        attempts: int = 3,
+        deadline_monotonic: float | None = None,
+    ) -> dict[str, Any]:
+        response = post_api_multipart_with_retries(
+            url,
+            self.get_access_token,
+            fields,
+            files,
+            timeout=timeout,
+            attempts=attempts,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return _ensure_api_response_ok(response, action)
+
     def list_accounts(self) -> list[dict[str, Any]]:
-        access_token = self.get_access_token()
         page = 1
         page_size = 100
         results: list[dict[str, Any]] = []
@@ -772,9 +1213,7 @@ class OceanEngineClient:
                 "page": page,
                 "page_size": page_size,
             }
-            response = get_json_with_retries(CUSTOMER_CENTER_URL, access_token, params)
-            if response.get("code") != 0:
-                raise ApiError(f"list accounts failed: {response}")
+            response = self._api_get("list accounts", CUSTOMER_CENTER_URL, params)
             data = response["data"]
             results.extend(data.get("list", []))
             page_info = data.get("page_info", {})
@@ -788,15 +1227,11 @@ class OceanEngineClient:
         account_ids: list[int],
         account_type: str = "QIANCHUAN",
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params = {
             "account_ids": [int(item) for item in account_ids],
             "account_type": account_type,
         }
-        response = get_json_with_retries(ACCOUNT_FUND_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get account funds failed: {response}")
-        return response
+        return self._api_get("get account funds", ACCOUNT_FUND_URL, params)
 
     def list_account_funds(
         self,
@@ -819,16 +1254,20 @@ class OceanEngineClient:
         self,
         advertiser_id: int,
         data_topics: list[str] | None = None,
+        timeout: int = 30,
+        attempts: int = 4,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params = {
             "advertiser_id": advertiser_id,
             "data_topics": list(data_topics or UNI_PROMOTION_DATA_TOPICS),
         }
-        response = get_json_with_retries(UNI_PROMOTION_CONFIG_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get uni promotion config failed: {response}")
-        return response
+        return self._api_get(
+            "get uni promotion config",
+            UNI_PROMOTION_CONFIG_URL,
+            params,
+            timeout=timeout,
+            attempts=attempts,
+        )
 
     def get_uni_promotion_data(
         self,
@@ -842,8 +1281,9 @@ class OceanEngineClient:
         order_by: list[dict[str, Any]] | None = None,
         page: int = 1,
         page_size: int = 10,
+        timeout: int = 30,
+        attempts: int = 4,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params: dict[str, Any] = {
             "advertiser_id": advertiser_id,
             "data_topic": data_topic,
@@ -858,21 +1298,20 @@ class OceanEngineClient:
             params["filters"] = filters
         if order_by:
             params["order_by"] = order_by
-        response = get_json_with_retries(UNI_PROMOTION_DATA_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get uni promotion data failed: {response}")
-        return response
+        return self._api_get(
+            "get uni promotion data",
+            UNI_PROMOTION_DATA_URL,
+            params,
+            timeout=timeout,
+            attempts=attempts,
+        )
 
     def get_plan_detail(self, advertiser_id: int, ad_id: int) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params = {
             "advertiser_id": advertiser_id,
             "ad_id": ad_id,
         }
-        response = get_json_with_retries(PLAN_DETAIL_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get plan detail failed: {response}")
-        return response
+        return self._api_get("get plan detail", PLAN_DETAIL_URL, params)
 
     def get_plan_products(
         self,
@@ -887,7 +1326,6 @@ class OceanEngineClient:
         page: int = 1,
         page_size: int = 100,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params: dict[str, Any] = {
             "advertiser_id": advertiser_id,
             "ad_id": ad_id,
@@ -903,10 +1341,7 @@ class OceanEngineClient:
             params["order_type"] = order_type
         if order_field:
             params["order_field"] = order_field
-        response = get_json_with_retries(PLAN_PRODUCT_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get plan products failed: {response}")
-        return response
+        return self._api_get("get plan products", PLAN_PRODUCT_URL, params)
 
     def list_plan_products(
         self,
@@ -954,8 +1389,11 @@ class OceanEngineClient:
         order_field: str | None = None,
         page: int = 1,
         page_size: int = 100,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
+        self._wait_for_plan_material_request_slot()
         params: dict[str, Any] = {
             "advertiser_id": advertiser_id,
             "ad_id": ad_id,
@@ -969,10 +1407,14 @@ class OceanEngineClient:
             params["order_type"] = order_type
         if order_field:
             params["order_field"] = order_field
-        response = get_json_with_retries(PLAN_MATERIAL_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get plan materials failed: {response}")
-        return response
+        return self._api_get(
+            "get plan materials",
+            PLAN_MATERIAL_URL,
+            params,
+            timeout=timeout,
+            attempts=attempts,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def list_plan_materials(
         self,
@@ -983,6 +1425,9 @@ class OceanEngineClient:
         order_type: str | None = None,
         order_field: str | None = None,
         page_size: int = 100,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
     ) -> list[dict[str, Any]]:
         page = 1
         rows: list[dict[str, Any]] = []
@@ -996,6 +1441,9 @@ class OceanEngineClient:
                 order_field=order_field,
                 page=page,
                 page_size=page_size,
+                timeout=timeout,
+                attempts=attempts,
+                deadline_monotonic=deadline_monotonic,
             )
             data = response.get("data") or {}
             rows.extend(data.get("ad_material_infos") or [])
@@ -1012,8 +1460,10 @@ class OceanEngineClient:
         filtering: dict[str, Any] | None = None,
         page: int = 1,
         page_size: int = 100,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params: dict[str, Any] = {
             "advertiser_id": int(advertiser_id),
             "page": int(page),
@@ -1021,10 +1471,14 @@ class OceanEngineClient:
         }
         if filtering:
             params["filtering"] = dict(filtering)
-        response = get_json_with_retries(QIANCHUAN_VIDEO_GET_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get qianchuan videos failed: {response}")
-        return response
+        return self._api_get(
+            "get qianchuan videos",
+            QIANCHUAN_VIDEO_GET_URL,
+            params,
+            timeout=timeout,
+            attempts=attempts,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def list_qianchuan_videos(
         self,
@@ -1032,6 +1486,9 @@ class OceanEngineClient:
         filtering: dict[str, Any] | None = None,
         page_size: int = 100,
         max_pages: int = 20,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
     ) -> list[dict[str, Any]]:
         page = 1
         rows: list[dict[str, Any]] = []
@@ -1041,6 +1498,9 @@ class OceanEngineClient:
                 filtering=filtering,
                 page=page,
                 page_size=page_size,
+                timeout=timeout,
+                attempts=attempts,
+                deadline_monotonic=deadline_monotonic,
             )
             data = response.get("data") or {}
             rows.extend(data.get("list") or [])
@@ -1057,8 +1517,10 @@ class OceanEngineClient:
         filtering: dict[str, Any] | None = None,
         page: int = 1,
         page_size: int = 100,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params: dict[str, Any] = {
             "advertiser_id": int(advertiser_id),
             "page": int(page),
@@ -1066,10 +1528,14 @@ class OceanEngineClient:
         }
         if filtering:
             params["filtering"] = dict(filtering)
-        response = get_json_with_retries(QIANCHUAN_IMAGE_GET_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get qianchuan images failed: {response}")
-        return response
+        return self._api_get(
+            "get qianchuan images",
+            QIANCHUAN_IMAGE_GET_URL,
+            params,
+            timeout=timeout,
+            attempts=attempts,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def list_qianchuan_images(
         self,
@@ -1077,6 +1543,9 @@ class OceanEngineClient:
         filtering: dict[str, Any] | None = None,
         page_size: int = 100,
         max_pages: int = 20,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
     ) -> list[dict[str, Any]]:
         page = 1
         rows: list[dict[str, Any]] = []
@@ -1086,6 +1555,9 @@ class OceanEngineClient:
                 filtering=filtering,
                 page=page,
                 page_size=page_size,
+                timeout=timeout,
+                attempts=attempts,
+                deadline_monotonic=deadline_monotonic,
             )
             data = response.get("data") or {}
             rows.extend(data.get("list") or [])
@@ -1104,8 +1576,10 @@ class OceanEngineClient:
         page_size: int = 100,
         order_field: str | None = None,
         order_type: str | None = None,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params: dict[str, Any] = {
             "advertiser_id": int(advertiser_id),
             "page": int(page),
@@ -1117,10 +1591,14 @@ class OceanEngineClient:
             params["order_field"] = str(order_field)
         if order_type:
             params["order_type"] = str(order_type)
-        response = get_json_with_retries(QIANCHUAN_CAROUSEL_GET_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get qianchuan carousels failed: {response}")
-        return response
+        return self._api_get(
+            "get qianchuan carousels",
+            QIANCHUAN_CAROUSEL_GET_URL,
+            params,
+            timeout=timeout,
+            attempts=attempts,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def list_qianchuan_carousels(
         self,
@@ -1128,6 +1606,9 @@ class OceanEngineClient:
         filtering: dict[str, Any] | None = None,
         page_size: int = 100,
         max_pages: int = 20,
+        timeout: int = 30,
+        attempts: int = 4,
+        deadline_monotonic: float | None = None,
     ) -> list[dict[str, Any]]:
         page = 1
         rows: list[dict[str, Any]] = []
@@ -1137,6 +1618,9 @@ class OceanEngineClient:
                 filtering=filtering,
                 page=page,
                 page_size=page_size,
+                timeout=timeout,
+                attempts=attempts,
+                deadline_monotonic=deadline_monotonic,
             )
             data = response.get("data") or {}
             rows.extend(data.get("carousels") or [])
@@ -1155,7 +1639,6 @@ class OceanEngineClient:
         end_date: str,
         fields: list[str] | None = None,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         material_text = str(material_id or "").strip()
         if not material_text:
             raise ValueError("material_id is required")
@@ -1169,10 +1652,7 @@ class OceanEngineClient:
                 "material_id": material_value,
             },
         }
-        response = get_json_with_retries(VIDEO_USER_LOSE_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get video user lose failed: {response}")
-        return response
+        return self._api_get("get video user lose", VIDEO_USER_LOSE_URL, params)
 
     def get_comments(
         self,
@@ -1185,7 +1665,6 @@ class OceanEngineClient:
         page: int = 1,
         page_size: int = 100,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params: dict[str, Any] = {
             "advertiser_id": int(advertiser_id),
             "start_time": str(start_time).strip(),
@@ -1199,10 +1678,7 @@ class OceanEngineClient:
             params["order_field"] = str(order_field).strip()
         if order_type:
             params["order_type"] = str(order_type).strip()
-        response = get_json_with_retries(COMMENT_LIST_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get comments failed: {response}")
-        return response
+        return self._api_get("get comments", COMMENT_LIST_URL, params)
 
     def list_comments(
         self,
@@ -1242,33 +1718,25 @@ class OceanEngineClient:
         comment_ids: list[str | int],
         reply_text: str,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         normalized_comment_ids = self._normalize_integer_id_list(comment_ids, "comment_ids")
         payload = {
             "advertiser_id": int(advertiser_id),
             "comment_ids": normalized_comment_ids,
             "reply_text": str(reply_text).strip(),
         }
-        response = post_api_json_with_retries(COMMENT_REPLY_URL, access_token, payload)
-        if response.get("code") != 0:
-            raise ApiError(f"reply comments failed: {response}")
-        return response
+        return self._api_post_json("reply comments", COMMENT_REPLY_URL, payload)
 
     def hide_comments(
         self,
         advertiser_id: int,
         comment_ids: list[str | int],
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         normalized_comment_ids = self._normalize_integer_id_list(comment_ids, "comment_ids")
         payload = {
             "advertiser_id": int(advertiser_id),
             "comment_ids": normalized_comment_ids,
         }
-        response = post_api_json_with_retries(COMMENT_HIDE_URL, access_token, payload)
-        if response.get("code") != 0:
-            raise ApiError(f"hide comments failed: {response}")
-        return response
+        return self._api_post_json("hide comments", COMMENT_HIDE_URL, payload)
 
     def upload_local_video(
         self,
@@ -1278,7 +1746,6 @@ class OceanEngineClient:
         video_signature: str | None = None,
         mime_type: str | None = None,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         raw = file_path.read_bytes()
         signature = str(video_signature or hashlib.md5(raw).hexdigest())
         detected_type = mime_type or mimetypes.guess_type(file_path.name)[0] or "video/mp4"
@@ -1298,13 +1765,12 @@ class OceanEngineClient:
         ]
         response = post_api_multipart_with_retries(
             VIDEO_AD_UPLOAD_URL,
-            access_token,
+            self.get_access_token,
             fields,
             files,
             timeout=180,
         )
-        if response.get("code") != 0:
-            raise ApiError(f"upload local video failed: {response}")
+        response = _ensure_api_response_ok(response, "upload local video")
         data = response.get("data")
         normalized_data = dict(data) if isinstance(data, dict) else {}
         material_id = normalized_data.get("material_id")
@@ -1328,7 +1794,6 @@ class OceanEngineClient:
         return response
 
     def get_uploaded_videos(self, advertiser_id: int, video_ids: list[str]) -> dict[str, Any]:
-        access_token = self.get_access_token()
         normalized_ids = [str(item).strip() for item in video_ids if str(item).strip()]
         if not normalized_ids:
             raise ValueError("video_ids is required")
@@ -1336,10 +1801,7 @@ class OceanEngineClient:
             "advertiser_id": int(advertiser_id),
             "video_ids": CsvParam(normalized_ids),
         }
-        response = get_json_with_retries(VIDEO_AD_GET_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get uploaded videos failed: {response}")
-        return response
+        return self._api_get("get uploaded videos", VIDEO_AD_GET_URL, params)
 
     def get_uploaded_video(
         self,
@@ -1379,7 +1841,6 @@ class OceanEngineClient:
         material_name: str,
         image_url: str,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         image_url_text = str(image_url or "").strip()
         if not image_url_text:
             raise ValueError("image_url is required")
@@ -1391,13 +1852,12 @@ class OceanEngineClient:
         }
         response = post_api_multipart_with_retries(
             IMAGE_AD_UPLOAD_URL,
-            access_token,
+            self.get_access_token,
             fields,
             [],
             timeout=60,
         )
-        if response.get("code") != 0:
-            raise ApiError(f"upload image by url failed: {response}")
+        response = _ensure_api_response_ok(response, "upload image by url")
         data = response.get("data")
         normalized_data = dict(data) if isinstance(data, dict) else {}
         image_id = normalized_data.get("id")
@@ -1429,7 +1889,6 @@ class OceanEngineClient:
         image_signature: str | None = None,
         mime_type: str | None = None,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         raw = file_path.read_bytes()
         signature = str(image_signature or hashlib.md5(raw).hexdigest())
         detected_type = mime_type or mimetypes.guess_type(file_path.name)[0] or "image/jpeg"
@@ -1449,13 +1908,12 @@ class OceanEngineClient:
         ]
         response = post_api_multipart_with_retries(
             IMAGE_AD_UPLOAD_URL,
-            access_token,
+            self.get_access_token,
             fields,
             files,
             timeout=120,
         )
-        if response.get("code") != 0:
-            raise ApiError(f"upload image file failed: {response}")
+        response = _ensure_api_response_ok(response, "upload image file")
         data = response.get("data")
         normalized_data = dict(data) if isinstance(data, dict) else {}
         image_id = normalized_data.get("id")
@@ -1491,7 +1949,6 @@ class OceanEngineClient:
         video_image_mode: str = "",
         video_cover_id: str = "",
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
         title = sanitize_material_title(material_title)
         video_material_item: dict[str, Any] = {"video_id": str(video_id)}
         video_image_mode_text = str(video_image_mode or "").strip()
@@ -1526,26 +1983,19 @@ class OceanEngineClient:
                 "title_material": title_material,
                 "video_material": video_material,
             }
-        response = post_api_json_with_retries(
+        return self._api_post_json(
+            "add plan material",
             PLAN_MATERIAL_ADD_URL,
-            access_token,
             payload,
             timeout=60,
         )
-        if response.get("code") != 0:
-            raise ApiError(f"add plan material failed: {response}")
-        return response
 
     def get_original_videos(self, advertiser_id: int, material_ids: list[str]) -> dict[str, Any]:
-        access_token = self.get_access_token()
         params = {
             "advertiser_id": advertiser_id,
             "material_ids": [str(item) for item in material_ids],
         }
-        response = get_json_with_retries(VIDEO_ORIGINAL_URL, access_token, params)
-        if response.get("code") != 0:
-            raise ApiError(f"get original videos failed: {response}")
-        return response
+        return self._api_get("get original videos", VIDEO_ORIGINAL_URL, params)
 
     @staticmethod
     def _empty_account_summary(
@@ -1573,7 +2023,6 @@ class OceanEngineClient:
         start_dt: datetime,
         end_dt: datetime,
     ) -> AccountSummary:
-        access_token = self.get_access_token()
         params = {
             "advertiser_id": advertiser_id,
             "start_date": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1582,7 +2031,7 @@ class OceanEngineClient:
             "order_platform": self.config["order_platform"],
             "fields": REPORT_FIELDS,
         }
-        response = get_json_with_retries(ACCOUNT_REPORT_URL, access_token, params)
+        response = get_json_with_retries(ACCOUNT_REPORT_URL, self.get_access_token, params)
         if response.get("code") != 0:
             return self._empty_account_summary(
                 advertiser_id,
@@ -1607,7 +2056,6 @@ class OceanEngineClient:
         start_dt: datetime,
         end_dt: datetime,
     ) -> AccountSummary:
-        access_token = self.get_access_token()
         filtering: dict[str, Any] = {
             "marketing_goal": normalize_standard_marketing_goal(self.config),
         }
@@ -1624,7 +2072,7 @@ class OceanEngineClient:
             "page": 1,
             "page_size": 10,
         }
-        response = get_json_with_retries(STANDARD_ACCOUNT_REPORT_URL, access_token, params)
+        response = get_json_with_retries(STANDARD_ACCOUNT_REPORT_URL, self.get_access_token, params)
         if response.get("code") != 0:
             return self._empty_account_summary(
                 advertiser_id,
@@ -1647,24 +2095,22 @@ class OceanEngineClient:
 
     def get_account_summary(self, advertiser_id: int, advertiser_name: str, start_dt: datetime, end_dt: datetime) -> AccountSummary:
         try:
-            source_summaries = [
-                self._get_uni_account_summary(advertiser_id, advertiser_name, start_dt, end_dt),
-                self._get_standard_account_summary(advertiser_id, advertiser_name, start_dt, end_dt),
-            ]
-            successful = [item for item in source_summaries if item.ok]
-            if successful:
-                stat_cost = round(sum(item.stat_cost for item in successful), 2)
-                pay_amount = round(sum(item.pay_amount for item in successful), 2)
-                order_count = sum(int(item.order_count or 0) for item in successful)
+            primary = self._get_uni_account_summary(advertiser_id, advertiser_name, start_dt, end_dt)
+            if primary.ok:
+                return primary
+            fallback = self._get_standard_account_summary(advertiser_id, advertiser_name, start_dt, end_dt)
+            if fallback.ok:
                 return AccountSummary(
-                    advertiser_id=advertiser_id,
-                    advertiser_name=advertiser_name,
-                    stat_cost=stat_cost,
-                    roi=derive_ratio(pay_amount, stat_cost, 0.0),
-                    order_count=order_count,
-                    pay_amount=pay_amount,
+                    advertiser_id=fallback.advertiser_id,
+                    advertiser_name=fallback.advertiser_name,
+                    stat_cost=fallback.stat_cost,
+                    roi=fallback.roi,
+                    order_count=fallback.order_count,
+                    pay_amount=fallback.pay_amount,
+                    ok=True,
+                    error=f"fallback: standard account report ({str(primary.error or 'uni_promotion failed').strip()})",
                 )
-            errors = [str(item.error or "").strip() for item in source_summaries if str(item.error or "").strip()]
+            errors = [str(item.error or "").strip() for item in (primary, fallback) if str(item.error or "").strip()]
             return self._empty_account_summary(
                 advertiser_id,
                 advertiser_name,
@@ -1681,7 +2127,6 @@ class OceanEngineClient:
         start_dt: datetime,
         end_dt: datetime,
     ) -> list[PlanSummary]:
-        access_token = self.get_access_token()
         page_size = normalize_plan_page_size(self.config)
         plans: list[PlanSummary] = []
         for marketing_goal in get_plan_marketing_goals(self.config):
@@ -1696,9 +2141,7 @@ class OceanEngineClient:
                     "page_size": page_size,
                     "fields": PLAN_REPORT_FIELDS,
                 }
-                response = get_json_with_retries(PLAN_LIST_URL, access_token, params)
-                if response.get("code") != 0:
-                    raise ApiError(f"list uni promotion plans failed: {response}")
+                response = self._api_get("list uni promotion plans", PLAN_LIST_URL, params)
                 data = response.get("data") or {}
                 for item in data.get("ad_list", []):
                     ad_info = item.get("ad_info") or {}
@@ -1767,7 +2210,6 @@ class OceanEngineClient:
         return plans
 
     def _list_standard_plan_metadata(self, advertiser_id: int) -> dict[int, dict[str, Any]]:
-        access_token = self.get_access_token()
         page_size = normalize_plan_page_size(self.config)
         plans: dict[int, dict[str, Any]] = {}
         for marketing_goal in get_plan_marketing_goals(self.config):
@@ -1780,9 +2222,7 @@ class OceanEngineClient:
                     "page": page,
                     "page_size": page_size,
                 }
-                response = get_json_with_retries(STANDARD_PLAN_LIST_URL, access_token, params)
-                if response.get("code") != 0:
-                    raise ApiError(f"list standard plans failed: {response}")
+                response = self._api_get("list standard plans", STANDARD_PLAN_LIST_URL, params)
                 data = response.get("data") or {}
                 rows = data.get("list") or []
                 for row in rows:
@@ -1802,7 +2242,6 @@ class OceanEngineClient:
         start_dt: datetime,
         end_dt: datetime,
     ) -> dict[int, dict[str, Any]]:
-        access_token = self.get_access_token()
         page_size = normalize_plan_page_size(self.config)
         filtering: dict[str, Any] = {
             "marketing_goal": normalize_standard_marketing_goal(self.config),
@@ -1823,9 +2262,7 @@ class OceanEngineClient:
                 "page": page,
                 "page_size": page_size,
             }
-            response = get_json_with_retries(STANDARD_PLAN_REPORT_URL, access_token, params)
-            if response.get("code") != 0:
-                raise ApiError(f"list standard plan reports failed: {response}")
+            response = self._api_get("list standard plan reports", STANDARD_PLAN_REPORT_URL, params)
             data = response.get("data") or {}
             rows = data.get("list") or []
             for row in rows:
@@ -1977,6 +2414,8 @@ class OceanEngineClient:
         advertiser_name: str,
         start_dt: datetime,
         end_dt: datetime,
+        *,
+        hydrate_plan_detail: bool = True,
     ) -> list[PlanSummary]:
         page = 1
         page_size = min(normalize_plan_page_size(self.config), 100)
@@ -2037,14 +2476,15 @@ class OceanEngineClient:
                     settled_amount_rate=100.0 if settled_pay_amount > 0 else 0.0,
                     refund_rate_1h=0.0,
                     refund_amount_1h=0.0,
-                    plan_source=PLAN_SOURCE_UNI_PROMOTION,
+                    plan_source=PLAN_SOURCE_UNI_REPORT,
                     plan_delivery_type=PLAN_DELIVERY_TYPE_CUBIC,
                 )
-                try:
-                    detail_response = self.get_plan_detail(advertiser_id, ad_id)
-                    self._apply_report_plan_detail(plan, detail_response.get("data") or {})
-                except Exception:  # noqa: BLE001
-                    pass
+                if hydrate_plan_detail:
+                    try:
+                        detail_response = self.get_plan_detail(advertiser_id, ad_id)
+                        self._apply_report_plan_detail(plan, detail_response.get("data") or {})
+                    except Exception:  # noqa: BLE001
+                        pass
                 plans_by_ad_id[ad_id] = plan
 
             page_info = data.get("page_info") or {}
@@ -2053,6 +2493,190 @@ class OceanEngineClient:
                 break
             page += 1
         return list(plans_by_ad_id.values())
+
+    def list_report_plan_summaries(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        *,
+        hydrate_plan_detail: bool = True,
+    ) -> list[PlanSummary]:
+        return self._list_uni_plan_summaries_from_report(
+            advertiser_id,
+            advertiser_name,
+            start_dt,
+            end_dt,
+            hydrate_plan_detail=hydrate_plan_detail,
+        )
+
+    def list_cubic_plan_summaries(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[PlanSummary]:
+        page = 1
+        page_size = min(normalize_plan_page_size(self.config), 100)
+        plans_by_ad_id: dict[int, PlanSummary] = {}
+        while True:
+            response = self.get_uni_promotion_data(
+                advertiser_id=advertiser_id,
+                data_topic=UNI_PLAN_REPORT_FALLBACK_TOPIC,
+                dimensions=list(UNI_CUBIC_PLAN_DIMENSIONS),
+                metrics=list(UNI_CUBIC_PLAN_METRICS),
+                start_time=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_time=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                filters=[],
+                order_by=[{"field": "stat_cost_for_roi2", "type": 2}],
+                page=page,
+                page_size=page_size,
+            )
+            data = response.get("data") or {}
+            rows = data.get("rows") or []
+            for row in rows:
+                dimensions = row.get("dimensions") or {}
+                metrics = row.get("metrics") or {}
+                ad_id = int(self._report_cell_value(dimensions.get("ad_id")) or 0)
+                if not ad_id or ad_id in plans_by_ad_id:
+                    continue
+
+                stat_cost = normalize_metric(self._report_cell_value(metrics.get("stat_cost_for_roi2")))
+                pay_amount = normalize_metric(self._report_cell_value(metrics.get("total_pay_order_gmv_for_roi2")))
+                total_pay_amount = normalize_metric(
+                    self._report_cell_value(metrics.get("total_pay_order_gmv_include_coupon_for_roi2"))
+                )
+                order_count = int(
+                    float(self._report_cell_value(metrics.get("total_pay_order_count_for_roi2")) or 0.0)
+                )
+                roi = normalize_metric(self._report_cell_value(metrics.get("total_prepay_and_pay_order_roi2")))
+                settled_pay_amount = normalize_metric(
+                    self._report_cell_value(metrics.get("total_order_settle_amount_for_roi2_1h"))
+                )
+                settled_order_count = int(
+                    float(self._report_cell_value(metrics.get("total_order_settle_count_for_roi2_1h")) or 0.0)
+                )
+                settled_roi = normalize_metric(
+                    self._report_cell_value(metrics.get("total_prepay_and_pay_settle_roi2_1h"))
+                )
+                refund_amount_1h = normalize_metric(
+                    self._report_cell_value(metrics.get("total_refund_order_gmv_for_roi2_1h_all"))
+                )
+
+                plan = PlanSummary(
+                    advertiser_id=advertiser_id,
+                    advertiser_name=advertiser_name,
+                    ad_id=ad_id,
+                    ad_name=str(self._report_cell_value(dimensions.get("ad_name")) or f"ad_{ad_id}"),
+                    product_id=str(self._report_cell_value(dimensions.get("qianchuan_product_id")) or ""),
+                    product_name="",
+                    anchor_name=str(self._report_cell_value(dimensions.get("anchor_name")) or ""),
+                    marketing_goal="VIDEO_PROM_GOODS",
+                    status="",
+                    opt_status="",
+                    roi_goal=0.0,
+                    stat_cost=stat_cost,
+                    roi=roi,
+                    order_count=order_count,
+                    pay_amount=pay_amount,
+                    total_pay_amount=total_pay_amount,
+                    settled_pay_amount=settled_pay_amount,
+                    settled_roi=settled_roi,
+                    settled_order_count=settled_order_count,
+                    pay_order_cost=derive_ratio(stat_cost, order_count, 0.0),
+                    settled_amount_rate=derive_percent(settled_pay_amount, total_pay_amount, 0.0),
+                    refund_rate_1h=derive_percent(refund_amount_1h, total_pay_amount, 0.0),
+                    refund_amount_1h=refund_amount_1h,
+                    plan_source=PLAN_SOURCE_UNI_CUBIC,
+                    plan_delivery_type=PLAN_DELIVERY_TYPE_CUBIC,
+                )
+                plans_by_ad_id[ad_id] = plan
+
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page:
+                break
+            page += 1
+        try:
+            cubic_product_metadata = self._list_cubic_product_metadata(
+                advertiser_id,
+                advertiser_name,
+                start_dt,
+                end_dt,
+            )
+        except Exception:  # noqa: BLE001
+            cubic_product_metadata = {}
+        for ad_id, metadata in cubic_product_metadata.items():
+            plan = plans_by_ad_id.get(ad_id)
+            if plan is None:
+                continue
+            product_id = str(metadata.get("product_id") or "").strip()
+            if not str(plan.product_id or "").strip() and product_id:
+                plan.product_id = product_id
+            product_name = str(metadata.get("product_name") or "").strip()
+            if not str(plan.product_name or "").strip() and product_name:
+                plan.product_name = product_name
+            anchor_name = str(metadata.get("anchor_name") or "").strip()
+            if not str(plan.anchor_name or "").strip() and anchor_name:
+                plan.anchor_name = anchor_name
+            ad_name = str(metadata.get("ad_name") or "").strip()
+            if ad_name and (not str(plan.ad_name or "").strip() or str(plan.ad_name).strip() == f"ad_{plan.ad_id}"):
+                plan.ad_name = ad_name
+        return list(plans_by_ad_id.values())
+
+    def _list_cubic_product_metadata(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> dict[int, dict[str, Any]]:
+        page = 1
+        page_size = min(normalize_plan_page_size(self.config), 100)
+        metadata_by_ad_id: dict[int, dict[str, Any]] = {}
+        while True:
+            response = self.get_uni_promotion_data(
+                advertiser_id=advertiser_id,
+                data_topic=UNI_CUBIC_PRODUCT_TOPIC,
+                dimensions=list(UNI_CUBIC_PRODUCT_DIMENSIONS),
+                metrics=list(UNI_CUBIC_PRODUCT_METRICS),
+                start_time=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_time=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                filters=[],
+                order_by=[{"field": "stat_cost_for_roi2", "type": 2}],
+                page=page,
+                page_size=page_size,
+            )
+            data = response.get("data") or {}
+            rows = data.get("rows") or []
+            for row in rows:
+                dimensions = row.get("dimensions") or {}
+                metrics = row.get("metrics") or {}
+                ad_id = int(self._report_cell_value(dimensions.get("ad_id")) or 0)
+                if ad_id <= 0:
+                    continue
+                stat_cost = normalize_metric(self._report_cell_value(metrics.get("stat_cost_for_roi2")))
+                existing = metadata_by_ad_id.get(ad_id)
+                if existing is not None and float(existing.get("_score", 0.0) or 0.0) >= stat_cost:
+                    continue
+                metadata_by_ad_id[ad_id] = {
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": advertiser_name,
+                    "ad_id": ad_id,
+                    "ad_name": str(self._report_cell_value(dimensions.get("ad_name")) or f"ad_{ad_id}"),
+                    "product_id": str(self._report_cell_value(dimensions.get("qianchuan_product_id")) or ""),
+                    "product_name": str(self._report_cell_value(dimensions.get("qianchuan_product_name")) or ""),
+                    "anchor_name": str(self._report_cell_value(dimensions.get("anchor_name")) or ""),
+                    "_score": stat_cost,
+                }
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page:
+                break
+            page += 1
+        return metadata_by_ad_id
 
     @staticmethod
     def _merge_plan_summary(primary: PlanSummary, secondary: PlanSummary) -> PlanSummary:
@@ -2115,6 +2739,9 @@ class OceanEngineClient:
         advertiser_name: str,
         start_dt: datetime,
         end_dt: datetime,
+        *,
+        allow_standard_fallback: bool = True,
+        allow_report_fallback: bool = True,
     ) -> list[PlanSummary]:
         plans_by_ad_id: dict[int, PlanSummary] = {}
         errors: list[str] = []
@@ -2134,19 +2761,66 @@ class OceanEngineClient:
             consume(self._list_uni_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"uni_promotion: {exc}")
-        try:
-            consume(self._list_standard_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt))
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"standard: {exc}")
-        try:
-            consume(self._list_uni_plan_summaries_from_report(advertiser_id, advertiser_name, start_dt, end_dt))
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"uni_report: {exc}")
+        if allow_standard_fallback:
+            try:
+                consume(self._list_standard_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"standard: {exc}")
+        if allow_report_fallback:
+            try:
+                consume(self._list_uni_plan_summaries_from_report(advertiser_id, advertiser_name, start_dt, end_dt))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"uni_report: {exc}")
         if not plans_by_ad_id and errors:
             raise ApiError("; ".join(errors))
         return sorted(
             plans_by_ad_id.values(),
             key=lambda item: (-item.order_count, -item.pay_amount, -item.roi, -item.stat_cost, item.ad_id),
+        )
+
+    def list_plan_delivery_type_metadata(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[dict[str, Any]]:
+        plans_by_ad_id: dict[int, dict[str, Any]] = {}
+
+        for plan in self._list_uni_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt):
+            ad_id = int(plan.ad_id or 0)
+            if ad_id <= 0:
+                continue
+            plans_by_ad_id[ad_id] = {
+                "advertiser_id": int(plan.advertiser_id or 0),
+                "advertiser_name": str(plan.advertiser_name or advertiser_name),
+                "ad_id": ad_id,
+                "ad_name": str(plan.ad_name or f"ad_{ad_id}"),
+                "marketing_goal": str(plan.marketing_goal or ""),
+                "plan_delivery_type": PLAN_DELIVERY_TYPE_GLOBAL,
+                "source": PLAN_DELIVERY_METADATA_SOURCE_UNI_MAIN,
+            }
+
+        for plan in self._list_uni_plan_summaries_from_report(advertiser_id, advertiser_name, start_dt, end_dt):
+            ad_id = int(plan.ad_id or 0)
+            if ad_id <= 0:
+                continue
+            plans_by_ad_id[ad_id] = {
+                "advertiser_id": int(plan.advertiser_id or 0),
+                "advertiser_name": str(plan.advertiser_name or advertiser_name),
+                "ad_id": ad_id,
+                "ad_name": str(plan.ad_name or f"ad_{ad_id}"),
+                "marketing_goal": str(plan.marketing_goal or ""),
+                "plan_delivery_type": PLAN_DELIVERY_TYPE_CUBIC,
+                "source": PLAN_DELIVERY_METADATA_SOURCE_UNI_REPORT,
+            }
+
+        return sorted(
+            plans_by_ad_id.values(),
+            key=lambda item: (
+                0 if str(item.get("plan_delivery_type") or "").strip().upper() == PLAN_DELIVERY_TYPE_CUBIC else 1,
+                int(item.get("ad_id", 0) or 0),
+            ),
         )
 
 
@@ -2231,13 +2905,162 @@ def fetch_plan_bundle(
     item: dict[str, Any],
     start_dt: datetime,
     end_dt: datetime,
+    *,
+    allow_standard_fallback: bool = True,
+    allow_report_fallback: bool = True,
+    merge_report_only_cubic: bool = False,
 ) -> tuple[list[PlanSummary], str | None]:
     advertiser_id = int(item["advertiser_id"])
     advertiser_name = str(item["advertiser_name"])
+    if not merge_report_only_cubic:
+        try:
+            return (
+                client.list_plan_summaries(
+                    advertiser_id,
+                    advertiser_name,
+                    start_dt,
+                    end_dt,
+                    allow_standard_fallback=allow_standard_fallback,
+                    allow_report_fallback=allow_report_fallback,
+                ),
+                None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return [], f"{advertiser_name}: {exc}"
+
+    errors: list[str] = []
+    primary_plans: list[PlanSummary] = []
+    cubic_plans: list[PlanSummary] = []
     try:
-        return client.list_plan_summaries(advertiser_id, advertiser_name, start_dt, end_dt), None
+        primary_plans = client.list_plan_summaries(
+            advertiser_id,
+            advertiser_name,
+            start_dt,
+            end_dt,
+            allow_standard_fallback=False,
+            allow_report_fallback=False,
+        )
     except Exception as exc:  # noqa: BLE001
-        return [], f"{advertiser_name}: {exc}"
+        errors.append(f"uni_promotion: {exc}")
+    try:
+        cubic_plans = client.list_cubic_plan_summaries(
+            advertiser_id,
+            advertiser_name,
+            start_dt,
+            end_dt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"uni_cubic: {exc}")
+
+    plans_by_ad_id: dict[int, PlanSummary] = {}
+    for plan in primary_plans:
+        ad_id = int(getattr(plan, "ad_id", 0) or 0)
+        if ad_id > 0:
+            plans_by_ad_id[ad_id] = plan
+    for plan in cubic_plans:
+        ad_id = int(getattr(plan, "ad_id", 0) or 0)
+        if ad_id > 0 and ad_id not in plans_by_ad_id:
+            plans_by_ad_id[ad_id] = plan
+
+    merged_plans = sorted(
+        plans_by_ad_id.values(),
+        key=lambda plan: (-plan.order_count, -plan.pay_amount, -plan.roi, -plan.stat_cost, plan.ad_id),
+    )
+    error_text = None
+    if not merged_plans and errors:
+        error_text = f"{advertiser_name}: {'; '.join(errors)}"
+    return merged_plans, error_text
+
+
+def build_account_summaries_from_plan_rollups(
+    accounts: list[dict[str, Any]],
+    plans: list[PlanSummary],
+    plan_errors_by_advertiser: dict[int, str] | None = None,
+) -> tuple[list[AccountSummary], list[AccountSummary]]:
+    error_map = {int(key): str(value or "").strip() for key, value in (plan_errors_by_advertiser or {}).items()}
+    plan_rollups: dict[int, dict[str, Any]] = {}
+    for item in plans:
+        advertiser_id = int(item.advertiser_id or 0)
+        if advertiser_id <= 0:
+            continue
+        bucket = plan_rollups.setdefault(
+            advertiser_id,
+            {
+                "advertiser_name": item.advertiser_name,
+                "stat_cost": 0.0,
+                "pay_amount": 0.0,
+                "total_pay_amount": 0.0,
+                "settled_pay_amount": 0.0,
+                "order_count": 0,
+                "settled_order_count": 0,
+                "refund_amount_1h": 0.0,
+                "plan_count": 0,
+            },
+        )
+        bucket["stat_cost"] = round(bucket["stat_cost"] + float(item.stat_cost or 0.0), 2)
+        bucket["pay_amount"] = round(bucket["pay_amount"] + float(item.pay_amount or 0.0), 2)
+        bucket["total_pay_amount"] = round(bucket["total_pay_amount"] + float(item.total_pay_amount or 0.0), 2)
+        bucket["settled_pay_amount"] = round(bucket["settled_pay_amount"] + float(item.settled_pay_amount or 0.0), 2)
+        bucket["order_count"] += int(item.order_count or 0)
+        bucket["settled_order_count"] += int(item.settled_order_count or 0)
+        bucket["refund_amount_1h"] = round(bucket["refund_amount_1h"] + float(item.refund_amount_1h or 0.0), 2)
+        bucket["plan_count"] += 1
+
+    summaries: list[AccountSummary] = []
+    failures: list[AccountSummary] = []
+    for account in accounts:
+        advertiser_id = int(account.get("advertiser_id", 0) or 0)
+        if advertiser_id <= 0:
+            continue
+        advertiser_name = str(account.get("advertiser_name") or f"advertiser_{advertiser_id}")
+        error_text = error_map.get(advertiser_id, "")
+        if error_text:
+            summary = AccountSummary(
+                advertiser_id=advertiser_id,
+                advertiser_name=advertiser_name,
+                stat_cost=0.0,
+                roi=0.0,
+                order_count=0,
+                pay_amount=0.0,
+                ok=False,
+                error=error_text,
+            )
+            summaries.append(summary)
+            failures.append(summary)
+            continue
+        rollup = plan_rollups.get(advertiser_id, {})
+        stat_cost = round(float(rollup.get("stat_cost", 0.0) or 0.0), 2)
+        pay_amount = round(float(rollup.get("pay_amount", 0.0) or 0.0), 2)
+        total_pay_amount = round(float(rollup.get("total_pay_amount", 0.0) or 0.0), 2)
+        settled_pay_amount = round(float(rollup.get("settled_pay_amount", 0.0) or 0.0), 2)
+        order_count = int(rollup.get("order_count", 0) or 0)
+        settled_order_count = int(rollup.get("settled_order_count", 0) or 0)
+        refund_amount_1h = round(float(rollup.get("refund_amount_1h", 0.0) or 0.0), 2)
+        plan_count = int(rollup.get("plan_count", 0) or 0)
+        summaries.append(
+            AccountSummary(
+                advertiser_id=advertiser_id,
+                advertiser_name=str(rollup.get("advertiser_name") or advertiser_name),
+                stat_cost=stat_cost,
+                roi=derive_ratio(pay_amount, stat_cost, 0.0),
+                order_count=order_count,
+                pay_amount=pay_amount,
+                total_pay_amount=total_pay_amount,
+                settled_pay_amount=settled_pay_amount,
+                settled_roi=derive_ratio(settled_pay_amount, stat_cost, 0.0),
+                settled_order_count=settled_order_count,
+                pay_order_cost=derive_ratio(stat_cost, order_count, 0.0),
+                settled_amount_rate=derive_percent(settled_pay_amount, total_pay_amount, 0.0),
+                refund_rate_1h=derive_percent(refund_amount_1h, total_pay_amount, 0.0),
+                refund_amount_1h=refund_amount_1h,
+                plan_count=plan_count,
+                ok=True,
+                error=None,
+            )
+        )
+
+    summaries.sort(key=lambda item: (-item.stat_cost, item.advertiser_id))
+    return summaries, failures
 
 
 def apply_account_rollup_fallback(
@@ -2254,12 +3077,22 @@ def apply_account_rollup_fallback(
                 "advertiser_name": item.advertiser_name,
                 "stat_cost": 0.0,
                 "pay_amount": 0.0,
+                "total_pay_amount": 0.0,
+                "settled_pay_amount": 0.0,
                 "order_count": 0,
+                "settled_order_count": 0,
+                "refund_amount_1h": 0.0,
+                "plan_count": 0,
             },
         )
         bucket["stat_cost"] = round(bucket["stat_cost"] + float(item.stat_cost or 0.0), 2)
         bucket["pay_amount"] = round(bucket["pay_amount"] + float(item.pay_amount or 0.0), 2)
+        bucket["total_pay_amount"] = round(bucket["total_pay_amount"] + float(item.total_pay_amount or 0.0), 2)
+        bucket["settled_pay_amount"] = round(bucket["settled_pay_amount"] + float(item.settled_pay_amount or 0.0), 2)
         bucket["order_count"] += int(item.order_count or 0)
+        bucket["settled_order_count"] += int(item.settled_order_count or 0)
+        bucket["refund_amount_1h"] = round(bucket["refund_amount_1h"] + float(item.refund_amount_1h or 0.0), 2)
+        bucket["plan_count"] += 1
 
     normalized: list[AccountSummary] = []
     hard_failures: list[AccountSummary] = []
@@ -2274,8 +3107,17 @@ def apply_account_rollup_fallback(
         fallback = plan_rollups.get(summary.advertiser_id, {})
         fallback_cost = round(float(fallback.get("stat_cost", 0.0) or 0.0), 2)
         fallback_pay = round(float(fallback.get("pay_amount", 0.0) or 0.0), 2)
+        fallback_total_pay = round(float(fallback.get("total_pay_amount", 0.0) or 0.0), 2)
+        fallback_settled_pay = round(float(fallback.get("settled_pay_amount", 0.0) or 0.0), 2)
         fallback_orders = int(fallback.get("order_count", 0) or 0)
+        fallback_settled_orders = int(fallback.get("settled_order_count", 0) or 0)
+        fallback_refund_amount = round(float(fallback.get("refund_amount_1h", 0.0) or 0.0), 2)
+        fallback_plan_count = int(fallback.get("plan_count", 0) or 0)
         fallback_roi = round(fallback_pay / fallback_cost, 2) if fallback_cost > 0 else 0.0
+        fallback_settled_roi = round(fallback_settled_pay / fallback_cost, 2) if fallback_cost > 0 else 0.0
+        fallback_pay_order_cost = round(fallback_cost / fallback_orders, 2) if fallback_orders > 0 else 0.0
+        fallback_settled_amount_rate = round(fallback_settled_pay / fallback_total_pay * 100.0, 2) if fallback_total_pay > 0 else 0.0
+        fallback_refund_rate = round(fallback_refund_amount / fallback_total_pay * 100.0, 2) if fallback_total_pay > 0 else 0.0
         normalized.append(
             AccountSummary(
                 advertiser_id=summary.advertiser_id,
@@ -2284,6 +3126,15 @@ def apply_account_rollup_fallback(
                 roi=fallback_roi,
                 order_count=fallback_orders,
                 pay_amount=fallback_pay,
+                total_pay_amount=fallback_total_pay,
+                settled_pay_amount=fallback_settled_pay,
+                settled_roi=fallback_settled_roi,
+                settled_order_count=fallback_settled_orders,
+                pay_order_cost=fallback_pay_order_cost,
+                settled_amount_rate=fallback_settled_amount_rate,
+                refund_rate_1h=fallback_refund_rate,
+                refund_amount_1h=fallback_refund_amount,
+                plan_count=fallback_plan_count,
                 ok=True,
                 error="fallback: plan rollup",
             )
@@ -2296,26 +3147,38 @@ def build_report(mode: str, config: dict[str, Any], client: OceanEngineClient) -
     accounts = client.list_accounts()
     max_workers = int(config.get("max_workers", 6) or 6)
     plan_max_workers = int(config.get("plan_max_workers", 2) or 2)
+    use_uni_today_main_chain = mode != "daily"
     summaries: list[AccountSummary] = []
     plans: list[PlanSummary] = []
     failures: list[AccountSummary] = []
     plan_failures: list[str] = []
     plan_failure_ids: set[int] = set()
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_map = {
-            pool.submit(fetch_account_bundle, client, item, start_dt, end_dt): item
-            for item in accounts
-        }
-        for future in as_completed(future_map):
-            summary = future.result()
-            if summary.ok:
-                summaries.append(summary)
-            else:
-                failures.append(summary)
-                summaries.append(summary)
+    plan_failures_by_advertiser: dict[int, str] = {}
+    if not use_uni_today_main_chain:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {
+                pool.submit(fetch_account_bundle, client, item, start_dt, end_dt): item
+                for item in accounts
+            }
+            for future in as_completed(future_map):
+                summary = future.result()
+                if summary.ok:
+                    summaries.append(summary)
+                else:
+                    failures.append(summary)
+                    summaries.append(summary)
     with ThreadPoolExecutor(max_workers=plan_max_workers) as pool:
         future_map = {
-            pool.submit(fetch_plan_bundle, client, item, start_dt, end_dt): item
+            pool.submit(
+                fetch_plan_bundle,
+                client,
+                item,
+                start_dt,
+                end_dt,
+                allow_standard_fallback=not use_uni_today_main_chain,
+                allow_report_fallback=not use_uni_today_main_chain,
+                merge_report_only_cubic=use_uni_today_main_chain,
+            ): item
             for item in accounts
         }
         for future in as_completed(future_map):
@@ -2325,7 +3188,15 @@ def build_report(mode: str, config: dict[str, Any], client: OceanEngineClient) -
             if plan_error:
                 plan_failures.append(plan_error)
                 plan_failure_ids.add(int(item["advertiser_id"]))
-    summaries, failures = apply_account_rollup_fallback(summaries, plans, plan_failure_ids)
+                plan_failures_by_advertiser[int(item["advertiser_id"])] = plan_error
+    if use_uni_today_main_chain:
+        summaries, failures = build_account_summaries_from_plan_rollups(
+            accounts,
+            plans,
+            plan_errors_by_advertiser=plan_failures_by_advertiser,
+        )
+    else:
+        summaries, failures = apply_account_rollup_fallback(summaries, plans, plan_failure_ids)
     summaries.sort(key=lambda item: (-item.stat_cost, item.advertiser_id))
     total_cost = round(sum(item.stat_cost for item in summaries if item.ok), 2)
     total_pay = round(sum(item.pay_amount for item in summaries if item.ok), 2)

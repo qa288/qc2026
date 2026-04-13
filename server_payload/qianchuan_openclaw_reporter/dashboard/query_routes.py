@@ -91,11 +91,14 @@ def register_query_routes(
     @app.get("/api/dashboard")
     async def dashboard_data(
         display_scope: str = "current",
+        fresh: bool = False,
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
         is_admin = str(user.get("role") or "") == role_admin
-        latest_task = asyncio.create_task(asyncio.to_thread(service.dashboard_overview_payload, allowed, display_scope, user))
+        latest_task = asyncio.create_task(
+            asyncio.to_thread(service.dashboard_overview_payload, allowed, display_scope, user, bool(fresh))
+        )
         extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, display_scope))
         config_task = asyncio.create_task(asyncio.to_thread(service.read_config))
         token_task = (
@@ -146,6 +149,7 @@ def register_query_routes(
                     "scope_count": None if allowed is None else len(allowed),
                 },
                 "latest": latest,
+                "materialSync": extended_sync,
                 "extendedSync": extended_sync,
                 "tokenInfo": token_info,
                 "oceanEngineConfig": ocean_engine_config,
@@ -164,22 +168,48 @@ def register_query_routes(
         range: str = "day",
         start_date: str = "",
         end_date: str = "",
+        section: str = "all",
+        page: int = 1,
+        page_size: int = 0,
+        sort_key: str = "",
+        sort_dir: str = "desc",
+        search: str = "",
+        account_filter: str = "",
         display_scope: str = "current",
+        fresh: bool = False,
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         try:
             allowed = service.allowed_advertiser_ids_for_user(user)
+            requested_section = str(section or "all").strip().lower()
+            if requested_section not in {"all", "account", "plan", "breakdown"}:
+                requested_section = "all"
+            service_section = requested_section
+            if str(user.get("role") or "") == role_operator and requested_section == "account":
+                service_section = "plan"
             payload = await asyncio.to_thread(
                 service.get_performance_snapshot,
                 range,
                 start_date,
                 end_date,
-                False,
+                bool(fresh),
                 allowed,
+                service_section,
                 display_scope,
             )
             if str(user.get("role") or "") == role_operator:
                 payload = service._apply_operator_scope(payload, user)
+            payload = service.trim_performance_payload_for_section(payload, requested_section)
+            payload = service.paginate_performance_payload(
+                payload,
+                section=requested_section,
+                page=page,
+                page_size=page_size,
+                sort_key=sort_key,
+                sort_dir=sort_dir,
+                search=search,
+                account_filter=account_filter,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return api_response(payload)
@@ -216,12 +246,20 @@ def register_query_routes(
         range: str = "day",
         start_date: str = "",
         end_date: str = "",
+        mode: str = "performance",
+        page: int = 1,
+        page_size: int = 0,
+        sort_key: str = "",
+        sort_dir: str = "desc",
+        search: str = "",
         display_scope: str = "current",
+        fresh: bool = False,
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
         try:
-            payload = service.material_rankings_for_user(
+            payload = await asyncio.to_thread(
+                service.material_rankings_page_for_user,
                 user,
                 range,
                 start_date,
@@ -229,6 +267,33 @@ def register_query_routes(
                 snapshot_time,
                 allowed,
                 display_scope,
+                mode,
+                page,
+                page_size,
+                sort_key,
+                sort_dir,
+                search,
+                bool(fresh),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return api_response(payload)
+
+
+    @app.post("/api/material-relation-detail")
+    async def material_relation_detail(
+        relation_row: dict[str, Any] = Body(...),
+        display_scope: str = "current",
+        user: dict[str, Any] = Depends(require_auth),
+    ) -> JSONResponse:
+        allowed = service.allowed_advertiser_ids_for_user(user)
+        try:
+            payload = await asyncio.to_thread(
+                service.material_relation_detail_lookup,
+                plan_ids=relation_row.get("plan_ids") or [],
+                advertiser_ids=relation_row.get("advertiser_ids") or [],
+                allowed_advertiser_ids=allowed,
+                display_scope=display_scope,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -240,19 +305,31 @@ def register_query_routes(
         range: str = "day",
         start_date: str = "",
         end_date: str = "",
+        page: int = 1,
+        page_size: int = 0,
+        sort_key: str = "",
+        sort_dir: str = "desc",
+        search: str = "",
         display_scope: str = "current",
+        fresh: bool = False,
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
         try:
-            payload = service.team_material_rankings_for_user(
+            payload = await asyncio.to_thread(
+                service.team_material_rankings_page_for_user,
                 user,
                 range,
                 start_date,
                 end_date,
-                snapshot_time,
                 allowed,
                 display_scope,
+                page,
+                page_size,
+                sort_key,
+                sort_dir,
+                search,
+                bool(fresh),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

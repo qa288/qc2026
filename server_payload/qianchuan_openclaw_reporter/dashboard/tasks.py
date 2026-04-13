@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from bridge_send_alerts import dispatch_once
 from dashboard.celery_app import celery_app
-from dashboard.main import DISPLAY_SCOPE_ALL, DISPLAY_SCOPE_CURRENT, FULL_REFRESH_STAGE_LABELS, now_text, service
+from dashboard.main import FULL_REFRESH_STAGE_LABELS, FULL_REFRESH_STAGE_SEQUENCE, now_text, service
+from dashboard.settings import settings
 
 _PREPARE_LOCK = threading.Lock()
 _PREPARED = False
@@ -22,9 +25,58 @@ def _prepare() -> None:
         _PREPARED = True
 
 
+def _hot_sync_block_payload(reason: str) -> dict:
+    return {
+        "ok": True,
+        "skipped": True,
+        "reason": str(reason or "hot sync blocked"),
+    }
+
+
+def _active_history_refresh_stage() -> str:
+    status = service.full_refresh_status()
+    running = service.runtime_lock_active("full-refresh") or str(status.get("status") or "").strip().lower() in {
+        "queued",
+        "running",
+    }
+    if not running:
+        return ""
+    return str(status.get("stage") or "").strip().lower()
+
+
+def _hot_sync_block_reason(task_name: str = "") -> str | None:
+    stage = _active_history_refresh_stage()
+    if stage:
+        if stage in {"material_metrics", "material_metadata", "material_finalize", "material_reconcile"}:
+            return None
+        return "history refresh running"
+    if service.runtime_lock_active("full-refresh"):
+        return "history refresh running"
+    return None
+
+
+def _configured_performance_days(days: int | None = None) -> int:
+    if days is not None and int(days or 0) > 0:
+        return max(int(days or 0), 1)
+    return max(int(settings.account_plan_retention_days or 90), 1)
+
+
+def _material_history_start_date() -> str:
+    return str(settings.material_history_start_date or "2026-01-01").strip() or "2026-01-01"
+
+
+def _material_history_days() -> int:
+    start_day = datetime.strptime(_material_history_start_date(), "%Y-%m-%d").date()
+    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    return max((today - start_day).days + 1, 1)
+
+
 @celery_app.task(name="dashboard.sync")
 def sync_dashboard() -> dict:
     _prepare()
+    hot_sync_block_reason = _hot_sync_block_reason("dashboard.sync")
+    if hot_sync_block_reason:
+        return _hot_sync_block_payload(hot_sync_block_reason)
     payload = service.collect_and_store_all_customer_centers()
     return {
         "snapshot_time": payload.get("snapshot_time", ""),
@@ -38,86 +90,148 @@ def sync_dashboard() -> dict:
 
 @celery_app.task(name="dashboard.detail_sync")
 def sync_dashboard_detail(force_refresh: bool = False) -> dict:
+    return sync_dashboard_material_hot(force_refresh=force_refresh)
+
+
+@celery_app.task(name="dashboard.material_hot_sync")
+def sync_dashboard_material_hot(force_refresh: bool = False) -> dict:
     _prepare()
-    payload = service.collect_extended_and_store_all_customer_centers(force_refresh=bool(force_refresh))
+    hot_sync_block_reason = _hot_sync_block_reason("dashboard.material_hot_sync")
+    if hot_sync_block_reason:
+        return _hot_sync_block_payload(hot_sync_block_reason)
+    payload = service.collect_material_hot_and_store_all_customer_centers(force_refresh=bool(force_refresh))
     return {
         "snapshot_time": payload.get("snapshot_time", ""),
         "synced_customer_center_count": int(payload.get("synced_customer_center_count", 0) or 0),
         "skipped": bool(payload.get("skipped", False)),
+        "reason": str(payload.get("reason") or ""),
         "error_count": int(payload.get("error_count", 0) or 0),
     }
 
 
 @celery_app.task(name="dashboard.full_refresh")
 def full_refresh_dashboard(
-    performance_days: int = 30,
-    detail_days: int = 35,
+    performance_days: int = 0,
+    detail_days: int = 0,
+    force_detail_refresh: bool = True,
+) -> dict:
+    task_id = str(getattr(full_refresh_dashboard.request, "id", "") or "")
+    return _history_refresh_dashboard_v3(
+        task_id=task_id,
+        performance_days=performance_days,
+        detail_days=detail_days,
+        force_detail_refresh=force_detail_refresh,
+        trigger="manual",
+    )
+
+
+@celery_app.task(name="dashboard.nightly_history_refresh")
+def nightly_history_refresh_dashboard(
+    performance_days: int = 0,
+    detail_days: int = 0,
     force_detail_refresh: bool = True,
 ) -> dict:
     _prepare()
-    task_id = str(getattr(full_refresh_dashboard.request, "id", "") or "")
-    _ = (performance_days, detail_days, force_detail_refresh)
-    total_steps = 4
-    stage_labels = {
-        "summary": "清理缓存",
-        "performance": "首页概览",
-        "detail_sync": "账户表现",
-        "detail_history": "素材与快照",
-    }
+    _ = int(detail_days or 0)
+    _ = bool(force_detail_refresh)
+    task_id = str(getattr(nightly_history_refresh_dashboard.request, "id", "") or "")
+    return service.history_catchup_probe(
+        task_id=task_id,
+        trigger="nightly",
+        performance_days=int(performance_days or 0) or None,
+        extended_days=int(settings.extended_history_refresh_days or 0) or None,
+    )
 
-    def summarize_overview(payload: dict | None) -> dict:
-        data = payload or {}
-        summary = dict(data.get("summary") or {})
-        return {
-            "snapshot_time": str(data.get("snapshot_time") or "").strip(),
-            "snapshot_count": int(data.get("snapshot_count", 0) or 0),
-            "customer_center_count": int(data.get("customer_center_count", 0) or 0),
-            "stat_cost": round(float(summary.get("stat_cost", 0.0) or 0.0), 2),
-            "pay_amount": round(float(summary.get("pay_amount", 0.0) or 0.0), 2),
-            "order_count": int(float(summary.get("order_count", 0.0) or 0.0)),
-        }
 
-    def summarize_performance(payload: dict | None) -> dict:
-        data = payload or {}
-        summary = dict(data.get("summary") or {})
-        return {
-            "snapshot_time": str(data.get("snapshot_time") or "").strip(),
-            "account_count": len(data.get("accounts") or []),
-            "plan_count": len(data.get("plans") or []),
-            "customer_center_count": int(data.get("customer_center_count", 0) or 0),
-            "stat_cost": round(float(summary.get("stat_cost", 0.0) or 0.0), 2),
-            "pay_amount": round(float(summary.get("pay_amount", 0.0) or 0.0), 2),
-            "order_count": int(float(summary.get("order_count", 0.0) or 0.0)),
-        }
+@celery_app.task(name="dashboard.history_catchup_probe")
+def history_catchup_probe_dashboard(
+    trigger: str = "probe",
+    performance_days: int = 0,
+    extended_days: int = 0,
+) -> dict:
+    _prepare()
+    task_id = str(getattr(history_catchup_probe_dashboard.request, "id", "") or "")
+    return service.history_catchup_probe(
+        task_id=task_id,
+        trigger=str(trigger or "probe").strip().lower() or "probe",
+        performance_days=int(performance_days or 0) or None,
+        extended_days=int(extended_days or 0) or None,
+    )
 
-    def summarize_material(payload: dict | None) -> dict:
-        data = payload or {}
-        meta = dict(data.get("meta") or {})
-        return {
-            "snapshot_time": str(data.get("snapshot_time") or "").strip(),
-            "item_count": len(data.get("items") or []),
-            "snapshot_count": int(data.get("snapshot_count", 0) or 0),
-            "customer_center_count": int(data.get("customer_center_count", 0) or 0),
-            "error_count": int(meta.get("error_count", 0) or 0),
-        }
 
-    def summarize_latest_snapshot(payload: dict | None) -> dict:
-        data = payload or {}
-        summary = dict(data.get("summary") or {})
-        return {
-            "snapshot_time": str(data.get("snapshot_time") or "").strip(),
-            "account_count": len(data.get("accounts") or []),
-            "plan_count": len(data.get("plans") or []),
-            "customer_center_count": int(data.get("customer_center_count", 0) or 0),
-            "stat_cost": round(float(summary.get("stat_cost", 0.0) or 0.0), 2),
-            "pay_amount": round(float(summary.get("pay_amount", 0.0) or 0.0), 2),
-            "order_count": int(float(summary.get("order_count", 0.0) or 0.0)),
-        }
+def _history_refresh_dashboard_v3(
+    *,
+    task_id: str,
+    performance_days: int = 0,
+    detail_days: int = 0,
+    force_detail_refresh: bool = True,
+    trigger: str = "manual",
+) -> dict:
+    _prepare()
+    _ = int(detail_days or 0)
+    _ = bool(force_detail_refresh)
+    performance_days = _configured_performance_days(performance_days)
+    material_history_days = _material_history_days()
+    material_start_date = _material_history_start_date()
+    trigger = str(trigger or "manual").strip().lower() or "manual"
+    nightly_material_workers = None
+    nightly_use_report_metrics = trigger == "nightly"
+    nightly_plan_material_requests_per_minute = 0
+    nightly_plan_material_batch_size = 0
+    nightly_plan_material_batch_sleep_seconds = 0.0
+    if trigger == "nightly":
+        nightly_material_workers = max(
+            1,
+            min(int(settings.nightly_history_workers or settings.material_sync_workers or 6), 8),
+        )
+        nightly_plan_material_requests_per_minute = max(
+            int(settings.nightly_history_plan_material_requests_per_minute or 300),
+            0,
+        )
+        nightly_plan_material_batch_size = max(int(settings.nightly_history_plan_material_batch_size or 0), 0)
+        nightly_plan_material_batch_sleep_seconds = max(
+            float(settings.nightly_history_plan_material_batch_sleep_seconds or 0.0),
+            0.0,
+        )
+    total_steps = len(FULL_REFRESH_STAGE_SEQUENCE)
+    stage_labels = dict(FULL_REFRESH_STAGE_LABELS)
+    return _execute_full_refresh_overwrite(
+        task_id=task_id,
+        total_steps=total_steps,
+        stage_labels=stage_labels,
+        performance_days=performance_days,
+        material_history_days=material_history_days,
+        material_start_date=material_start_date,
+        nightly_material_workers=nightly_material_workers,
+        nightly_use_report_metrics=nightly_use_report_metrics,
+        nightly_plan_material_requests_per_minute=nightly_plan_material_requests_per_minute,
+        nightly_plan_material_batch_size=nightly_plan_material_batch_size,
+        nightly_plan_material_batch_sleep_seconds=nightly_plan_material_batch_sleep_seconds,
+        trigger=trigger,
+    )
+
+
+def _execute_full_refresh_overwrite(
+    *,
+    task_id: str,
+    total_steps: int,
+    stage_labels: dict[str, str],
+    performance_days: int,
+    material_history_days: int,
+    material_start_date: str,
+    nightly_material_workers: int | None,
+    nightly_use_report_metrics: bool,
+    nightly_plan_material_requests_per_minute: int,
+    nightly_plan_material_batch_size: int,
+    nightly_plan_material_batch_sleep_seconds: float,
+    trigger: str,
+) -> dict:
+    trigger = str(trigger or "manual").strip().lower() or "manual"
+    trigger_label = "nightly history refresh" if trigger == "nightly" else "manual history refresh"
 
     def clear_dashboard_caches() -> dict:
         service.clear_runtime_caches()
         return {
-            "mode": "database_only",
             "cache_namespaces": [
                 "dashboard-overview",
                 "performance",
@@ -125,49 +239,6 @@ def full_refresh_dashboard(
                 "comment",
                 "latest-snapshot",
             ],
-        }
-
-    def warm_overview_payloads() -> dict:
-        current_payload = service.dashboard_overview_payload(display_scope=DISPLAY_SCOPE_CURRENT)
-        all_payload = service.dashboard_overview_payload(display_scope=DISPLAY_SCOPE_ALL)
-        return {
-            "mode": "database_only",
-            "current": summarize_overview(current_payload),
-            "all": summarize_overview(all_payload),
-        }
-
-    def warm_performance_payloads() -> dict:
-        current_payload = service.get_performance_snapshot("day", display_scope=DISPLAY_SCOPE_CURRENT)
-        all_payload = service.get_performance_snapshot("day", display_scope=DISPLAY_SCOPE_ALL)
-        return {
-            "mode": "database_only",
-            "current": summarize_performance(current_payload),
-            "all": summarize_performance(all_payload),
-        }
-
-    def warm_detail_payloads() -> dict:
-        current_material_payload = service.material_rankings_for_user(
-            None,
-            range_key="day",
-            display_scope=DISPLAY_SCOPE_CURRENT,
-        )
-        all_material_payload = service.material_rankings_for_user(
-            None,
-            range_key="day",
-            display_scope=DISPLAY_SCOPE_ALL,
-        )
-        current_latest_snapshot = service.latest_snapshot(display_scope=DISPLAY_SCOPE_CURRENT)
-        all_latest_snapshot = service.latest_snapshot(display_scope=DISPLAY_SCOPE_ALL)
-        return {
-            "mode": "database_only",
-            "material": {
-                "current": summarize_material(current_material_payload),
-                "all": summarize_material(all_material_payload),
-            },
-            "latest_snapshot": {
-                "current": summarize_latest_snapshot(current_latest_snapshot),
-                "all": summarize_latest_snapshot(all_latest_snapshot),
-            },
         }
 
     def update_stage_status(
@@ -184,6 +255,7 @@ def full_refresh_dashboard(
         timestamp = now_text()
         service.update_full_refresh_status(
             task_id=task_id,
+            trigger=trigger,
             status=stage_status,
             stage=stage_name,
             stage_label=stage_labels.get(stage_name, FULL_REFRESH_STAGE_LABELS.get(stage_name, stage_name)),
@@ -222,17 +294,51 @@ def full_refresh_dashboard(
                 "stage_status": "failed",
             }
 
-    with service._distributed_runtime_lock("full-refresh", timeout_seconds=3600) as acquired:
+    def history_stage_progress_message(default_message: str, progress_payload: dict | None) -> str:
+        payload = progress_payload if isinstance(progress_payload, dict) else {}
+        target_day = str(payload.get("target_day") or "").strip()
+        customer_center_id = str(payload.get("customer_center_id") or "").strip()
+        detail_message = str(payload.get("message") or "").strip()
+        parts = [str(default_message or "").strip()]
+        if target_day:
+            parts.append(target_day)
+        if customer_center_id:
+            parts.append(customer_center_id)
+        if detail_message and detail_message not in parts:
+            parts.append(detail_message)
+        return " | ".join(part for part in parts if part)
+
+    def build_stage_progress_callback(stage_name: str, completed_steps: int, default_message: str):
+        def callback(progress_payload: dict[str, object]) -> None:
+            payload = dict(progress_payload or {})
+            update_stage_status(
+                stage_name,
+                stage_status="running",
+                message=history_stage_progress_message(default_message, payload),
+                completed_steps=completed_steps,
+                stage_completed_steps=max(
+                    int(payload.get("stage_completed_steps", payload.get("completed_steps", 0)) or 0),
+                    0,
+                ),
+                stage_total_steps=max(
+                    int(payload.get("stage_total_steps", payload.get("total_steps", 0)) or 0),
+                    0,
+                ),
+                result=payload,
+            )
+
+        return callback
+
+    with service._distributed_runtime_lock(
+        "full-refresh",
+        timeout_seconds=service._full_refresh_lock_ttl_seconds(),
+    ) as acquired:
         if not acquired:
             status_payload = service.full_refresh_status()
             return {
                 "ok": True,
                 "skipped": True,
-                "reason": "full refresh already running",
-                "summary": {},
-                "performance": {},
-                "detail_sync": {},
-                "detail_history": {},
+                "reason": "history refresh already running",
                 "status": status_payload,
             }
 
@@ -240,10 +346,11 @@ def full_refresh_dashboard(
         queued_at = service.full_refresh_status().get("queued_at") or start_timestamp
         service.update_full_refresh_status(
             task_id=task_id,
+            trigger=trigger,
             status="running",
-            stage="summary",
-            stage_label=stage_labels["summary"],
-            message="开始清理页面缓存，并准备按数据库最新快照回填。",
+            stage="performance",
+            stage_label=stage_labels.get("performance", "performance"),
+            message=f"{trigger_label}已开始：补齐最近 {performance_days} 个已结束自然日的历史表现",
             queued_at=queued_at,
             started_at=start_timestamp,
             updated_at=start_timestamp,
@@ -258,52 +365,107 @@ def full_refresh_dashboard(
             result={},
         )
 
-        summary_payload = run_stage("summary", clear_dashboard_caches)
-        update_stage_status(
-            "summary",
-            stage_status="running",
-            message=str(summary_payload.get("error") or "缓存已清理，开始回填首页概览。"),
-            completed_steps=1,
-            result=summary_payload.get("result") or {},
-        )
-
-        performance_payload = run_stage("performance", warm_overview_payloads)
-        update_stage_status(
+        performance_payload = run_stage(
             "performance",
+            service.refresh_recent_performance_history,
+            performance_days,
+            progress_callback=build_stage_progress_callback(
+                "performance",
+                0,
+                f"补齐最近 {performance_days} 个已结束自然日的历史表现",
+            ),
+        )
+        update_stage_status(
+            "material_metrics",
             stage_status="running",
-            message=str(performance_payload.get("error") or "首页概览已回填，开始回填账户表现。"),
-            completed_steps=2,
+            message=str(
+                performance_payload.get("error")
+                or "历史表现已补齐，开始刷新素材阶段指标"
+            ),
+            completed_steps=1,
             result=performance_payload.get("result") or {},
         )
 
-        detail_sync_payload = run_stage("detail_sync", warm_performance_payloads)
+        material_metrics_payload = run_stage(
+            "material_metrics",
+            service.refresh_recent_material_history,
+            material_history_days,
+            workers_override=nightly_material_workers,
+            prefer_report_metrics=nightly_use_report_metrics,
+            plan_material_requests_per_minute_override=nightly_plan_material_requests_per_minute,
+            plan_material_batch_size_override=nightly_plan_material_batch_size,
+            plan_material_batch_sleep_seconds_override=nightly_plan_material_batch_sleep_seconds,
+            progress_callback=build_stage_progress_callback(
+                "material_metrics",
+                1,
+                "刷新素材阶段指标",
+            ),
+        )
+        material_metrics_result = dict(material_metrics_payload.get("result") or {})
+        material_metrics_result["start_date"] = material_start_date
+        material_metrics_result["requested_days"] = material_history_days
+        material_metrics_payload["result"] = material_metrics_result
+
         update_stage_status(
-            "detail_sync",
+            "material_metadata",
             stage_status="running",
-            message=str(detail_sync_payload.get("error") or "账户表现已回填，开始回填素材与最新快照。"),
-            completed_steps=3,
-            result=detail_sync_payload.get("result") or {},
+            message=str(
+                material_metrics_payload.get("error")
+                or "素材阶段指标已刷新，开始补齐素材资产档案"
+            ),
+            completed_steps=2,
+            result=material_metrics_payload.get("result") or {},
         )
 
-        detail_history_payload = run_stage("detail_history", warm_detail_payloads)
+        material_metadata_payload = run_stage(
+            "material_metadata",
+            service.refresh_material_metadata_history,
+            material_start_date,
+            progress_callback=build_stage_progress_callback(
+                "material_metadata",
+                2,
+                "补齐素材资产档案",
+            ),
+        )
+        cache_clear_payload = run_stage("cache_clear", clear_dashboard_caches)
+
         stage_errors = [
             payload["error"]
-            for payload in (summary_payload, performance_payload, detail_sync_payload, detail_history_payload)
+            for payload in (
+                performance_payload,
+                material_metrics_payload,
+                material_metadata_payload,
+                cache_clear_payload,
+            )
             if str(payload.get("error") or "").strip()
         ]
         final_status = "completed"
         if any(
             not bool(payload.get("ok"))
-            for payload in (summary_payload, performance_payload, detail_sync_payload, detail_history_payload)
+            for payload in (
+                performance_payload,
+                material_metrics_payload,
+                material_metadata_payload,
+                cache_clear_payload,
+            )
         ):
             final_status = "failed"
+
         finish_timestamp = now_text()
         service.update_full_refresh_status(
             task_id=task_id,
+            trigger=trigger,
             status=final_status,
             stage="",
             stage_label="",
-            message="; ".join(stage_errors) if stage_errors else "全量刷新已完成，结果已按数据库最新数据覆盖缓存。",
+            message=(
+                "; ".join(stage_errors)
+                if stage_errors
+                else (
+                    f"{trigger_label}已完成：最近 {performance_days} 个已结束自然日的历史表现、"
+                    "素材阶段指标和素材资产档案已按上游数据补齐"
+                )
+            ),
             queued_at=service.full_refresh_status().get("queued_at") or finish_timestamp,
             started_at=service.full_refresh_status().get("started_at") or finish_timestamp,
             updated_at=finish_timestamp,
@@ -315,91 +477,52 @@ def full_refresh_dashboard(
                 "stage_total_steps": 0,
             },
             stages={
-                "summary": {
-                    "status": summary_payload.get("stage_status", "completed"),
-                    "message": str(summary_payload.get("error") or ""),
-                    "result": summary_payload.get("result") or {},
-                },
                 "performance": {
                     "status": performance_payload.get("stage_status", "completed"),
                     "message": str(performance_payload.get("error") or ""),
                     "result": performance_payload.get("result") or {},
                 },
-                "detail_sync": {
-                    "status": detail_sync_payload.get("stage_status", "completed"),
-                    "message": str(detail_sync_payload.get("error") or ""),
-                    "result": detail_sync_payload.get("result") or {},
+                "material_metrics": {
+                    "status": material_metrics_payload.get("stage_status", "completed"),
+                    "message": str(material_metrics_payload.get("error") or ""),
+                    "result": material_metrics_payload.get("result") or {},
                 },
-                "detail_history": {
-                    "status": detail_history_payload.get("stage_status", "completed"),
-                    "message": str(detail_history_payload.get("error") or ""),
-                    "result": detail_history_payload.get("result") or {},
+                "material_metadata": {
+                    "status": material_metadata_payload.get("stage_status", "completed"),
+                    "message": str(material_metadata_payload.get("error") or ""),
+                    "result": material_metadata_payload.get("result") or {},
                 },
             },
             result={
-                "summary": summary_payload,
                 "performance": performance_payload,
-                "detail_sync": detail_sync_payload,
-                "detail_history": detail_history_payload,
+                "material_metrics": material_metrics_payload,
+                "material_metadata": material_metadata_payload,
+                "cache_clear": cache_clear_payload,
             },
         )
         return {
             "ok": final_status == "completed",
             "skipped": False,
             "reason": "; ".join(stage_errors),
-            "mode": "database_only",
-            "summary": summary_payload,
             "performance": performance_payload,
-            "detail_sync": detail_sync_payload,
-            "detail_history": detail_history_payload,
+            "material_metrics": material_metrics_payload,
+            "material_metadata": material_metadata_payload,
+            "cache_clear": cache_clear_payload,
             "status": service.full_refresh_status(),
         }
 
 
-@celery_app.task(name="dashboard.performance_backfill")
-def backfill_dashboard_performance(days: int = 30, job_key: str = "") -> dict:
+@celery_app.task(name="dashboard.oauth_token_refresh")
+def refresh_dashboard_oauth_tokens() -> dict:
     _prepare()
-    task_id = str(getattr(backfill_dashboard_performance.request, "id", "") or "")
-    service.mark_history_backfill_job_started(job_key, task_id)
-    try:
-        result = service.backfill_recent_performance_history(int(days or 30))
-    except Exception as exc:
-        service.mark_history_backfill_job_finished(job_key, "failed", message=str(exc))
-        raise
-    service.mark_history_backfill_job_finished(job_key, "success", result=result)
-    return result
-
-
-@celery_app.task(name="dashboard.performance_refresh_recent")
-def refresh_dashboard_performance(days: int = 30) -> dict:
-    _prepare()
-    return service.refresh_recent_performance_history(int(days or 30))
-
-
-@celery_app.task(name="dashboard.detail_backfill")
-def backfill_dashboard_detail(days: int = 30, job_key: str = "") -> dict:
-    _prepare()
-    task_id = str(getattr(backfill_dashboard_detail.request, "id", "") or "")
-    service.mark_history_backfill_job_started(job_key, task_id)
-    try:
-        result = service.backfill_recent_extended_history(int(days or 30))
-    except Exception as exc:
-        service.mark_history_backfill_job_finished(job_key, "failed", message=str(exc))
-        raise
-    service.mark_history_backfill_job_finished(job_key, "success", result=result)
-    return result
-
-
-@celery_app.task(name="dashboard.detail_refresh_recent")
-def refresh_dashboard_detail(days: int = 35) -> dict:
-    _prepare()
-    return service.refresh_recent_extended_history(int(days or 35))
+    return service.refresh_customer_center_tokens()
 
 
 @celery_app.task(name="dashboard.oauth_authorization_audit")
 def audit_dashboard_oauth_authorization(stale_hours: int = 12) -> dict:
     _prepare()
-    return service.audit_customer_center_authorizations(int(stale_hours or 12))
+    _ = int(stale_hours or 12)
+    return service.refresh_customer_center_tokens()
 
 
 @celery_app.task(name="dashboard.comment_sync_recent")
@@ -417,6 +540,23 @@ def sync_dashboard_comments(
         advertiser_id=int(advertiser_id or 0),
         allowed_advertiser_ids=allowed_advertiser_ids,
         force_refresh=bool(force_refresh),
+    )
+
+
+@celery_app.task(name="dashboard.comment_sync_hot")
+def sync_dashboard_comments_hot() -> dict:
+    _prepare()
+    hot_sync_block_reason = _hot_sync_block_reason("dashboard.comment_sync_hot")
+    if hot_sync_block_reason:
+        return _hot_sync_block_payload(hot_sync_block_reason)
+    tz = ZoneInfo(service.read_config()["timezone"])
+    today = datetime.now(tz).date().isoformat()
+    return service.sync_comments_for_dates(
+        today,
+        today,
+        advertiser_id=0,
+        allowed_advertiser_ids=None,
+        force_refresh=False,
     )
 
 

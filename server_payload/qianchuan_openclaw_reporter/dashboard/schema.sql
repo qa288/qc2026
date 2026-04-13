@@ -28,6 +28,15 @@ CREATE TABLE IF NOT EXISTS account_snapshots (
     roi REAL NOT NULL,
     order_count INTEGER NOT NULL,
     pay_amount REAL NOT NULL,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_roi REAL NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    pay_order_cost REAL NOT NULL DEFAULT 0,
+    settled_amount_rate REAL NOT NULL DEFAULT 0,
+    refund_rate_1h REAL NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    plan_count INTEGER NOT NULL DEFAULT 0,
     ok INTEGER NOT NULL,
     error TEXT,
     PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id)
@@ -63,6 +72,175 @@ CREATE TABLE IF NOT EXISTS plan_snapshots (
     refund_amount_1h REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (customer_center_id, snapshot_time, ad_id)
 );
+
+CREATE TABLE IF NOT EXISTS summary_daily (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    biz_date TEXT NOT NULL,
+    snapshot_time TEXT NOT NULL,
+    account_count INTEGER NOT NULL,
+    active_account_count INTEGER NOT NULL,
+    plan_count INTEGER NOT NULL,
+    active_plan_count INTEGER NOT NULL,
+    stat_cost REAL NOT NULL,
+    pay_amount REAL NOT NULL,
+    order_count INTEGER NOT NULL,
+    roi REAL NOT NULL,
+    account_failures INTEGER NOT NULL,
+    plan_failures INTEGER NOT NULL,
+    PRIMARY KEY (customer_center_id, biz_date)
+);
+
+CREATE TABLE IF NOT EXISTS account_daily (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    biz_date TEXT NOT NULL,
+    snapshot_time TEXT NOT NULL,
+    advertiser_id BIGINT NOT NULL,
+    advertiser_name TEXT NOT NULL,
+    stat_cost REAL NOT NULL,
+    roi REAL NOT NULL,
+    order_count INTEGER NOT NULL,
+    pay_amount REAL NOT NULL,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_roi REAL NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    pay_order_cost REAL NOT NULL DEFAULT 0,
+    settled_amount_rate REAL NOT NULL DEFAULT 0,
+    refund_rate_1h REAL NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    plan_count INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL,
+    error TEXT,
+    PRIMARY KEY (customer_center_id, biz_date, advertiser_id)
+);
+
+CREATE TABLE IF NOT EXISTS plan_daily (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    biz_date TEXT NOT NULL,
+    snapshot_time TEXT NOT NULL,
+    advertiser_id BIGINT NOT NULL,
+    advertiser_name TEXT NOT NULL,
+    ad_id BIGINT NOT NULL,
+    ad_name TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    product_name TEXT NOT NULL,
+    anchor_name TEXT NOT NULL,
+    marketing_goal TEXT NOT NULL,
+    plan_source TEXT NOT NULL DEFAULT 'UNI_PROMOTION',
+    plan_delivery_type TEXT NOT NULL DEFAULT 'GLOBAL',
+    status TEXT NOT NULL,
+    opt_status TEXT NOT NULL,
+    roi_goal REAL NOT NULL,
+    stat_cost REAL NOT NULL,
+    roi REAL NOT NULL,
+    order_count INTEGER NOT NULL,
+    pay_amount REAL NOT NULL,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_roi REAL NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    pay_order_cost REAL NOT NULL DEFAULT 0,
+    settled_amount_rate REAL NOT NULL DEFAULT 0,
+    refund_rate_1h REAL NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (customer_center_id, biz_date, ad_id)
+);
+
+CREATE TABLE IF NOT EXISTS summary_current (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    account_count INTEGER NOT NULL,
+    active_account_count INTEGER NOT NULL,
+    plan_count INTEGER NOT NULL,
+    active_plan_count INTEGER NOT NULL,
+    stat_cost REAL NOT NULL,
+    pay_amount REAL NOT NULL,
+    order_count INTEGER NOT NULL,
+    roi REAL NOT NULL,
+    account_failures INTEGER NOT NULL,
+    plan_failures INTEGER NOT NULL,
+    PRIMARY KEY (customer_center_id)
+);
+CREATE INDEX IF NOT EXISTS idx_summary_current_snapshot
+ON summary_current (snapshot_time, customer_center_id);
+
+CREATE TABLE IF NOT EXISTS account_current (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL,
+    advertiser_id BIGINT NOT NULL,
+    advertiser_name TEXT NOT NULL,
+    stat_cost REAL NOT NULL,
+    roi REAL NOT NULL,
+    order_count INTEGER NOT NULL,
+    pay_amount REAL NOT NULL,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_roi REAL NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    pay_order_cost REAL NOT NULL DEFAULT 0,
+    settled_amount_rate REAL NOT NULL DEFAULT 0,
+    refund_rate_1h REAL NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    plan_count INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL,
+    error TEXT,
+    PRIMARY KEY (customer_center_id, advertiser_id)
+);
+CREATE INDEX IF NOT EXISTS idx_account_current_snapshot
+ON account_current (snapshot_time, customer_center_id, advertiser_id);
+
+CREATE TABLE IF NOT EXISTS plan_current (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL,
+    advertiser_id BIGINT NOT NULL,
+    advertiser_name TEXT NOT NULL,
+    ad_id BIGINT NOT NULL,
+    ad_name TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    product_name TEXT NOT NULL,
+    anchor_name TEXT NOT NULL,
+    marketing_goal TEXT NOT NULL,
+    plan_source TEXT NOT NULL DEFAULT 'UNI_PROMOTION',
+    plan_delivery_type TEXT NOT NULL DEFAULT 'GLOBAL',
+    status TEXT NOT NULL,
+    opt_status TEXT NOT NULL,
+    roi_goal REAL NOT NULL,
+    stat_cost REAL NOT NULL,
+    roi REAL NOT NULL,
+    order_count INTEGER NOT NULL,
+    pay_amount REAL NOT NULL,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_roi REAL NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    pay_order_cost REAL NOT NULL DEFAULT 0,
+    settled_amount_rate REAL NOT NULL DEFAULT 0,
+    refund_rate_1h REAL NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (customer_center_id, ad_id)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_current_snapshot
+ON plan_current (snapshot_time, customer_center_id, ad_id);
+
+CREATE TABLE IF NOT EXISTS plan_delivery_type_metadata (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    advertiser_id BIGINT NOT NULL,
+    advertiser_name TEXT NOT NULL DEFAULT '',
+    ad_id BIGINT NOT NULL,
+    ad_name TEXT NOT NULL DEFAULT '',
+    marketing_goal TEXT NOT NULL DEFAULT '',
+    plan_delivery_type TEXT NOT NULL DEFAULT 'GLOBAL',
+    source TEXT NOT NULL DEFAULT 'UNI_MAIN_LIST',
+    detected_at TEXT NOT NULL DEFAULT '',
+    refreshed_at TEXT NOT NULL,
+    PRIMARY KEY (customer_center_id, ad_id)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_delivery_type_metadata_cc_adv
+ON plan_delivery_type_metadata (customer_center_id, advertiser_id, plan_delivery_type);
+CREATE INDEX IF NOT EXISTS idx_plan_delivery_type_metadata_cc_refresh
+ON plan_delivery_type_metadata (customer_center_id, refreshed_at);
 
 CREATE TABLE IF NOT EXISTS plan_detail_snapshots (
     snapshot_time TEXT NOT NULL,
@@ -137,7 +315,7 @@ CREATE TABLE IF NOT EXISTS material_snapshots (
     settled_order_count INTEGER NOT NULL DEFAULT 0,
     roi REAL NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL,
-    PRIMARY KEY (customer_center_id, snapshot_time, ad_id, material_type, material_key)
+    PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id, ad_id, material_type, material_key)
 );
 
 CREATE TABLE IF NOT EXISTS material_rollups (
@@ -167,9 +345,251 @@ CREATE TABLE IF NOT EXISTS material_rollups (
     is_original INTEGER NOT NULL DEFAULT 0,
     top_plan_name TEXT NOT NULL DEFAULT '',
     top_account_name TEXT NOT NULL DEFAULT '',
+    top_anchor_name TEXT NOT NULL DEFAULT '',
+    product_info_text TEXT NOT NULL DEFAULT '',
+    product_names_json TEXT NOT NULL DEFAULT '[]',
+    overall_show_count INTEGER NOT NULL DEFAULT 0,
+    overall_click_count INTEGER NOT NULL DEFAULT 0,
+    overall_ctr REAL NOT NULL DEFAULT 0,
     roi REAL NOT NULL DEFAULT 0,
+    settled_roi REAL NOT NULL DEFAULT 0,
+    pay_order_cost REAL NOT NULL DEFAULT 0,
+    settled_amount_rate REAL NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    refund_rate_1h REAL DEFAULT NULL,
     PRIMARY KEY (customer_center_id, snapshot_time, material_key)
 );
+
+CREATE TABLE IF NOT EXISTS material_current (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    material_key TEXT NOT NULL,
+    material_id TEXT NOT NULL,
+    material_name TEXT NOT NULL,
+    create_time TEXT NOT NULL DEFAULT '',
+    material_type TEXT NOT NULL,
+    video_id TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    aweme_item_id TEXT NOT NULL DEFAULT '',
+    video_url TEXT NOT NULL DEFAULT '',
+    stat_cost REAL NOT NULL DEFAULT 0,
+    pay_amount REAL NOT NULL DEFAULT 0,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    order_count INTEGER NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    plan_count INTEGER NOT NULL DEFAULT 0,
+    advertiser_count INTEGER NOT NULL DEFAULT 0,
+    plan_ids_json TEXT NOT NULL DEFAULT '[]',
+    advertiser_ids_json TEXT NOT NULL DEFAULT '[]',
+    is_original INTEGER NOT NULL DEFAULT 0,
+    top_plan_name TEXT NOT NULL DEFAULT '',
+    top_account_name TEXT NOT NULL DEFAULT '',
+    top_anchor_name TEXT NOT NULL DEFAULT '',
+    product_info_text TEXT NOT NULL DEFAULT '',
+    product_names_json TEXT NOT NULL DEFAULT '[]',
+    overall_show_count INTEGER NOT NULL DEFAULT 0,
+    overall_click_count INTEGER NOT NULL DEFAULT 0,
+    overall_ctr REAL NOT NULL DEFAULT 0,
+    roi REAL NOT NULL DEFAULT 0,
+    settled_roi REAL NOT NULL DEFAULT 0,
+    pay_order_cost REAL NOT NULL DEFAULT 0,
+    settled_amount_rate REAL NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    refund_rate_1h REAL DEFAULT NULL,
+    PRIMARY KEY (customer_center_id, material_key)
+);
+CREATE INDEX IF NOT EXISTS idx_material_current_snapshot
+ON material_current (snapshot_time, customer_center_id, material_key);
+CREATE INDEX IF NOT EXISTS idx_material_current_stat_cost_nonzero
+ON material_current (customer_center_id, stat_cost DESC, material_key)
+WHERE stat_cost > 0;
+CREATE INDEX IF NOT EXISTS idx_material_current_total_pay_nonzero
+ON material_current (customer_center_id, total_pay_amount DESC, material_key)
+WHERE total_pay_amount > 0;
+CREATE INDEX IF NOT EXISTS idx_material_current_settled_pay_nonzero
+ON material_current (customer_center_id, settled_pay_amount DESC, material_key)
+WHERE settled_pay_amount > 0;
+CREATE INDEX IF NOT EXISTS idx_material_current_pay_nonzero
+ON material_current (customer_center_id, pay_amount DESC, material_key)
+WHERE pay_amount > 0;
+CREATE INDEX IF NOT EXISTS idx_material_current_order_nonzero
+ON material_current (customer_center_id, order_count DESC, material_key)
+WHERE order_count > 0;
+
+CREATE TABLE IF NOT EXISTS material_daily (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    biz_date TEXT NOT NULL,
+    snapshot_time TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    material_key TEXT NOT NULL,
+    material_id TEXT NOT NULL,
+    material_name TEXT NOT NULL,
+    create_time TEXT NOT NULL DEFAULT '',
+    material_type TEXT NOT NULL,
+    video_id TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    aweme_item_id TEXT NOT NULL DEFAULT '',
+    video_url TEXT NOT NULL DEFAULT '',
+    stat_cost REAL NOT NULL DEFAULT 0,
+    pay_amount REAL NOT NULL DEFAULT 0,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    order_count INTEGER NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    plan_count INTEGER NOT NULL DEFAULT 0,
+    advertiser_count INTEGER NOT NULL DEFAULT 0,
+    plan_ids_json TEXT NOT NULL DEFAULT '[]',
+    advertiser_ids_json TEXT NOT NULL DEFAULT '[]',
+    is_original INTEGER NOT NULL DEFAULT 0,
+    top_plan_name TEXT NOT NULL DEFAULT '',
+    top_account_name TEXT NOT NULL DEFAULT '',
+    top_anchor_name TEXT NOT NULL DEFAULT '',
+    product_info_text TEXT NOT NULL DEFAULT '',
+    product_names_json TEXT NOT NULL DEFAULT '[]',
+    overall_show_count INTEGER NOT NULL DEFAULT 0,
+    overall_click_count INTEGER NOT NULL DEFAULT 0,
+    overall_ctr REAL NOT NULL DEFAULT 0,
+    roi REAL NOT NULL DEFAULT 0,
+    settled_roi REAL NOT NULL DEFAULT 0,
+    pay_order_cost REAL NOT NULL DEFAULT 0,
+    settled_amount_rate REAL NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    refund_rate_1h REAL DEFAULT NULL,
+    PRIMARY KEY (customer_center_id, biz_date, material_key)
+);
+CREATE INDEX IF NOT EXISTS idx_material_daily_date
+ON material_daily (biz_date, customer_center_id, material_key);
+CREATE INDEX IF NOT EXISTS idx_material_daily_stat_cost_nonzero
+ON material_daily (biz_date, customer_center_id, stat_cost DESC, material_key)
+WHERE stat_cost > 0;
+CREATE INDEX IF NOT EXISTS idx_material_daily_total_pay_nonzero
+ON material_daily (biz_date, customer_center_id, total_pay_amount DESC, material_key)
+WHERE total_pay_amount > 0;
+CREATE INDEX IF NOT EXISTS idx_material_daily_settled_pay_nonzero
+ON material_daily (biz_date, customer_center_id, settled_pay_amount DESC, material_key)
+WHERE settled_pay_amount > 0;
+CREATE INDEX IF NOT EXISTS idx_material_daily_pay_nonzero
+ON material_daily (biz_date, customer_center_id, pay_amount DESC, material_key)
+WHERE pay_amount > 0;
+CREATE INDEX IF NOT EXISTS idx_material_daily_order_nonzero
+ON material_daily (biz_date, customer_center_id, order_count DESC, material_key)
+WHERE order_count > 0;
+
+CREATE TABLE IF NOT EXISTS material_profile (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    material_key TEXT NOT NULL,
+    material_id TEXT NOT NULL DEFAULT '',
+    material_name TEXT NOT NULL DEFAULT '',
+    create_time TEXT NOT NULL DEFAULT '',
+    material_type TEXT NOT NULL DEFAULT '',
+    video_id TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    aweme_item_id TEXT NOT NULL DEFAULT '',
+    video_url TEXT NOT NULL DEFAULT '',
+    is_original INTEGER NOT NULL DEFAULT 0,
+    top_plan_name TEXT NOT NULL DEFAULT '',
+    top_account_name TEXT NOT NULL DEFAULT '',
+    top_anchor_name TEXT NOT NULL DEFAULT '',
+    product_info_text TEXT NOT NULL DEFAULT '',
+    product_names_json TEXT NOT NULL DEFAULT '[]',
+    plan_ids_json TEXT NOT NULL DEFAULT '[]',
+    advertiser_ids_json TEXT NOT NULL DEFAULT '[]',
+    plan_count INTEGER NOT NULL DEFAULT 0,
+    advertiser_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (customer_center_id, material_key)
+);
+
+CREATE TABLE IF NOT EXISTS material_relation_edges (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    material_key TEXT NOT NULL,
+    material_id TEXT NOT NULL DEFAULT '',
+    advertiser_id BIGINT NOT NULL DEFAULT 0,
+    advertiser_name TEXT NOT NULL DEFAULT '',
+    ad_id BIGINT NOT NULL DEFAULT 0,
+    ad_name TEXT NOT NULL DEFAULT '',
+    first_seen_at TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL DEFAULT '',
+    last_snapshot_time TEXT NOT NULL DEFAULT '',
+    seen_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (customer_center_id, material_key, advertiser_id, ad_id)
+);
+CREATE INDEX IF NOT EXISTS idx_material_profile_updated
+ON material_profile (updated_at, customer_center_id, material_key);
+
+CREATE TABLE IF NOT EXISTS material_relation_current (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL,
+    window_start TEXT NOT NULL DEFAULT '',
+    window_end TEXT NOT NULL DEFAULT '',
+    advertiser_id BIGINT NOT NULL DEFAULT 0,
+    advertiser_name TEXT NOT NULL DEFAULT '',
+    ad_id BIGINT NOT NULL DEFAULT 0,
+    ad_name TEXT NOT NULL DEFAULT '',
+    material_type TEXT NOT NULL DEFAULT '',
+    material_key TEXT NOT NULL,
+    material_id TEXT NOT NULL DEFAULT '',
+    material_name TEXT NOT NULL DEFAULT '',
+    create_time TEXT NOT NULL DEFAULT '',
+    video_id TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    aweme_item_id TEXT NOT NULL DEFAULT '',
+    video_url TEXT NOT NULL DEFAULT '',
+    stat_cost REAL NOT NULL DEFAULT 0,
+    pay_amount REAL NOT NULL DEFAULT 0,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    order_count INTEGER NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    overall_show_count INTEGER NOT NULL DEFAULT 0,
+    overall_click_count INTEGER NOT NULL DEFAULT 0,
+    top_anchor_name TEXT NOT NULL DEFAULT '',
+    product_info_text TEXT NOT NULL DEFAULT '',
+    is_original INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (customer_center_id, advertiser_id, ad_id, material_type, material_key)
+);
+CREATE INDEX IF NOT EXISTS idx_material_relation_current_snapshot
+ON material_relation_current (snapshot_time, customer_center_id, material_key);
+
+CREATE TABLE IF NOT EXISTS material_relation_daily (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    biz_date TEXT NOT NULL,
+    snapshot_time TEXT NOT NULL,
+    window_start TEXT NOT NULL DEFAULT '',
+    window_end TEXT NOT NULL DEFAULT '',
+    advertiser_id BIGINT NOT NULL DEFAULT 0,
+    advertiser_name TEXT NOT NULL DEFAULT '',
+    ad_id BIGINT NOT NULL DEFAULT 0,
+    ad_name TEXT NOT NULL DEFAULT '',
+    material_type TEXT NOT NULL DEFAULT '',
+    material_key TEXT NOT NULL,
+    material_id TEXT NOT NULL DEFAULT '',
+    material_name TEXT NOT NULL DEFAULT '',
+    create_time TEXT NOT NULL DEFAULT '',
+    video_id TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    aweme_item_id TEXT NOT NULL DEFAULT '',
+    video_url TEXT NOT NULL DEFAULT '',
+    stat_cost REAL NOT NULL DEFAULT 0,
+    pay_amount REAL NOT NULL DEFAULT 0,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    order_count INTEGER NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    overall_show_count INTEGER NOT NULL DEFAULT 0,
+    overall_click_count INTEGER NOT NULL DEFAULT 0,
+    top_anchor_name TEXT NOT NULL DEFAULT '',
+    product_info_text TEXT NOT NULL DEFAULT '',
+    is_original INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (customer_center_id, biz_date, advertiser_id, ad_id, material_type, material_key)
+);
+CREATE INDEX IF NOT EXISTS idx_material_relation_daily_date
+ON material_relation_daily (biz_date, customer_center_id, material_key);
 
 CREATE TABLE IF NOT EXISTS video_origin_flags (
     snapshot_time TEXT NOT NULL,
@@ -179,6 +599,35 @@ CREATE TABLE IF NOT EXISTS video_origin_flags (
     is_original INTEGER NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL,
     PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id, material_id)
+);
+
+CREATE TABLE IF NOT EXISTS material_report_snapshots (
+    snapshot_time TEXT NOT NULL,
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    advertiser_id BIGINT NOT NULL,
+    material_type TEXT NOT NULL,
+    material_match_key TEXT NOT NULL,
+    material_id TEXT NOT NULL DEFAULT '',
+    material_name TEXT NOT NULL DEFAULT '',
+    create_time TEXT NOT NULL DEFAULT '',
+    stat_cost REAL NOT NULL DEFAULT 0,
+    pay_amount REAL NOT NULL DEFAULT 0,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    order_count INTEGER NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    overall_show_count INTEGER NOT NULL DEFAULT 0,
+    overall_click_count INTEGER NOT NULL DEFAULT 0,
+    roi REAL NOT NULL DEFAULT 0,
+    settled_roi REAL NOT NULL DEFAULT 0,
+    pay_order_cost REAL NOT NULL DEFAULT 0,
+    settled_amount_rate REAL NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    refund_rate_1h REAL DEFAULT NULL,
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id, material_type, material_match_key)
 );
 
 CREATE TABLE IF NOT EXISTS extended_sync_runs (
@@ -197,6 +646,52 @@ CREATE TABLE IF NOT EXISTS extended_sync_runs (
     created_at TEXT NOT NULL,
     finished_at TEXT NOT NULL,
     PRIMARY KEY (customer_center_id, snapshot_time)
+);
+
+CREATE TABLE IF NOT EXISTS plan_refresh_states (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    ad_id BIGINT NOT NULL,
+    advertiser_id BIGINT NOT NULL DEFAULT 0,
+    advertiser_name TEXT NOT NULL DEFAULT '',
+    ad_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    opt_status TEXT NOT NULL DEFAULT '',
+    last_hot_sync_at TEXT NOT NULL DEFAULT '',
+    last_warm_sync_at TEXT NOT NULL DEFAULT '',
+    last_cold_sync_at TEXT NOT NULL DEFAULT '',
+    next_cold_due_at TEXT NOT NULL DEFAULT '',
+    last_material_sync_at TEXT NOT NULL DEFAULT '',
+    last_material_change_at TEXT NOT NULL DEFAULT '',
+    last_status_change_at TEXT NOT NULL DEFAULT '',
+    last_nonzero_perf_at TEXT NOT NULL DEFAULT '',
+    last_material_error_at TEXT NOT NULL DEFAULT '',
+    last_material_error_code INTEGER NOT NULL DEFAULT 0,
+    last_material_error_message TEXT NOT NULL DEFAULT '',
+    last_material_error_retryable INTEGER NOT NULL DEFAULT 0,
+    consecutive_material_error_count INTEGER NOT NULL DEFAULT 0,
+    next_material_retry_at TEXT NOT NULL DEFAULT '',
+    last_material_row_count INTEGER NOT NULL DEFAULT 0,
+    sync_priority TEXT NOT NULL DEFAULT 'cold',
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (customer_center_id, ad_id)
+);
+
+CREATE TABLE IF NOT EXISTS history_refresh_states (
+    customer_center_id TEXT NOT NULL DEFAULT '',
+    target_date TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    trigger TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL DEFAULT '',
+    affected_tables_json TEXT NOT NULL DEFAULT '[]',
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    last_attempt_at TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL DEFAULT '',
+    finished_at TEXT NOT NULL DEFAULT '',
+    last_success_at TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (customer_center_id, target_date, stage)
 );
 
 CREATE TABLE IF NOT EXISTS alert_rules (
@@ -498,6 +993,15 @@ ON plan_snapshots (ad_id, snapshot_time);
 CREATE INDEX IF NOT EXISTS idx_plan_snapshots_cc_plan_time
 ON plan_snapshots (customer_center_id, ad_id, snapshot_time);
 
+CREATE INDEX IF NOT EXISTS idx_summary_daily_date_cc
+ON summary_daily (biz_date, customer_center_id);
+
+CREATE INDEX IF NOT EXISTS idx_account_daily_date_cc_adv
+ON account_daily (biz_date, customer_center_id, advertiser_id);
+
+CREATE INDEX IF NOT EXISTS idx_plan_daily_date_cc_plan
+ON plan_daily (biz_date, customer_center_id, ad_id);
+
 CREATE INDEX IF NOT EXISTS idx_plan_detail_snapshots_plan_time
 ON plan_detail_snapshots (ad_id, snapshot_time);
 
@@ -534,8 +1038,38 @@ ON video_origin_flags (material_id, snapshot_time);
 CREATE INDEX IF NOT EXISTS idx_video_origin_flags_cc_material_time
 ON video_origin_flags (customer_center_id, material_id, snapshot_time);
 
+CREATE INDEX IF NOT EXISTS idx_material_report_snapshots_cc_time
+ON material_report_snapshots (customer_center_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_material_report_snapshots_material
+ON material_report_snapshots (customer_center_id, material_type, material_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_material
+ON material_relation_edges (customer_center_id, material_key, last_seen_at DESC, advertiser_id, ad_id);
+
+CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_advertiser
+ON material_relation_edges (customer_center_id, advertiser_id, last_seen_at DESC, material_key);
+
+CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_ad
+ON material_relation_edges (customer_center_id, ad_id, last_seen_at DESC, material_key);
+
 CREATE INDEX IF NOT EXISTS idx_extended_sync_runs_cc_time
 ON extended_sync_runs (customer_center_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_plan_refresh_states_cc_priority_sync
+ON plan_refresh_states (customer_center_id, sync_priority, last_material_sync_at, ad_id);
+
+CREATE INDEX IF NOT EXISTS idx_plan_refresh_states_cc_cold_sync
+ON plan_refresh_states (customer_center_id, last_cold_sync_at, ad_id);
+
+CREATE INDEX IF NOT EXISTS idx_plan_refresh_states_cc_next_cold_due
+ON plan_refresh_states (customer_center_id, next_cold_due_at, ad_id);
+
+CREATE INDEX IF NOT EXISTS idx_history_refresh_states_stage_date
+ON history_refresh_states (stage, target_date, customer_center_id);
+
+CREATE INDEX IF NOT EXISTS idx_history_refresh_states_status_updated
+ON history_refresh_states (status, updated_at);
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_status_created
 ON alert_events (status, created_at);

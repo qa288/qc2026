@@ -100,8 +100,158 @@ def _ensure_bigint_column(conn: Any, table_name: str, column_name: str) -> None:
         conn.execute(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE BIGINT")
 
 
+def _ensure_performance_daily_read_models(conn: Any) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS summary_daily (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            biz_date TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            account_count INTEGER NOT NULL,
+            active_account_count INTEGER NOT NULL,
+            plan_count INTEGER NOT NULL,
+            active_plan_count INTEGER NOT NULL,
+            stat_cost REAL NOT NULL,
+            pay_amount REAL NOT NULL,
+            order_count INTEGER NOT NULL,
+            roi REAL NOT NULL,
+            account_failures INTEGER NOT NULL,
+            plan_failures INTEGER NOT NULL,
+            PRIMARY KEY (customer_center_id, biz_date)
+        );
+        CREATE TABLE IF NOT EXISTS account_daily (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            biz_date TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            advertiser_id BIGINT NOT NULL,
+            advertiser_name TEXT NOT NULL,
+            stat_cost REAL NOT NULL,
+            roi REAL NOT NULL,
+            order_count INTEGER NOT NULL,
+            pay_amount REAL NOT NULL,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_roi REAL NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            pay_order_cost REAL NOT NULL DEFAULT 0,
+            settled_amount_rate REAL NOT NULL DEFAULT 0,
+            refund_rate_1h REAL NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            plan_count INTEGER NOT NULL DEFAULT 0,
+            ok INTEGER NOT NULL,
+            error TEXT,
+            PRIMARY KEY (customer_center_id, biz_date, advertiser_id)
+        );
+        CREATE TABLE IF NOT EXISTS plan_daily (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            biz_date TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            advertiser_id BIGINT NOT NULL,
+            advertiser_name TEXT NOT NULL,
+            ad_id BIGINT NOT NULL,
+            ad_name TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            product_name TEXT NOT NULL,
+            anchor_name TEXT NOT NULL,
+            marketing_goal TEXT NOT NULL,
+            plan_source TEXT NOT NULL DEFAULT 'UNI_PROMOTION',
+            plan_delivery_type TEXT NOT NULL DEFAULT 'GLOBAL',
+            status TEXT NOT NULL,
+            opt_status TEXT NOT NULL,
+            roi_goal REAL NOT NULL,
+            stat_cost REAL NOT NULL,
+            roi REAL NOT NULL,
+            order_count INTEGER NOT NULL,
+            pay_amount REAL NOT NULL,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_roi REAL NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            pay_order_cost REAL NOT NULL DEFAULT 0,
+            settled_amount_rate REAL NOT NULL DEFAULT 0,
+            refund_rate_1h REAL NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (customer_center_id, biz_date, ad_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_summary_daily_date_cc
+        ON summary_daily (biz_date, customer_center_id);
+        CREATE INDEX IF NOT EXISTS idx_account_daily_date_cc_adv
+        ON account_daily (biz_date, customer_center_id, advertiser_id);
+        CREATE INDEX IF NOT EXISTS idx_plan_daily_date_cc_plan
+        ON plan_daily (biz_date, customer_center_id, ad_id);
+        """
+    )
+
+
+def _material_metric_sort_partial_indexes(conn: Any) -> None:
+    index_statements = (
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_stat_cost_nonzero
+        ON material_current (customer_center_id, stat_cost DESC, material_key)
+        WHERE stat_cost > 0
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_total_pay_nonzero
+        ON material_current (customer_center_id, total_pay_amount DESC, material_key)
+        WHERE total_pay_amount > 0
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_settled_pay_nonzero
+        ON material_current (customer_center_id, settled_pay_amount DESC, material_key)
+        WHERE settled_pay_amount > 0
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_pay_nonzero
+        ON material_current (customer_center_id, pay_amount DESC, material_key)
+        WHERE pay_amount > 0
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_order_nonzero
+        ON material_current (customer_center_id, order_count DESC, material_key)
+        WHERE order_count > 0
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_stat_cost_nonzero
+        ON material_daily (biz_date, customer_center_id, stat_cost DESC, material_key)
+        WHERE stat_cost > 0
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_total_pay_nonzero
+        ON material_daily (biz_date, customer_center_id, total_pay_amount DESC, material_key)
+        WHERE total_pay_amount > 0
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_settled_pay_nonzero
+        ON material_daily (biz_date, customer_center_id, settled_pay_amount DESC, material_key)
+        WHERE settled_pay_amount > 0
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_pay_nonzero
+        ON material_daily (biz_date, customer_center_id, pay_amount DESC, material_key)
+        WHERE pay_amount > 0
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_order_nonzero
+        ON material_daily (biz_date, customer_center_id, order_count DESC, material_key)
+        WHERE order_count > 0
+        """,
+    )
+    for statement in index_statements:
+        conn.execute(statement)
+
+
 def _legacy_schema_backfill(conn: Any) -> None:
     _ensure_column(conn, "app_users", "upload_materials_enabled", "INTEGER NOT NULL DEFAULT 0")
+
+    _ensure_column(conn, "account_snapshots", "total_pay_amount", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "account_snapshots", "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "account_snapshots", "settled_roi", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "account_snapshots", "settled_order_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "account_snapshots", "pay_order_cost", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "account_snapshots", "settled_amount_rate", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "account_snapshots", "refund_rate_1h", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "account_snapshots", "refund_amount_1h", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "account_snapshots", "plan_count", "INTEGER NOT NULL DEFAULT 0")
 
     _ensure_column(conn, "plan_snapshots", "plan_source", "TEXT NOT NULL DEFAULT 'UNI_PROMOTION'")
     _ensure_column(conn, "plan_snapshots", "plan_delivery_type", "TEXT NOT NULL DEFAULT 'GLOBAL'")
@@ -170,6 +320,15 @@ def _legacy_schema_backfill(conn: Any) -> None:
         _ensure_column(conn, table_name, "total_pay_amount", "REAL NOT NULL DEFAULT 0")
         _ensure_column(conn, table_name, "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
         _ensure_column(conn, table_name, "settled_order_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "top_anchor_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "material_rollups", "product_info_text", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "material_rollups", "product_names_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(conn, "material_rollups", "overall_show_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "overall_click_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "overall_ctr", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "settled_roi", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "pay_order_cost", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "settled_amount_rate", "REAL NOT NULL DEFAULT 0")
 
     conn.execute(
         """
@@ -333,6 +492,252 @@ def _history_backfill_jobs_schema(conn: Any) -> None:
         CREATE INDEX IF NOT EXISTS idx_history_backfill_jobs_kind_status_updated
         ON history_backfill_jobs (kind, status, updated_at)
         """
+    )
+
+
+def _plan_refresh_schedule_fields_schema(conn: Any) -> None:
+    _ensure_column(conn, "plan_refresh_states", "last_warm_sync_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "plan_refresh_states", "next_cold_due_at", "TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_plan_refresh_states_cc_next_cold_due
+        ON plan_refresh_states (customer_center_id, next_cold_due_at, ad_id)
+        """
+    )
+
+
+def _plan_refresh_error_backoff_fields_schema(conn: Any) -> None:
+    _ensure_column(conn, "plan_refresh_states", "last_material_error_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "plan_refresh_states", "last_material_error_code", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "plan_refresh_states", "last_material_error_message", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "plan_refresh_states", "last_material_error_retryable", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "plan_refresh_states", "consecutive_material_error_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "plan_refresh_states", "next_material_retry_at", "TEXT NOT NULL DEFAULT ''")
+
+
+def _material_relation_edges_schema(conn: Any) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS material_relation_edges (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            material_key TEXT NOT NULL,
+            material_id TEXT NOT NULL DEFAULT '',
+            advertiser_id BIGINT NOT NULL DEFAULT 0,
+            advertiser_name TEXT NOT NULL DEFAULT '',
+            ad_id BIGINT NOT NULL DEFAULT 0,
+            ad_name TEXT NOT NULL DEFAULT '',
+            first_seen_at TEXT NOT NULL DEFAULT '',
+            last_seen_at TEXT NOT NULL DEFAULT '',
+            last_snapshot_time TEXT NOT NULL DEFAULT '',
+            seen_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (customer_center_id, material_key, advertiser_id, ad_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_material
+        ON material_relation_edges (customer_center_id, material_key, last_seen_at DESC, advertiser_id, ad_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_advertiser
+        ON material_relation_edges (customer_center_id, advertiser_id, last_seen_at DESC, material_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_ad
+        ON material_relation_edges (customer_center_id, ad_id, last_seen_at DESC, material_key)
+        """
+    )
+
+
+def _material_relation_read_model_schema(conn: Any) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS material_relation_current (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            snapshot_time TEXT NOT NULL,
+            window_start TEXT NOT NULL DEFAULT '',
+            window_end TEXT NOT NULL DEFAULT '',
+            advertiser_id BIGINT NOT NULL DEFAULT 0,
+            advertiser_name TEXT NOT NULL DEFAULT '',
+            ad_id BIGINT NOT NULL DEFAULT 0,
+            ad_name TEXT NOT NULL DEFAULT '',
+            material_type TEXT NOT NULL DEFAULT '',
+            material_key TEXT NOT NULL,
+            material_id TEXT NOT NULL DEFAULT '',
+            material_name TEXT NOT NULL DEFAULT '',
+            create_time TEXT NOT NULL DEFAULT '',
+            video_id TEXT NOT NULL DEFAULT '',
+            cover_url TEXT NOT NULL DEFAULT '',
+            aweme_item_id TEXT NOT NULL DEFAULT '',
+            video_url TEXT NOT NULL DEFAULT '',
+            stat_cost REAL NOT NULL DEFAULT 0,
+            pay_amount REAL NOT NULL DEFAULT 0,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            overall_show_count INTEGER NOT NULL DEFAULT 0,
+            overall_click_count INTEGER NOT NULL DEFAULT 0,
+            top_anchor_name TEXT NOT NULL DEFAULT '',
+            product_info_text TEXT NOT NULL DEFAULT '',
+            is_original INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (customer_center_id, advertiser_id, ad_id, material_type, material_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_relation_current_snapshot
+        ON material_relation_current (snapshot_time, customer_center_id, material_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS material_relation_daily (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            biz_date TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            window_start TEXT NOT NULL DEFAULT '',
+            window_end TEXT NOT NULL DEFAULT '',
+            advertiser_id BIGINT NOT NULL DEFAULT 0,
+            advertiser_name TEXT NOT NULL DEFAULT '',
+            ad_id BIGINT NOT NULL DEFAULT 0,
+            ad_name TEXT NOT NULL DEFAULT '',
+            material_type TEXT NOT NULL DEFAULT '',
+            material_key TEXT NOT NULL,
+            material_id TEXT NOT NULL DEFAULT '',
+            material_name TEXT NOT NULL DEFAULT '',
+            create_time TEXT NOT NULL DEFAULT '',
+            video_id TEXT NOT NULL DEFAULT '',
+            cover_url TEXT NOT NULL DEFAULT '',
+            aweme_item_id TEXT NOT NULL DEFAULT '',
+            video_url TEXT NOT NULL DEFAULT '',
+            stat_cost REAL NOT NULL DEFAULT 0,
+            pay_amount REAL NOT NULL DEFAULT 0,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            overall_show_count INTEGER NOT NULL DEFAULT 0,
+            overall_click_count INTEGER NOT NULL DEFAULT 0,
+            top_anchor_name TEXT NOT NULL DEFAULT '',
+            product_info_text TEXT NOT NULL DEFAULT '',
+            is_original INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (customer_center_id, biz_date, advertiser_id, ad_id, material_type, material_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_relation_daily_date
+        ON material_relation_daily (biz_date, customer_center_id, material_key)
+        """
+    )
+
+
+def _material_name_lookup_indexes(conn: Any) -> None:
+    if getattr(conn, "backend", "") == "postgres":
+        conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_current_name_trgm
+            ON material_current USING gin (LOWER(material_name) gin_trgm_ops)
+            WHERE COALESCE(material_name, '') <> ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_daily_name_trgm
+            ON material_daily USING gin (LOWER(material_name) gin_trgm_ops)
+            WHERE COALESCE(material_name, '') <> ''
+            """
+        )
+        return
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_name
+        ON material_current (material_name)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_date_name
+        ON material_daily (biz_date, material_name)
+        """
+    )
+
+
+def _material_snapshot_primary_key_with_advertiser(conn: Any) -> None:
+    _rebuild_table_with_schema(
+        conn,
+        "material_snapshots",
+        """
+        CREATE TABLE {table_name} (
+            snapshot_time TEXT NOT NULL,
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            advertiser_id BIGINT NOT NULL,
+            advertiser_name TEXT NOT NULL,
+            ad_id BIGINT NOT NULL,
+            ad_name TEXT NOT NULL,
+            material_type TEXT NOT NULL,
+            material_key TEXT NOT NULL,
+            material_id TEXT NOT NULL,
+            material_name TEXT NOT NULL,
+            create_time TEXT NOT NULL DEFAULT '',
+            video_id TEXT NOT NULL DEFAULT '',
+            cover_url TEXT NOT NULL DEFAULT '',
+            aweme_item_id TEXT NOT NULL DEFAULT '',
+            video_url TEXT NOT NULL DEFAULT '',
+            product_show_count INTEGER NOT NULL DEFAULT 0,
+            product_click_count INTEGER NOT NULL DEFAULT 0,
+            stat_cost REAL NOT NULL DEFAULT 0,
+            pay_amount REAL NOT NULL DEFAULT 0,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            roi REAL NOT NULL DEFAULT 0,
+            raw_json TEXT NOT NULL,
+            PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id, ad_id, material_type, material_key)
+        )
+        """,
+        [
+            "snapshot_time",
+            "customer_center_id",
+            "window_start",
+            "window_end",
+            "advertiser_id",
+            "advertiser_name",
+            "ad_id",
+            "ad_name",
+            "material_type",
+            "material_key",
+            "material_id",
+            "material_name",
+            "create_time",
+            "video_id",
+            "cover_url",
+            "aweme_item_id",
+            "video_url",
+            "product_show_count",
+            "product_click_count",
+            "stat_cost",
+            "pay_amount",
+            "total_pay_amount",
+            "settled_pay_amount",
+            "order_count",
+            "settled_order_count",
+            "roi",
+            "raw_json",
+        ],
     )
 
 
@@ -1288,6 +1693,360 @@ def _postgres_native_runtime_types(conn: Any, context: dict[str, Any] | None = N
         )
 
 
+def _material_rollup_context_schema_backfill(conn: Any) -> None:
+    _ensure_column(conn, "material_rollups", "top_anchor_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "material_rollups", "product_info_text", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "material_rollups", "product_names_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(conn, "material_rollups", "overall_show_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "overall_click_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "overall_ctr", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "settled_roi", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "pay_order_cost", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "settled_amount_rate", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "refund_amount_1h", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_rollups", "refund_rate_1h", "REAL DEFAULT NULL")
+
+
+def _material_report_snapshot_schema(conn: Any) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS material_report_snapshots (
+            snapshot_time TEXT NOT NULL,
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            advertiser_id BIGINT NOT NULL,
+            material_type TEXT NOT NULL,
+            material_match_key TEXT NOT NULL,
+            material_id TEXT NOT NULL DEFAULT '',
+            material_name TEXT NOT NULL DEFAULT '',
+            create_time TEXT NOT NULL DEFAULT '',
+            stat_cost REAL NOT NULL DEFAULT 0,
+            pay_amount REAL NOT NULL DEFAULT 0,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            overall_show_count INTEGER NOT NULL DEFAULT 0,
+            overall_click_count INTEGER NOT NULL DEFAULT 0,
+            roi REAL NOT NULL DEFAULT 0,
+            settled_roi REAL NOT NULL DEFAULT 0,
+            pay_order_cost REAL NOT NULL DEFAULT 0,
+            settled_amount_rate REAL NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            refund_rate_1h REAL DEFAULT NULL,
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id, material_type, material_match_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_report_snapshots_cc_time
+        ON material_report_snapshots (customer_center_id, snapshot_time)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_report_snapshots_material
+        ON material_report_snapshots (customer_center_id, material_type, material_id, snapshot_time)
+        """
+    )
+
+
+def _material_report_snapshot_context_columns(conn: Any) -> None:
+    _ensure_column(conn, "material_report_snapshots", "create_time", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "material_report_snapshots", "overall_show_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "material_report_snapshots", "overall_click_count", "INTEGER NOT NULL DEFAULT 0")
+
+
+def _account_snapshot_rollup_fields(conn: Any) -> None:
+    for table_name in ("account_snapshots", "account_daily"):
+        if not _table_exists(conn, table_name):
+            continue
+        _ensure_column(conn, table_name, "total_pay_amount", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, table_name, "settled_pay_amount", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, table_name, "settled_roi", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, table_name, "settled_order_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, table_name, "pay_order_cost", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, table_name, "settled_amount_rate", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, table_name, "refund_rate_1h", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, table_name, "refund_amount_1h", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, table_name, "plan_count", "INTEGER NOT NULL DEFAULT 0")
+
+
+def _plan_delivery_type_metadata_schema(conn: Any) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS plan_delivery_type_metadata (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            advertiser_id BIGINT NOT NULL,
+            advertiser_name TEXT NOT NULL DEFAULT '',
+            ad_id BIGINT NOT NULL,
+            ad_name TEXT NOT NULL DEFAULT '',
+            marketing_goal TEXT NOT NULL DEFAULT '',
+            plan_delivery_type TEXT NOT NULL DEFAULT 'GLOBAL',
+            source TEXT NOT NULL DEFAULT 'UNI_MAIN_LIST',
+            detected_at TEXT NOT NULL DEFAULT '',
+            refreshed_at TEXT NOT NULL,
+            PRIMARY KEY (customer_center_id, ad_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_plan_delivery_type_metadata_cc_adv
+        ON plan_delivery_type_metadata (customer_center_id, advertiser_id, plan_delivery_type)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_plan_delivery_type_metadata_cc_refresh
+        ON plan_delivery_type_metadata (customer_center_id, refreshed_at)
+        """
+    )
+
+
+def _current_and_material_daily_schema(conn: Any) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS summary_current (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            snapshot_time TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            account_count INTEGER NOT NULL,
+            active_account_count INTEGER NOT NULL,
+            plan_count INTEGER NOT NULL,
+            active_plan_count INTEGER NOT NULL,
+            stat_cost REAL NOT NULL,
+            pay_amount REAL NOT NULL,
+            order_count INTEGER NOT NULL,
+            roi REAL NOT NULL,
+            account_failures INTEGER NOT NULL,
+            plan_failures INTEGER NOT NULL,
+            PRIMARY KEY (customer_center_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_summary_current_snapshot
+        ON summary_current (snapshot_time, customer_center_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_current (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            snapshot_time TEXT NOT NULL,
+            advertiser_id BIGINT NOT NULL,
+            advertiser_name TEXT NOT NULL,
+            stat_cost REAL NOT NULL,
+            roi REAL NOT NULL,
+            order_count INTEGER NOT NULL,
+            pay_amount REAL NOT NULL,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_roi REAL NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            pay_order_cost REAL NOT NULL DEFAULT 0,
+            settled_amount_rate REAL NOT NULL DEFAULT 0,
+            refund_rate_1h REAL NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            plan_count INTEGER NOT NULL DEFAULT 0,
+            ok INTEGER NOT NULL,
+            error TEXT,
+            PRIMARY KEY (customer_center_id, advertiser_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_account_current_snapshot
+        ON account_current (snapshot_time, customer_center_id, advertiser_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS plan_current (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            snapshot_time TEXT NOT NULL,
+            advertiser_id BIGINT NOT NULL,
+            advertiser_name TEXT NOT NULL,
+            ad_id BIGINT NOT NULL,
+            ad_name TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            product_name TEXT NOT NULL,
+            anchor_name TEXT NOT NULL,
+            marketing_goal TEXT NOT NULL,
+            plan_source TEXT NOT NULL DEFAULT 'UNI_PROMOTION',
+            plan_delivery_type TEXT NOT NULL DEFAULT 'GLOBAL',
+            status TEXT NOT NULL,
+            opt_status TEXT NOT NULL,
+            roi_goal REAL NOT NULL,
+            stat_cost REAL NOT NULL,
+            roi REAL NOT NULL,
+            order_count INTEGER NOT NULL,
+            pay_amount REAL NOT NULL,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_roi REAL NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            pay_order_cost REAL NOT NULL DEFAULT 0,
+            settled_amount_rate REAL NOT NULL DEFAULT 0,
+            refund_rate_1h REAL NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (customer_center_id, ad_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_plan_current_snapshot
+        ON plan_current (snapshot_time, customer_center_id, ad_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS material_current (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            snapshot_time TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            material_key TEXT NOT NULL,
+            material_id TEXT NOT NULL,
+            material_name TEXT NOT NULL,
+            create_time TEXT NOT NULL DEFAULT '',
+            material_type TEXT NOT NULL,
+            video_id TEXT NOT NULL DEFAULT '',
+            cover_url TEXT NOT NULL DEFAULT '',
+            aweme_item_id TEXT NOT NULL DEFAULT '',
+            video_url TEXT NOT NULL DEFAULT '',
+            stat_cost REAL NOT NULL DEFAULT 0,
+            pay_amount REAL NOT NULL DEFAULT 0,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            plan_count INTEGER NOT NULL DEFAULT 0,
+            advertiser_count INTEGER NOT NULL DEFAULT 0,
+            plan_ids_json TEXT NOT NULL DEFAULT '[]',
+            advertiser_ids_json TEXT NOT NULL DEFAULT '[]',
+            is_original INTEGER NOT NULL DEFAULT 0,
+            top_plan_name TEXT NOT NULL DEFAULT '',
+            top_account_name TEXT NOT NULL DEFAULT '',
+            top_anchor_name TEXT NOT NULL DEFAULT '',
+            product_info_text TEXT NOT NULL DEFAULT '',
+            product_names_json TEXT NOT NULL DEFAULT '[]',
+            overall_show_count INTEGER NOT NULL DEFAULT 0,
+            overall_click_count INTEGER NOT NULL DEFAULT 0,
+            overall_ctr REAL NOT NULL DEFAULT 0,
+            roi REAL NOT NULL DEFAULT 0,
+            settled_roi REAL NOT NULL DEFAULT 0,
+            pay_order_cost REAL NOT NULL DEFAULT 0,
+            settled_amount_rate REAL NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            refund_rate_1h REAL DEFAULT NULL,
+            PRIMARY KEY (customer_center_id, material_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_snapshot
+        ON material_current (snapshot_time, customer_center_id, material_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS material_daily (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            biz_date TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            material_key TEXT NOT NULL,
+            material_id TEXT NOT NULL,
+            material_name TEXT NOT NULL,
+            create_time TEXT NOT NULL DEFAULT '',
+            material_type TEXT NOT NULL,
+            video_id TEXT NOT NULL DEFAULT '',
+            cover_url TEXT NOT NULL DEFAULT '',
+            aweme_item_id TEXT NOT NULL DEFAULT '',
+            video_url TEXT NOT NULL DEFAULT '',
+            stat_cost REAL NOT NULL DEFAULT 0,
+            pay_amount REAL NOT NULL DEFAULT 0,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            plan_count INTEGER NOT NULL DEFAULT 0,
+            advertiser_count INTEGER NOT NULL DEFAULT 0,
+            plan_ids_json TEXT NOT NULL DEFAULT '[]',
+            advertiser_ids_json TEXT NOT NULL DEFAULT '[]',
+            is_original INTEGER NOT NULL DEFAULT 0,
+            top_plan_name TEXT NOT NULL DEFAULT '',
+            top_account_name TEXT NOT NULL DEFAULT '',
+            top_anchor_name TEXT NOT NULL DEFAULT '',
+            product_info_text TEXT NOT NULL DEFAULT '',
+            product_names_json TEXT NOT NULL DEFAULT '[]',
+            overall_show_count INTEGER NOT NULL DEFAULT 0,
+            overall_click_count INTEGER NOT NULL DEFAULT 0,
+            overall_ctr REAL NOT NULL DEFAULT 0,
+            roi REAL NOT NULL DEFAULT 0,
+            settled_roi REAL NOT NULL DEFAULT 0,
+            pay_order_cost REAL NOT NULL DEFAULT 0,
+            settled_amount_rate REAL NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            refund_rate_1h REAL DEFAULT NULL,
+            PRIMARY KEY (customer_center_id, biz_date, material_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_date
+        ON material_daily (biz_date, customer_center_id, material_key)
+        """
+    )
+    _material_metric_sort_partial_indexes(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS material_profile (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            material_key TEXT NOT NULL,
+            material_id TEXT NOT NULL DEFAULT '',
+            material_name TEXT NOT NULL DEFAULT '',
+            create_time TEXT NOT NULL DEFAULT '',
+            material_type TEXT NOT NULL DEFAULT '',
+            video_id TEXT NOT NULL DEFAULT '',
+            cover_url TEXT NOT NULL DEFAULT '',
+            aweme_item_id TEXT NOT NULL DEFAULT '',
+            video_url TEXT NOT NULL DEFAULT '',
+            is_original INTEGER NOT NULL DEFAULT 0,
+            top_plan_name TEXT NOT NULL DEFAULT '',
+            top_account_name TEXT NOT NULL DEFAULT '',
+            top_anchor_name TEXT NOT NULL DEFAULT '',
+            product_info_text TEXT NOT NULL DEFAULT '',
+            product_names_json TEXT NOT NULL DEFAULT '[]',
+            plan_ids_json TEXT NOT NULL DEFAULT '[]',
+            advertiser_ids_json TEXT NOT NULL DEFAULT '[]',
+            plan_count INTEGER NOT NULL DEFAULT 0,
+            advertiser_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (customer_center_id, material_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_profile_updated
+        ON material_profile (updated_at, customer_center_id, material_key)
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="base_schema", sql=BASE_SCHEMA_SQL),
     # Historical compatibility for older databases is consolidated in later Python migrations.
@@ -1399,13 +2158,219 @@ MIGRATIONS: tuple[Migration, ...] = (
         name="postgres_native_runtime_types",
         apply_fn=_postgres_native_runtime_types,
     ),
+    Migration(
+        version=13,
+        name="performance_daily_read_models",
+        sql="""
+        CREATE TABLE IF NOT EXISTS summary_daily (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            biz_date TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            account_count INTEGER NOT NULL,
+            active_account_count INTEGER NOT NULL,
+            plan_count INTEGER NOT NULL,
+            active_plan_count INTEGER NOT NULL,
+            stat_cost REAL NOT NULL,
+            pay_amount REAL NOT NULL,
+            order_count INTEGER NOT NULL,
+            roi REAL NOT NULL,
+            account_failures INTEGER NOT NULL,
+            plan_failures INTEGER NOT NULL,
+            PRIMARY KEY (customer_center_id, biz_date)
+        );
+        CREATE TABLE IF NOT EXISTS account_daily (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            biz_date TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            advertiser_id BIGINT NOT NULL,
+            advertiser_name TEXT NOT NULL,
+            stat_cost REAL NOT NULL,
+            roi REAL NOT NULL,
+            order_count INTEGER NOT NULL,
+            pay_amount REAL NOT NULL,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_roi REAL NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            pay_order_cost REAL NOT NULL DEFAULT 0,
+            settled_amount_rate REAL NOT NULL DEFAULT 0,
+            refund_rate_1h REAL NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            plan_count INTEGER NOT NULL DEFAULT 0,
+            ok INTEGER NOT NULL,
+            error TEXT,
+            PRIMARY KEY (customer_center_id, biz_date, advertiser_id)
+        );
+        CREATE TABLE IF NOT EXISTS plan_daily (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            biz_date TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            advertiser_id BIGINT NOT NULL,
+            advertiser_name TEXT NOT NULL,
+            ad_id BIGINT NOT NULL,
+            ad_name TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            product_name TEXT NOT NULL,
+            anchor_name TEXT NOT NULL,
+            marketing_goal TEXT NOT NULL,
+            plan_source TEXT NOT NULL DEFAULT 'UNI_PROMOTION',
+            plan_delivery_type TEXT NOT NULL DEFAULT 'GLOBAL',
+            status TEXT NOT NULL,
+            opt_status TEXT NOT NULL,
+            roi_goal REAL NOT NULL,
+            stat_cost REAL NOT NULL,
+            roi REAL NOT NULL,
+            order_count INTEGER NOT NULL,
+            pay_amount REAL NOT NULL,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_roi REAL NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            pay_order_cost REAL NOT NULL DEFAULT 0,
+            settled_amount_rate REAL NOT NULL DEFAULT 0,
+            refund_rate_1h REAL NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (customer_center_id, biz_date, ad_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_summary_daily_date_cc
+        ON summary_daily (biz_date, customer_center_id);
+        CREATE INDEX IF NOT EXISTS idx_account_daily_date_cc_adv
+        ON account_daily (biz_date, customer_center_id, advertiser_id);
+        CREATE INDEX IF NOT EXISTS idx_plan_daily_date_cc_plan
+        ON plan_daily (biz_date, customer_center_id, ad_id);
+        """,
+    ),
+    Migration(
+        version=14,
+        name="material_rollup_context_fields",
+        apply_fn=_material_rollup_context_schema_backfill,
+    ),
+    Migration(
+        version=15,
+        name="material_report_snapshots",
+        apply_fn=_material_report_snapshot_schema,
+    ),
+    Migration(
+        version=16,
+        name="material_report_snapshot_context_columns",
+        apply_fn=_material_report_snapshot_context_columns,
+    ),
+    Migration(
+        version=17,
+        name="account_snapshot_rollup_fields",
+        apply_fn=_account_snapshot_rollup_fields,
+    ),
+    Migration(
+        version=18,
+        name="plan_delivery_type_metadata",
+        apply_fn=_plan_delivery_type_metadata_schema,
+    ),
+    Migration(
+        version=19,
+        name="current_and_material_daily_tables",
+        apply_fn=_current_and_material_daily_schema,
+    ),
+    Migration(
+        version=20,
+        name="plan_refresh_states",
+        sql="""
+        CREATE TABLE IF NOT EXISTS plan_refresh_states (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            ad_id BIGINT NOT NULL,
+            advertiser_id BIGINT NOT NULL DEFAULT 0,
+            advertiser_name TEXT NOT NULL DEFAULT '',
+            ad_name TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            opt_status TEXT NOT NULL DEFAULT '',
+            last_hot_sync_at TEXT NOT NULL DEFAULT '',
+            last_cold_sync_at TEXT NOT NULL DEFAULT '',
+            last_material_sync_at TEXT NOT NULL DEFAULT '',
+            last_material_change_at TEXT NOT NULL DEFAULT '',
+            last_status_change_at TEXT NOT NULL DEFAULT '',
+            last_nonzero_perf_at TEXT NOT NULL DEFAULT '',
+            last_material_row_count INTEGER NOT NULL DEFAULT 0,
+            sync_priority TEXT NOT NULL DEFAULT 'cold',
+            updated_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (customer_center_id, ad_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_plan_refresh_states_cc_priority_sync
+        ON plan_refresh_states (customer_center_id, sync_priority, last_material_sync_at, ad_id);
+        CREATE INDEX IF NOT EXISTS idx_plan_refresh_states_cc_cold_sync
+        ON plan_refresh_states (customer_center_id, last_cold_sync_at, ad_id);
+        """,
+    ),
+    Migration(
+        version=21,
+        name="history_refresh_states",
+        sql="""
+        CREATE TABLE IF NOT EXISTS history_refresh_states (
+            customer_center_id TEXT NOT NULL DEFAULT '',
+            target_date TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            trigger TEXT NOT NULL DEFAULT '',
+            snapshot_time TEXT NOT NULL DEFAULT '',
+            affected_tables_json TEXT NOT NULL DEFAULT '[]',
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            last_attempt_at TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            last_success_at TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (customer_center_id, target_date, stage)
+        );
+        CREATE INDEX IF NOT EXISTS idx_history_refresh_states_stage_date
+        ON history_refresh_states (stage, target_date, customer_center_id);
+        CREATE INDEX IF NOT EXISTS idx_history_refresh_states_status_updated
+        ON history_refresh_states (status, updated_at);
+        """,
+    ),
+    Migration(
+        version=22,
+        name="plan_refresh_schedule_fields",
+        apply_fn=_plan_refresh_schedule_fields_schema,
+    ),
+    Migration(
+        version=23,
+        name="material_relation_edges",
+        apply_fn=_material_relation_edges_schema,
+    ),
+    Migration(
+        version=24,
+        name="material_snapshot_primary_key_with_advertiser",
+        apply_fn=_material_snapshot_primary_key_with_advertiser,
+    ),
+    Migration(
+        version=25,
+        name="plan_refresh_error_backoff_fields",
+        apply_fn=_plan_refresh_error_backoff_fields_schema,
+    ),
+    Migration(
+        version=26,
+        name="material_relation_read_model_tables",
+        apply_fn=_material_relation_read_model_schema,
+    ),
+    Migration(
+        version=27,
+        name="ensure_performance_daily_read_models",
+        apply_fn=_ensure_performance_daily_read_models,
+    ),
+    Migration(
+        version=28,
+        name="material_metric_sort_partial_indexes",
+        apply_fn=_material_metric_sort_partial_indexes,
+    ),
+    Migration(
+        version=29,
+        name="material_name_lookup_indexes",
+        apply_fn=_material_name_lookup_indexes,
+    ),
 )
 
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
 def ensure_migrations_table(conn: Any) -> None:
     conn.execute(
         """

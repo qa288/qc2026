@@ -1,9 +1,26 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+
+
+def _asset_version() -> str:
+    base_dir = Path(__file__).resolve().parent
+    candidates = [
+        base_dir / "static" / "app.js",
+        base_dir / "static" / "style.css",
+        base_dir / "templates" / "index.html",
+    ]
+    version = 0
+    for path in candidates:
+        try:
+            version = max(version, int(path.stat().st_mtime))
+        except OSError:
+            continue
+    return str(version or 1)
 
 
 def register_page_routes(app: Any, service: Any, app_name: str) -> None:
@@ -14,7 +31,7 @@ def register_page_routes(app: Any, service: Any, app_name: str) -> None:
         return service.templates.TemplateResponse(
             request=request,
             name="login.html",
-            context={"request": request, "app_name": app_name},
+            context={"request": request, "app_name": app_name, "asset_version": _asset_version()},
         )
 
     @app.post("/login")
@@ -48,6 +65,7 @@ def register_page_routes(app: Any, service: Any, app_name: str) -> None:
                 "request": request,
                 "app_name": app_name,
                 "customer_center_id": service.read_config()["customer_center_id"],
+                "asset_version": _asset_version(),
             },
         )
 

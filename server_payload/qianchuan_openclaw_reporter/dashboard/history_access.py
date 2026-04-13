@@ -8,6 +8,33 @@ class HistoryAccess:
     def __init__(self, current_customer_center_id: Callable[[], str]) -> None:
         self._current_customer_center_id = current_customer_center_id
 
+    @staticmethod
+    def _table_exists(conn: Any, table_name: str) -> bool:
+        table = str(table_name or "").strip()
+        if not table:
+            return False
+        if getattr(conn, "backend", "") == "postgres":
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = %s
+                LIMIT 1
+                """,
+                (table,),
+            ).fetchone()
+            return bool(row)
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            LIMIT 1
+            """,
+            (table,),
+        ).fetchone()
+        return bool(row)
+
     def latest_extended_sync_run(self, conn: Any) -> Any:
         customer_center_id = str(self._current_customer_center_id() or "").strip()
         return conn.execute(
@@ -58,14 +85,37 @@ class HistoryAccess:
 
     def summary_meta_for_day(self, conn: Any, target_day: datetime) -> dict[str, Any] | None:
         customer_center_id = str(self._current_customer_center_id() or "").strip()
+        day_key = target_day.strftime("%Y-%m-%d")
+        row = None
+        if self._table_exists(conn, "summary_daily"):
+            row = conn.execute(
+                """
+                SELECT snapshot_time, biz_date AS window_day
+                FROM summary_daily
+                WHERE customer_center_id = ?
+                  AND biz_date = ?
+                LIMIT 1
+                """,
+                (customer_center_id, day_key),
+            ).fetchone()
+        if row:
+            snapshot_time = str(row["snapshot_time"] or "").strip()
+            if snapshot_time:
+                return {
+                    "snapshot_time": snapshot_time,
+                    "window_start": f"{day_key} 00:00:00",
+                    "window_end": f"{day_key} 23:59:59",
+                }
+
+        if not self._table_exists(conn, "summary_current"):
+            return None
         row = conn.execute(
             """
             SELECT snapshot_time, window_start, window_end
-            FROM summary_snapshots
+            FROM summary_current
             WHERE customer_center_id = ?
               AND snapshot_time >= ?
               AND snapshot_time <= ?
-            ORDER BY snapshot_time DESC
             LIMIT 1
             """,
             (
