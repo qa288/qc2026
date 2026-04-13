@@ -3463,6 +3463,54 @@ function makeMaterialHeader(columns, sortState, summaryText, summaryMetrics, mod
   `;
 }
 
+const MATERIAL_TABLE_COLUMN_WIDTHS = Object.freeze({
+  material_name: 320,
+  product_info_text: 288,
+  preview: 132,
+  create_time: 148,
+  overall_ctr: 116,
+  stat_cost: 116,
+  total_pay_amount: 132,
+  settled_pay_amount: 132,
+  roi: 112,
+  pay_amount: 132,
+  order_count: 112,
+  advertiser_name: 172,
+  ad_name: 188,
+  top_account_name: 172,
+  top_plan_name: 188,
+  top_anchor_name: 160,
+  first_seen_at: 148,
+  last_seen_at: 148,
+  seen_count: 112,
+  active_day_count: 112,
+  plan_count: 112,
+  advertiser_count: 112,
+});
+
+function buildMaterialTableColgroup(columns) {
+  const widths = columns.map((column) => {
+    const configuredWidth = Number(MATERIAL_TABLE_COLUMN_WIDTHS[column?.key]);
+    return Number.isFinite(configuredWidth) && configuredWidth > 0 ? configuredWidth : 132;
+  });
+  const totalWidth = widths.reduce((sum, width) => sum + width, 0);
+  return {
+    totalWidth,
+    markup: `
+      <colgroup>
+        ${widths.map((width) => `<col style="width:${width}px">`).join("")}
+      </colgroup>
+    `,
+  };
+}
+
+function applyTableFixedWidth(tableElement, totalWidth) {
+  if (!tableElement) return;
+  const normalizedWidth = Math.max(Number(totalWidth) || 0, 960);
+  tableElement.style.width = `${normalizedWidth}px`;
+  tableElement.style.minWidth = `${normalizedWidth}px`;
+}
+
 function renderAccountTable(accounts) {
   const accountPayload = rangePayload(sectionFilter("account"));
   const query = accountSearch.value.trim().toLowerCase();
@@ -4396,6 +4444,8 @@ function renderMaterialTable(payload) {
           { key: "plan_count", label: "计划数", sortable: true },
           { key: "advertiser_count", label: "账户数", sortable: true },
         ]));
+  const tableLayout = buildMaterialTableColgroup(columns);
+  applyTableFixedWidth(materialTable, tableLayout.totalWidth);
   const totalRows = Number(pagination.total_count || enrichedRows.length || 0);
   const totalPages = Math.max(1, Number(pagination.total_pages || (totalRows > 0 ? Math.ceil(totalRows / MATERIAL_PAGE_SIZE) : 1)));
   const currentPage = Math.min(Math.max(Number(pagination.page || state.materialPage) || 1, 1), totalPages);
@@ -4416,6 +4466,7 @@ function renderMaterialTable(payload) {
   state.materialPage = currentPage;
   const supportsMaterialDetail = Boolean(materialDetail);
   materialTable.innerHTML = `
+    ${tableLayout.markup}
     ${makeMaterialHeader(columns, state.materialSort, summaryText, summaryMetrics, mode)}
     <tbody>
       ${pageRows.map((row) => {
@@ -4592,6 +4643,7 @@ function renderTeamMaterialTable(payload) {
   if (!teamMaterialTable) return;
   const operatorMode = isOperator();
   const normalizedPayload = Array.isArray(payload) ? { items: payload } : (payload || {});
+  teamMaterialTable.className = "data-table team-material-table";
   const pagination = normalizedPayload.pagination || {};
   const pageRows = (normalizedPayload.items || []).map((row) => enrichMaterialRow(row));
   if (
@@ -4627,6 +4679,8 @@ function renderTeamMaterialTable(payload) {
         { key: "top_plan_name", label: "归属计划", sortable: true },
         { key: "top_anchor_name", label: "达人", sortable: true },
       ];
+  const tableLayout = buildMaterialTableColgroup(columns);
+  applyTableFixedWidth(teamMaterialTable, tableLayout.totalWidth);
   const totalRows = Number(pagination.total_count || pageRows.length || 0);
   const totalPages = Math.max(1, Number(pagination.total_pages || (totalRows > 0 ? Math.ceil(totalRows / MATERIAL_PAGE_SIZE) : 1)));
   const currentPage = Math.min(Math.max(Number(pagination.page || state.teamMaterialPage) || 1, 1), totalPages);
@@ -4634,6 +4688,7 @@ function renderTeamMaterialTable(payload) {
   const pageEnd = Number(pagination.end_index || pageRows.length || 0);
   state.teamMaterialPage = currentPage;
   teamMaterialTable.innerHTML = `
+    ${tableLayout.markup}
     ${makeHeader(columns, state.teamMaterialSort, "team-material-sort")}
     <tbody>
       ${pageRows.map((row) => `

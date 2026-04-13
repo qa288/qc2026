@@ -1722,59 +1722,35 @@ body {
   background: rgba(248, 251, 255, 0.98);
 }
 
-.material-performance-table {
-  min-width: 1940px;
+.material-performance-table,
+.material-library-table,
+.material-relation-table,
+.team-material-table {
   table-layout: fixed;
 }
 
-.material-performance-table thead th:first-child {
-  min-width: 320px;
-  width: 320px;
-}
-
-.material-performance-table thead th:nth-child(2) {
-  min-width: 260px;
-  width: 260px;
-}
-
-.material-performance-table thead th:nth-child(3) {
-  min-width: 132px;
-  width: 132px;
-}
-
-.material-performance-table thead th:nth-child(4) {
-  min-width: 122px;
-  width: 122px;
-}
-
-.material-performance-table thead th:nth-child(n+5):nth-child(-n+11) {
-  min-width: 108px;
-  width: 108px;
-}
-
-.material-performance-table thead th:nth-child(12) {
-  min-width: 120px;
-  width: 120px;
-}
-
-.material-performance-table thead th:nth-child(13),
-.material-performance-table thead th:nth-child(14) {
-  min-width: 84px;
-  width: 84px;
-}
-
 .material-performance-table thead th:nth-child(2) .account-table-head-label,
-.material-performance-table thead th:first-child .account-table-head-label {
+.material-performance-table thead th:first-child .account-table-head-label,
+.material-library-table thead th:nth-child(2) .account-table-head-label,
+.material-library-table thead th:first-child .account-table-head-label,
+.material-relation-table thead th:nth-child(2) .account-table-head-label,
+.material-relation-table thead th:first-child .account-table-head-label {
   white-space: normal;
   line-height: 1.25;
 }
 
-.material-performance-table tbody td {
+.material-performance-table tbody td,
+.material-library-table tbody td,
+.material-relation-table tbody td,
+.team-material-table tbody td {
   vertical-align: top;
   padding: 16px 14px;
 }
 
-.material-performance-table tbody td:nth-child(1) .cell-primary {
+.material-performance-table tbody td:nth-child(1) .cell-primary,
+.material-library-table tbody td:nth-child(1) .cell-primary,
+.material-relation-table tbody td:nth-child(1) .cell-primary,
+.team-material-table tbody td:nth-child(1) .cell-primary {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -1783,11 +1759,17 @@ body {
   font-size: 15px;
 }
 
-.material-performance-table tbody td:nth-child(1) .cell-subline {
+.material-performance-table tbody td:nth-child(1) .cell-subline,
+.material-library-table tbody td:nth-child(1) .cell-subline,
+.material-relation-table tbody td:nth-child(1) .cell-subline,
+.team-material-table tbody td:nth-child(1) .cell-subline {
   gap: 5px 8px;
 }
 
-.material-performance-table tbody td:nth-child(2) .cell-secondary {
+.material-performance-table tbody td:nth-child(2) .cell-secondary,
+.material-library-table tbody td:nth-child(2) .cell-secondary,
+.material-relation-table tbody td:nth-child(2) .cell-secondary,
+.team-material-table tbody td:nth-child(2) .cell-secondary {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 5;
@@ -1799,38 +1781,58 @@ body {
   color: #42556d;
 }
 
-.material-performance-table tbody td:nth-child(3) {
+.material-performance-table tbody td:nth-child(3),
+.material-library-table tbody td:nth-child(3),
+.material-relation-table tbody td:nth-child(3),
+.team-material-table tbody td:nth-child(3) {
   text-align: center;
 }
 
-.material-performance-table tbody td:nth-child(3) .material-preview-trigger {
+.material-performance-table tbody td:nth-child(3) .material-preview-trigger,
+.material-library-table tbody td:nth-child(3) .material-preview-trigger,
+.material-relation-table tbody td:nth-child(3) .material-preview-trigger,
+.team-material-table tbody td:nth-child(3) .material-preview-trigger {
   margin: 0 auto;
   width: 124px;
   height: 72px;
   border-radius: 16px;
 }
 
-.material-performance-table tbody td:nth-child(4) {
+.material-performance-table tbody td:nth-child(4),
+.material-library-table tbody td:nth-child(4),
+.material-relation-table tbody td:nth-child(4),
+.team-material-table tbody td:nth-child(4) {
   white-space: nowrap;
   color: #55677c;
 }
 
-.material-performance-table tbody td:nth-child(n+5):nth-child(-n+11) {
+.material-performance-table tbody td:nth-child(n+5):nth-child(-n+11),
+.material-relation-table tbody td:nth-child(n+5):nth-child(-n+11),
+.team-material-table tbody td:nth-child(5),
+.team-material-table tbody td:nth-child(6),
+.material-library-table tbody td:nth-child(6),
+.material-library-table tbody td:nth-child(7) {
   text-align: right;
   white-space: nowrap;
 }
 
-.material-performance-table tbody td:nth-child(12) {
+.material-performance-table tbody td:nth-child(12),
+.material-library-table tbody td:nth-child(5),
+.material-relation-table tbody td:nth-child(n+12):nth-child(-n+16),
+.team-material-table tbody td:nth-child(n+7) {
   color: #31465e;
 }
 
 .material-performance-table tbody td:nth-child(13),
-.material-performance-table tbody td:nth-child(14) {
-  text-align: center;
+.material-performance-table tbody td:nth-child(14),
+.material-relation-table tbody td:nth-child(15),
+.material-relation-table tbody td:nth-child(16) {
+  text-align: right;
   white-space: nowrap;
 }
 
-.material-performance-table .relation-trigger {
+.material-performance-table .relation-trigger,
+.material-library-table .relation-trigger {
   font-size: 15px;
   font-weight: 800;
 }
