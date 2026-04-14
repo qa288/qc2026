@@ -1729,6 +1729,53 @@ body {
   table-layout: fixed;
 }
 
+.material-performance-table thead th:first-child,
+.material-library-table thead th:first-child,
+.material-relation-table thead th:first-child,
+.team-material-table thead th:first-child {
+  min-width: 0;
+}
+
+.material-performance-table thead th.is-numeric,
+.material-library-table thead th.is-numeric,
+.material-relation-table thead th.is-numeric,
+.team-material-table thead th.is-numeric {
+  text-align: right;
+}
+
+.material-performance-table thead th.is-center,
+.material-library-table thead th.is-center,
+.material-relation-table thead th.is-center,
+.team-material-table thead th.is-center {
+  text-align: center;
+}
+
+.material-performance-table thead th.is-numeric .account-table-head,
+.material-library-table thead th.is-numeric .account-table-head,
+.material-relation-table thead th.is-numeric .account-table-head {
+  justify-items: end;
+  text-align: right;
+}
+
+.material-performance-table thead th.is-center .account-table-head,
+.material-library-table thead th.is-center .account-table-head,
+.material-relation-table thead th.is-center .account-table-head {
+  justify-items: center;
+  text-align: center;
+}
+
+.material-performance-table thead th.is-numeric .account-table-head-main,
+.material-library-table thead th.is-numeric .account-table-head-main,
+.material-relation-table thead th.is-numeric .account-table-head-main {
+  justify-content: flex-end;
+}
+
+.material-performance-table thead th.is-center .account-table-head-main,
+.material-library-table thead th.is-center .account-table-head-main,
+.material-relation-table thead th.is-center .account-table-head-main {
+  justify-content: center;
+}
+
 .material-performance-table thead th:nth-child(2) .account-table-head-label,
 .material-performance-table thead th:first-child .account-table-head-label,
 .material-library-table thead th:nth-child(2) .account-table-head-label,
@@ -1814,6 +1861,11 @@ body {
 .material-library-table tbody td:nth-child(7) {
   text-align: right;
   white-space: nowrap;
+}
+
+.material-performance-table.is-operator-table tbody td:nth-child(7) {
+  text-align: left;
+  white-space: normal;
 }
 
 .material-performance-table tbody td:nth-child(12),

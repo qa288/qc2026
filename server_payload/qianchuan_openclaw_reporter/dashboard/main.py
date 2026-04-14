@@ -2876,11 +2876,15 @@ class DashboardService:
         )
         return items
 
-    def ocean_engine_runtime_config(self) -> dict[str, Any]:
+    def ocean_engine_runtime_config(
+        self,
+        token_payload: dict[str, Any] | None = None,
+        bound_customer_centers: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         base_config = self._base_runtime_config()
         override_row = self._runtime_config_override_row() or {}
         effective_config = self._merge_runtime_config_override(base_config, override_row)
-        token_payload = self.latest_token_payload(masked=True)
+        effective_token_payload = token_payload or self.latest_token_payload(masked=True)
         override_customer_center_id = str(override_row.get("customer_center_id") or "").strip()
         override_refresh_token = str(override_row.get("refresh_token") or "").strip()
         return {
@@ -2898,9 +2902,11 @@ class DashboardService:
             ),
             "material_sync_warm_window_hours": int(effective_config.get("material_sync_warm_window_hours") or 0),
             "material_sync_cold_coverage_hours": int(effective_config.get("material_sync_cold_coverage_hours") or 0),
-            "token_updated_at": int(token_payload.get("updated_at") or 0),
-            "token_source": str(token_payload.get("source") or ""),
-            "bound_customer_centers": self.list_bound_customer_centers(),
+            "token_updated_at": int(effective_token_payload.get("updated_at") or 0),
+            "token_source": str(effective_token_payload.get("source") or ""),
+            "bound_customer_centers": list(
+                bound_customer_centers if bound_customer_centers is not None else self.list_bound_customer_centers()
+            ),
         }
 
     @staticmethod
@@ -3384,6 +3390,24 @@ class DashboardService:
     def alert_events(self, limit: int = 80) -> list[dict[str, Any]]:
         return self.alert_access.alert_events(limit)
 
+    def admin_runtime_payload(self) -> dict[str, Any]:
+        token_payload = self.latest_token_payload(masked=True)
+        bound_customer_centers = self.list_bound_customer_centers()
+        return {
+            "tokenInfo": token_payload,
+            "oceanEngineConfig": self.ocean_engine_runtime_config(
+                token_payload=token_payload,
+                bound_customer_centers=bound_customer_centers,
+            ),
+        }
+
+    def admin_alerts_payload(self, limit: int = 80) -> dict[str, Any]:
+        return {
+            "notificationSettings": self.get_notification_settings(),
+            "alertRules": self.list_alert_rules(),
+            "alertEvents": self.alert_events(limit=limit),
+        }
+
     def latest_extended_sync(self, display_scope: str = DISPLAY_SCOPE_CURRENT) -> dict[str, Any] | None:
         all_customer_centers = self._display_scope_uses_all_customer_centers(display_scope)
         payload = (
@@ -3411,6 +3435,41 @@ class DashboardService:
         elif material_today_status.get("today_hot_pending"):
             next_payload["status"] = "pending"
         return next_payload
+
+    def dashboard_bootstrap_payload(self, display_scope: str = DISPLAY_SCOPE_CURRENT) -> dict[str, Any]:
+        display_scope_key = str(display_scope or DISPLAY_SCOPE_CURRENT).strip().lower()
+        all_customer_centers = self._display_scope_uses_all_customer_centers(display_scope_key)
+        snapshot_meta: dict[str, Any] = {}
+        with self.db() as conn:
+            if not db_table_exists(conn, "summary_current"):
+                snapshot_meta = {}
+            elif all_customer_centers:
+                row = conn.execute(
+                    """
+                    SELECT
+                        MAX(snapshot_time) AS snapshot_time,
+                        MIN(window_start) AS window_start,
+                        MAX(window_end) AS window_end,
+                        COUNT(*) AS customer_center_count
+                    FROM summary_current
+                    WHERE COALESCE(customer_center_id, '') <> ''
+                    """
+                ).fetchone()
+                snapshot_meta = dict(row) if row else {}
+            else:
+                snapshot_meta = dict(self._latest_summary_current_meta(conn) or {})
+
+        snapshot_time = str(snapshot_meta.get("snapshot_time") or "").strip()
+        return {
+            "snapshot_time": snapshot_time,
+            "window_start": str(snapshot_meta.get("window_start") or "").strip(),
+            "window_end": str(snapshot_meta.get("window_end") or "").strip(),
+            "summary": {},
+            "snapshot_count": 0,
+            "customer_center_count": int(
+                snapshot_meta.get("customer_center_count") or (1 if snapshot_time and not all_customer_centers else 0)
+            ),
+        }
 
     def plan_assets(
         self,
@@ -5217,6 +5276,43 @@ class DashboardService:
             f"{build_material_cache_namespace(MATERIAL_VIEW_PERFORMANCE, scope=MATERIAL_CACHE_SCOPE_HISTORY)}:page",
         ]
 
+    def _refresh_material_ranking_indexes_after_hot_sync(self) -> None:
+        try:
+            tz_name = str(self.read_config().get("timezone") or TIMEZONE)
+            today = datetime.now(ZoneInfo(tz_name)).date()
+            today_key = today.strftime("%Y-%m-%d")
+            with self.db() as conn:
+                conn.execute(
+                    """
+                    DELETE FROM material_ranking_index
+                    WHERE range_key = 'day'
+                      AND start_date = ?
+                      AND end_date = ?
+                    """,
+                    (today_key, today_key),
+                )
+                conn.execute(
+                    """
+                    DELETE FROM material_ranking_summary
+                    WHERE range_key = 'day'
+                      AND start_date = ?
+                      AND end_date = ?
+                    """,
+                    (today_key, today_key),
+                )
+            for all_customer_centers in (False, True):
+                self.refresh_material_ranking_index_for_window(
+                    start_day=today_key,
+                    end_day=today_key,
+                    range_key="day",
+                    all_customer_centers=all_customer_centers,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._emit_material_sync_observation(
+                "material_ranking_index_refresh_error",
+                error=str(exc),
+            )
+
     def _prewarm_material_performance_page_caches(self, *, force_refresh: bool = False) -> None:
         for display_scope, range_key in self._material_performance_page_prewarm_targets():
             try:
@@ -5250,6 +5346,7 @@ class DashboardService:
         namespaces = self._material_performance_page_cache_namespaces()
         self._prune_payload_refresh_markers([f"{namespace}:" for namespace in namespaces])
         self._invalidate_cache_namespaces(*namespaces)
+        self._refresh_material_ranking_indexes_after_hot_sync()
         self._prewarm_material_performance_page_caches(force_refresh=True)
         self._emit_material_sync_observation(
             "material_page_prewarm_refreshed",
@@ -6649,6 +6746,49 @@ class DashboardService:
         return max(int(settings.material_daily_rolling_batch_days or 0), 0)
 
     @staticmethod
+    def _nightly_history_force_performance_days() -> int:
+        return max(int(settings.nightly_history_force_performance_days or 0), 0)
+
+    def _nightly_forced_performance_targets(
+        self,
+        *,
+        tz_name: str,
+        customer_center_ids: list[str] | None = None,
+        days: int = 0,
+    ) -> list[dict[str, str]]:
+        forced_days = max(int(days or 0), 0)
+        if forced_days <= 0:
+            return []
+        tz = ZoneInfo(str(tz_name or TIMEZONE).strip() or TIMEZONE)
+        today = datetime.now(tz).date()
+        target_dates = [
+            (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+            for offset in range(forced_days, 0, -1)
+        ]
+        normalized_customer_center_ids = [
+            customer_center_id
+            for customer_center_id in dict.fromkeys(
+                str(item or "").strip()
+                for item in (
+                    customer_center_ids
+                    or self.bound_customer_center_ids()
+                    or [self._current_customer_center_id()]
+                )
+            )
+            if customer_center_id
+        ]
+        return self._normalize_history_refresh_targets(
+            [
+                {
+                    "customer_center_id": customer_center_id,
+                    "target_date": target_date,
+                }
+                for customer_center_id in normalized_customer_center_ids
+                for target_date in target_dates
+            ]
+        )
+
+    @staticmethod
     def _history_refresh_success_keys_for_stage(
         conn: Any,
         targets: list[dict[str, Any]],
@@ -7390,9 +7530,288 @@ class DashboardService:
             )
         return items
 
+    def _material_relation_plan_detail_lookup(
+        self,
+        *,
+        material_key: str = "",
+        material_type: str = "",
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
+        plan_ids: list[int] | None = None,
+        advertiser_ids: list[int] | None = None,
+        allowed_advertiser_ids: set[int] | None = None,
+        display_scope: str = DISPLAY_SCOPE_CURRENT,
+    ) -> list[dict[str, Any]]:
+        normalized_material_key = str(material_key or "").strip()
+        normalized_plan_ids = sorted({int(item) for item in (plan_ids or []) if int(item or 0) > 0})
+        normalized_advertiser_ids = sorted({int(item) for item in (advertiser_ids or []) if int(item or 0) > 0})
+        if not normalized_material_key:
+            return self._material_relation_plan_lookup(
+                normalized_plan_ids,
+                allowed_advertiser_ids=allowed_advertiser_ids,
+                display_scope=display_scope,
+            )
+        normalized_material_type = str(material_type or "").strip().upper()
+        config = self.read_config()
+        tz_name = str(config.get("timezone") or TIMEZONE)
+        normalized_range = str(range_key or "day").strip().lower() or "day"
+        target_snapshot = ""
+        tz = ZoneInfo(tz_name)
+        if target_snapshot:
+            snapshot_day = _parse_date_input(target_snapshot[:10], "snapshot_time")
+            start_dt = datetime(snapshot_day.year, snapshot_day.month, snapshot_day.day, 0, 0, 0, tzinfo=tz)
+            end_dt = datetime(snapshot_day.year, snapshot_day.month, snapshot_day.day, 23, 59, 59, tzinfo=tz)
+        else:
+            if normalized_range not in MATERIAL_RANGES:
+                raise ValueError("range must be one of day/yesterday/week/month/all/custom")
+            if normalized_range == "custom":
+                start_dt, end_dt, _ = build_material_custom_window(start_date, end_date, tz_name)
+            elif normalized_range == "all":
+                start_dt, end_dt, _ = build_all_material_window(tz_name)
+            else:
+                start_dt, end_dt, _ = build_performance_window(normalized_range, tz_name)
+
+        all_customer_centers = self._display_scope_uses_all_customer_centers(display_scope)
+        where_prefix = "COALESCE(customer_center_id, '') <> ''" if all_customer_centers else "customer_center_id = ?"
+        params_prefix: list[Any] = [] if all_customer_centers else [self._current_customer_center_id()]
+        allowed = None if allowed_advertiser_ids is None else sorted(int(item) for item in allowed_advertiser_ids if int(item or 0) > 0)
+        if allowed_advertiser_ids is not None and not allowed:
+            return []
+
+        relation_filters = ["material_key = ?"]
+        relation_params: list[Any] = [normalized_material_key]
+        if normalized_material_type:
+            relation_filters.append("material_type = ?")
+            relation_params.append(normalized_material_type)
+        if normalized_plan_ids:
+            relation_filters.append(f"ad_id IN ({','.join('?' for _ in normalized_plan_ids)})")
+            relation_params.extend(normalized_plan_ids)
+        if normalized_advertiser_ids:
+            relation_filters.append(f"advertiser_id IN ({','.join('?' for _ in normalized_advertiser_ids)})")
+            relation_params.extend(normalized_advertiser_ids)
+        if allowed:
+            relation_filters.append(f"advertiser_id IN ({','.join('?' for _ in allowed)})")
+            relation_params.extend(allowed)
+        relation_where = " AND ".join(relation_filters)
+
+        raw_rows: list[dict[str, Any]] = []
+        with self.db() as conn:
+            if target_snapshot:
+                current_rows = conn.execute(
+                    f"""
+                    SELECT
+                        snapshot_time,
+                        advertiser_id,
+                        advertiser_name,
+                        ad_id,
+                        ad_name,
+                        stat_cost,
+                        pay_amount,
+                        total_pay_amount,
+                        settled_pay_amount,
+                        order_count,
+                        settled_order_count
+                    FROM material_relation_current
+                    WHERE {where_prefix}
+                      AND snapshot_time = ?
+                      AND {relation_where}
+                    ORDER BY snapshot_time DESC, ad_id ASC
+                    """,
+                    [*params_prefix, target_snapshot, *relation_params],
+                ).fetchall()
+                raw_rows.extend(dict(row) for row in current_rows)
+                if not raw_rows:
+                    daily_rows = conn.execute(
+                        f"""
+                        SELECT
+                            snapshot_time,
+                            advertiser_id,
+                            advertiser_name,
+                            ad_id,
+                            ad_name,
+                            stat_cost,
+                            pay_amount,
+                            total_pay_amount,
+                            settled_pay_amount,
+                            order_count,
+                            settled_order_count
+                        FROM material_relation_daily
+                        WHERE {where_prefix}
+                          AND snapshot_time = ?
+                          AND {self._material_history_stable_day_sql(
+                              day_expr='substr(snapshot_time, 1, 10)',
+                              customer_center_expr='customer_center_id',
+                          )}
+                          AND {relation_where}
+                        ORDER BY snapshot_time DESC, ad_id ASC
+                        """,
+                        [*params_prefix, target_snapshot, *relation_params],
+                    ).fetchall()
+                    raw_rows.extend(dict(row) for row in daily_rows)
+            else:
+                today_key = datetime.now(tz).strftime("%Y-%m-%d")
+                start_day = start_dt.astimezone(tz).strftime("%Y-%m-%d")
+                end_day = end_dt.astimezone(tz).strftime("%Y-%m-%d")
+                yesterday_key = (datetime.strptime(today_key, "%Y-%m-%d").date() - timedelta(days=1)).strftime("%Y-%m-%d")
+                daily_end_day = min(end_day, yesterday_key)
+                if start_day <= daily_end_day:
+                    daily_rows = conn.execute(
+                        f"""
+                        SELECT
+                            snapshot_time,
+                            advertiser_id,
+                            advertiser_name,
+                            ad_id,
+                            ad_name,
+                            stat_cost,
+                            pay_amount,
+                            total_pay_amount,
+                            settled_pay_amount,
+                            order_count,
+                            settled_order_count
+                        FROM material_relation_daily
+                        WHERE {where_prefix}
+                          AND {self._material_history_stable_day_sql(
+                              day_expr='biz_date',
+                              customer_center_expr='customer_center_id',
+                          )}
+                          AND biz_date >= ?
+                          AND biz_date <= ?
+                          AND {relation_where}
+                        ORDER BY biz_date DESC, snapshot_time DESC, ad_id ASC
+                        """,
+                        [*params_prefix, start_day, daily_end_day, *relation_params],
+                    ).fetchall()
+                    raw_rows.extend(dict(row) for row in daily_rows)
+                if end_day >= today_key:
+                    current_rows = conn.execute(
+                        f"""
+                        SELECT
+                            snapshot_time,
+                            advertiser_id,
+                            advertiser_name,
+                            ad_id,
+                            ad_name,
+                            stat_cost,
+                            pay_amount,
+                            total_pay_amount,
+                            settled_pay_amount,
+                            order_count,
+                            settled_order_count
+                        FROM material_relation_current
+                        WHERE {where_prefix}
+                          AND {relation_where}
+                        ORDER BY snapshot_time DESC, ad_id ASC
+                        """,
+                        [*params_prefix, *relation_params],
+                    ).fetchall()
+                    raw_rows.extend(dict(row) for row in current_rows)
+
+        rows_by_ad_id: dict[int, dict[str, Any]] = {}
+        for raw_row in raw_rows:
+            row = dict(raw_row or {})
+            ad_id = int(row.get("ad_id", 0) or 0)
+            if ad_id <= 0:
+                continue
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            snapshot_value = str(row.get("snapshot_time") or "").strip()
+            bucket = rows_by_ad_id.setdefault(
+                ad_id,
+                {
+                    "ad_id": ad_id,
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": "",
+                    "ad_name": "",
+                    "snapshot_time": snapshot_value,
+                    "stat_cost": 0.0,
+                    "pay_amount": 0.0,
+                    "total_pay_amount": 0.0,
+                    "settled_pay_amount": 0.0,
+                    "order_count": 0,
+                    "settled_order_count": 0,
+                    "_has_metrics": True,
+                },
+            )
+            if advertiser_id > 0 and int(bucket.get("advertiser_id", 0) or 0) <= 0:
+                bucket["advertiser_id"] = advertiser_id
+            if snapshot_value and snapshot_value >= str(bucket.get("snapshot_time") or ""):
+                bucket["snapshot_time"] = snapshot_value
+                if str(row.get("advertiser_name") or "").strip():
+                    bucket["advertiser_name"] = str(row.get("advertiser_name") or "").strip()
+                if str(row.get("ad_name") or "").strip():
+                    bucket["ad_name"] = str(row.get("ad_name") or "").strip()
+            if not str(bucket.get("advertiser_name") or "").strip() and str(row.get("advertiser_name") or "").strip():
+                bucket["advertiser_name"] = str(row.get("advertiser_name") or "").strip()
+            if not str(bucket.get("ad_name") or "").strip() and str(row.get("ad_name") or "").strip():
+                bucket["ad_name"] = str(row.get("ad_name") or "").strip()
+            stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+            total_pay_amount = round(float(row.get("total_pay_amount", 0.0) or 0.0), 2)
+            if total_pay_amount <= 0 and pay_amount > 0:
+                total_pay_amount = pay_amount
+            settled_pay_amount = round(float(row.get("settled_pay_amount", 0.0) or 0.0), 2)
+            order_count = int(float(row.get("order_count", 0) or 0))
+            settled_order_count = int(float(row.get("settled_order_count", 0) or 0))
+            bucket["stat_cost"] = round(float(bucket.get("stat_cost", 0.0) or 0.0) + stat_cost, 2)
+            bucket["pay_amount"] = round(float(bucket.get("pay_amount", 0.0) or 0.0) + pay_amount, 2)
+            bucket["total_pay_amount"] = round(float(bucket.get("total_pay_amount", 0.0) or 0.0) + total_pay_amount, 2)
+            bucket["settled_pay_amount"] = round(float(bucket.get("settled_pay_amount", 0.0) or 0.0) + settled_pay_amount, 2)
+            bucket["order_count"] = int(bucket.get("order_count", 0) or 0) + order_count
+            bucket["settled_order_count"] = int(bucket.get("settled_order_count", 0) or 0) + settled_order_count
+
+        lookup_plan_ids = normalized_plan_ids or sorted(rows_by_ad_id)
+        fallback_rows = self._material_relation_plan_lookup(
+            lookup_plan_ids,
+            allowed_advertiser_ids=allowed_advertiser_ids,
+            display_scope=display_scope,
+        )
+        fallback_by_ad_id = {
+            int(item.get("ad_id", 0) or 0): dict(item)
+            for item in fallback_rows
+            if int(item.get("ad_id", 0) or 0) > 0
+        }
+        target_plan_ids = normalized_plan_ids or sorted(rows_by_ad_id)
+        items: list[dict[str, Any]] = []
+        for ad_id in target_plan_ids:
+            row = dict(rows_by_ad_id.get(ad_id) or {})
+            fallback = dict(fallback_by_ad_id.get(ad_id) or {})
+            has_metrics = bool(row.get("_has_metrics"))
+            stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2) if has_metrics else None
+            pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2) if has_metrics else None
+            total_pay_amount = round(float(row.get("total_pay_amount", 0.0) or 0.0), 2) if has_metrics else None
+            settled_pay_amount = round(float(row.get("settled_pay_amount", 0.0) or 0.0), 2) if has_metrics else None
+            order_count = int(row.get("order_count", 0) or 0) if has_metrics else None
+            settled_order_count = int(row.get("settled_order_count", 0) or 0) if has_metrics else None
+            roi = round(pay_amount / stat_cost, 2) if has_metrics and float(stat_cost or 0.0) > 0 else (0.0 if has_metrics else None)
+            items.append(
+                {
+                    "ad_id": ad_id,
+                    "advertiser_id": int(row.get("advertiser_id", 0) or fallback.get("advertiser_id", 0) or 0),
+                    "advertiser_name": str(row.get("advertiser_name") or fallback.get("advertiser_name") or "").strip(),
+                    "ad_name": str(row.get("ad_name") or fallback.get("ad_name") or "").strip(),
+                    "stat_cost": stat_cost,
+                    "pay_amount": pay_amount,
+                    "total_pay_amount": total_pay_amount,
+                    "settled_pay_amount": settled_pay_amount,
+                    "order_count": order_count,
+                    "settled_order_count": settled_order_count,
+                    "roi": roi,
+                    "snapshot_time": str(row.get("snapshot_time") or "").strip(),
+                }
+            )
+        return items
+
     def material_relation_detail_lookup(
         self,
         *,
+        material_key: str = "",
+        material_type: str = "",
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        snapshot_time: str = "",
         plan_ids: list[int] | None = None,
         advertiser_ids: list[int] | None = None,
         allowed_advertiser_ids: set[int] | None = None,
@@ -7400,8 +7819,15 @@ class DashboardService:
     ) -> dict[str, Any]:
         normalized_plan_ids = sorted({int(item) for item in (plan_ids or []) if int(item or 0) > 0})
         normalized_advertiser_ids = sorted({int(item) for item in (advertiser_ids or []) if int(item or 0) > 0})
-        plan_items = self._material_relation_plan_lookup(
-            normalized_plan_ids,
+        plan_items = self._material_relation_plan_detail_lookup(
+            material_key=material_key,
+            material_type=material_type,
+            range_key=range_key,
+            start_date=start_date,
+            end_date=end_date,
+            snapshot_time=snapshot_time,
+            plan_ids=normalized_plan_ids,
+            advertiser_ids=normalized_advertiser_ids,
             allowed_advertiser_ids=allowed_advertiser_ids,
             display_scope=display_scope,
         )
@@ -7413,12 +7839,6 @@ class DashboardService:
                     if int(item.get("advertiser_id", 0) or 0) > 0
                 }
             )
-        catalog = self.latest_account_catalog(allowed_advertiser_ids, display_scope)
-        catalog_by_id = {
-            int(item.get("advertiser_id", 0) or 0): str(item.get("advertiser_name") or "").strip()
-            for item in catalog
-            if int(item.get("advertiser_id", 0) or 0) > 0
-        }
         account_metrics: dict[int, dict[str, Any]] = {}
         for item in plan_items:
             advertiser_id = int(item.get("advertiser_id", 0) or 0)
@@ -7455,6 +7875,18 @@ class DashboardService:
                 group["top_plan_name"] = str(item.get("ad_name") or "").strip()
                 group["top_plan_orders"] = order_count
                 group["top_plan_pay_amount"] = pay_amount
+        catalog_by_id: dict[int, str] = {}
+        if any(
+            advertiser_id > 0
+            and not str((account_metrics.get(advertiser_id) or {}).get("advertiser_name") or "").strip()
+            for advertiser_id in normalized_advertiser_ids
+        ):
+            catalog = self.latest_account_catalog(allowed_advertiser_ids, display_scope)
+            catalog_by_id = {
+                int(item.get("advertiser_id", 0) or 0): str(item.get("advertiser_name") or "").strip()
+                for item in catalog
+                if int(item.get("advertiser_id", 0) or 0) > 0
+            }
         account_items: list[dict[str, Any]] = []
         for advertiser_id in normalized_advertiser_ids:
             metrics = dict(account_metrics.get(advertiser_id) or {})
@@ -11306,6 +11738,74 @@ class DashboardService:
         for row, units in zip(rows, allocated):
             row[field] = int(units)
 
+    @staticmethod
+    def _sum_money_metric(rows: list[dict[str, Any]], field: str, *, material_type: str | None = None) -> float:
+        total = 0.0
+        target_type = str(material_type or "").strip().upper()
+        for row in rows:
+            row_type = str(row.get("material_type") or "").strip().upper()
+            if target_type and row_type != target_type:
+                continue
+            try:
+                total += float(row.get(field, 0.0) or 0.0)
+            except Exception:
+                continue
+        return round(total, 2)
+
+    @staticmethod
+    def _sum_integer_metric(rows: list[dict[str, Any]], field: str, *, material_type: str | None = None) -> int:
+        total = 0
+        target_type = str(material_type or "").strip().upper()
+        for row in rows:
+            row_type = str(row.get("material_type") or "").strip().upper()
+            if target_type and row_type != target_type:
+                continue
+            try:
+                total += int(round(float(row.get(field, 0) or 0)))
+            except Exception:
+                continue
+        return total
+
+    @staticmethod
+    def _money_metric_matches_target(rows: list[dict[str, Any]], field: str, target_value: Any) -> bool:
+        try:
+            target = round(float(target_value or 0.0), 2)
+        except Exception:
+            return False
+        return abs(DashboardService._sum_money_metric(rows, field) - target) <= 0.01
+
+    @staticmethod
+    def _integer_metric_matches_target(rows: list[dict[str, Any]], field: str, target_value: Any) -> bool:
+        try:
+            target = int(round(float(target_value or 0)))
+        except Exception:
+            return False
+        return DashboardService._sum_integer_metric(rows, field) == target
+
+    def _prefer_non_title_material_metrics(
+        self,
+        rows: list[dict[str, Any]],
+        target: dict[str, Any],
+    ) -> None:
+        title_rows = [row for row in rows if str(row.get("material_type") or "").strip().upper() == "TITLE"]
+        non_title_rows = [row for row in rows if str(row.get("material_type") or "").strip().upper() != "TITLE"]
+        if not title_rows or not non_title_rows:
+            return
+        target_stat_cost = round(float(target.get("stat_cost", 0.0) or 0.0), 2)
+        if target_stat_cost <= 0:
+            return
+        title_stat_cost = self._sum_money_metric(title_rows, "stat_cost")
+        non_title_stat_cost = self._sum_money_metric(non_title_rows, "stat_cost")
+        if title_stat_cost <= 0 or abs(non_title_stat_cost - target_stat_cost) > 0.01:
+            return
+        for row in title_rows:
+            row["stat_cost"] = 0.0
+            row["pay_amount"] = 0.0
+            row["total_pay_amount"] = 0.0
+            row["settled_pay_amount"] = 0.0
+            row["order_count"] = 0
+            row["settled_order_count"] = 0
+
     def _normalize_material_source_rows_to_plan_metrics(
         self,
         conn: Any,
@@ -11379,14 +11879,18 @@ class DashboardService:
             target = targets.get(key)
             if not target:
                 continue
+            self._prefer_non_title_material_metrics(plan_rows, target)
             for field in ("stat_cost", "pay_amount", "settled_pay_amount"):
-                self._distribute_money_metric_to_target(plan_rows, field, target.get(field))
+                if not self._money_metric_matches_target(plan_rows, field, target.get(field)):
+                    self._distribute_money_metric_to_target(plan_rows, field, target.get(field))
             total_pay_target = float(target.get("total_pay_amount", 0.0) or 0.0)
             if total_pay_target <= 0 and float(target.get("pay_amount", 0.0) or 0.0) > 0:
                 total_pay_target = float(target.get("pay_amount", 0.0) or 0.0)
-            self._distribute_money_metric_to_target(plan_rows, "total_pay_amount", total_pay_target)
+            if not self._money_metric_matches_target(plan_rows, "total_pay_amount", total_pay_target):
+                self._distribute_money_metric_to_target(plan_rows, "total_pay_amount", total_pay_target)
             for field in ("order_count", "settled_order_count"):
-                self._distribute_integer_metric_to_target(plan_rows, field, target.get(field))
+                if not self._integer_metric_matches_target(plan_rows, field, target.get(field)):
+                    self._distribute_integer_metric_to_target(plan_rows, field, target.get(field))
         return normalized_rows
 
     @staticmethod
@@ -12538,6 +13042,506 @@ class DashboardService:
             """,
             [(row[0], customer_center_id, *row[1:]) for row in normalized_rows],
         )
+
+    def _replace_material_snapshot_plan_subset(
+        self,
+        conn: Any,
+        customer_center_id: str,
+        biz_date: str,
+        ad_ids: set[int] | list[int] | tuple[int, ...],
+        material_rows: list[tuple[Any, ...]] | list[list[Any]],
+    ) -> int:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        day_key = str(biz_date or "").strip()
+        normalized_ad_ids = sorted({int(item or 0) for item in ad_ids if int(item or 0) > 0})
+        if not normalized_customer_center_id or not day_key or not normalized_ad_ids:
+            return 0
+        for start in range(0, len(normalized_ad_ids), 400):
+            chunk = normalized_ad_ids[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(
+                f"""
+                DELETE FROM material_snapshots
+                WHERE customer_center_id = ?
+                  AND substr(snapshot_time, 1, 10) = ?
+                  AND ad_id IN ({placeholders})
+                """,
+                [normalized_customer_center_id, day_key, *chunk],
+            )
+        normalized_rows = self._dedupe_material_snapshot_rows_for_insert(material_rows)
+        if not normalized_rows:
+            return 0
+        conn.executemany(
+            """
+            INSERT INTO material_snapshots (
+                snapshot_time, customer_center_id, window_start, window_end, advertiser_id, advertiser_name,
+                ad_id, ad_name, material_type, material_key, material_id, material_name, create_time,
+                video_id, cover_url, aweme_item_id, video_url, product_show_count,
+                product_click_count, stat_cost, pay_amount, total_pay_amount, settled_pay_amount,
+                order_count, settled_order_count, roi, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [(row[0], normalized_customer_center_id, *row[1:]) for row in normalized_rows],
+        )
+        return len(normalized_rows)
+
+    def _material_source_rows_from_snapshot_rows(
+        self,
+        conn: Any,
+        customer_center_id: str,
+        snapshot_rows: list[dict[str, Any]],
+        *,
+        biz_date: str = "",
+    ) -> list[dict[str, Any]]:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        material_keys = sorted(
+            {
+                str(row.get("material_key") or "").strip()
+                for row in snapshot_rows
+                if str(row.get("material_key") or "").strip()
+            }
+        )
+        profile_map: dict[str, dict[str, Any]] = {}
+        for chunk in self._chunked_material_keys(material_keys):
+            placeholders = ",".join("?" for _ in chunk)
+            profile_rows = conn.execute(
+                f"""
+                SELECT
+                    material_key,
+                    top_anchor_name,
+                    product_info_text,
+                    product_names_json,
+                    is_original
+                FROM material_profile
+                WHERE customer_center_id = ?
+                  AND material_key IN ({placeholders})
+                """,
+                [normalized_customer_center_id, *chunk],
+            ).fetchall()
+            for raw_profile_row in profile_rows:
+                profile_row = dict(raw_profile_row)
+                profile_key = str(profile_row.get("material_key") or "").strip()
+                if profile_key:
+                    profile_map[profile_key] = profile_row
+
+        original_material_keys: set[tuple[int, str]] = set()
+        day_key = str(biz_date or "").strip()
+        if day_key:
+            video_origin_rows = conn.execute(
+                """
+                SELECT advertiser_id, material_id
+                FROM video_origin_flags
+                WHERE customer_center_id = ?
+                  AND substr(snapshot_time, 1, 10) = ?
+                  AND is_original = 1
+                """,
+                (normalized_customer_center_id, day_key),
+            ).fetchall()
+            original_material_keys = {
+                (int(row.get("advertiser_id", 0) or 0), str(row.get("material_id") or "").strip())
+                for row in video_origin_rows
+                if int(row.get("advertiser_id", 0) or 0) > 0 and str(row.get("material_id") or "").strip()
+            }
+
+        material_source_rows: list[dict[str, Any]] = []
+        for snapshot_row in snapshot_rows:
+            advertiser_id = int(snapshot_row.get("advertiser_id", 0) or 0)
+            ad_id = int(snapshot_row.get("ad_id", 0) or 0)
+            material_key = str(snapshot_row.get("material_key") or "").strip()
+            material_id = str(snapshot_row.get("material_id") or "").strip()
+            profile_row = dict(profile_map.get(material_key) or {})
+            material_source_rows.append(
+                {
+                    "snapshot_time": str(snapshot_row.get("snapshot_time") or ""),
+                    "window_start": str(snapshot_row.get("window_start") or ""),
+                    "window_end": str(snapshot_row.get("window_end") or ""),
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": str(snapshot_row.get("advertiser_name") or ""),
+                    "ad_id": ad_id,
+                    "ad_name": str(snapshot_row.get("ad_name") or ""),
+                    "material_type": str(snapshot_row.get("material_type") or ""),
+                    "material_key": material_key,
+                    "material_id": material_id,
+                    "material_name": str(snapshot_row.get("material_name") or ""),
+                    "create_time": str(snapshot_row.get("create_time") or ""),
+                    "video_id": str(snapshot_row.get("video_id") or ""),
+                    "cover_url": str(snapshot_row.get("cover_url") or ""),
+                    "aweme_item_id": str(snapshot_row.get("aweme_item_id") or ""),
+                    "video_url": str(snapshot_row.get("video_url") or ""),
+                    "product_show_count": int(snapshot_row.get("product_show_count", 0) or 0),
+                    "product_click_count": int(snapshot_row.get("product_click_count", 0) or 0),
+                    "stat_cost": float(snapshot_row.get("stat_cost", 0.0) or 0.0),
+                    "pay_amount": float(snapshot_row.get("pay_amount", 0.0) or 0.0),
+                    "total_pay_amount": float(snapshot_row.get("total_pay_amount", 0.0) or 0.0),
+                    "settled_pay_amount": float(snapshot_row.get("settled_pay_amount", 0.0) or 0.0),
+                    "order_count": int(snapshot_row.get("order_count", 0) or 0),
+                    "settled_order_count": int(snapshot_row.get("settled_order_count", 0) or 0),
+                    "top_anchor_name": str(profile_row.get("top_anchor_name") or ""),
+                    "product_info_text": str(profile_row.get("product_info_text") or ""),
+                    "product_names": self._json_text_list(profile_row.get("product_names_json")),
+                    "plan_ids": [ad_id] if ad_id > 0 else [],
+                    "advertiser_ids": [advertiser_id] if advertiser_id > 0 else [],
+                    "raw_json": str(snapshot_row.get("raw_json") or "{}"),
+                    "is_original": (
+                        (advertiser_id, material_id) in original_material_keys
+                        or int(profile_row.get("is_original", 0) or 0) == 1
+                    ),
+                }
+            )
+        return material_source_rows
+
+    def _restore_material_history_day_from_all_snapshots(
+        self,
+        conn: Any,
+        customer_center_id: str,
+        biz_date: str,
+    ) -> dict[str, Any]:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        day_key = str(biz_date or "").strip()
+        if not normalized_customer_center_id or not day_key:
+            return {
+                "snapshot_time": "",
+                "material_daily_row_count": 0,
+                "material_relation_row_count": 0,
+                "material_snapshot_row_count": 0,
+            }
+        ordered_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM material_snapshots
+                WHERE customer_center_id = ?
+                  AND substr(snapshot_time, 1, 10) = ?
+                ORDER BY snapshot_time ASC, advertiser_id ASC, ad_id ASC, material_type ASC, material_key ASC
+                """,
+                (normalized_customer_center_id, day_key),
+            ).fetchall()
+        ]
+        if not ordered_rows:
+            self._replace_material_daily_rows(conn, normalized_customer_center_id, day_key, [])
+            self._replace_material_relation_daily_rows(conn, normalized_customer_center_id, day_key, [])
+            return {
+                "snapshot_time": "",
+                "material_daily_row_count": 0,
+                "material_relation_row_count": 0,
+                "material_snapshot_row_count": 0,
+            }
+        latest_by_relation: dict[tuple[int, int, str, str], dict[str, Any]] = {}
+        for row in ordered_rows:
+            key = (
+                int(row.get("advertiser_id", 0) or 0),
+                int(row.get("ad_id", 0) or 0),
+                str(row.get("material_type") or "").strip(),
+                str(row.get("material_key") or "").strip(),
+            )
+            if key[0] <= 0 or key[1] <= 0 or not key[2] or not key[3]:
+                continue
+            latest_by_relation[key] = row
+        snapshot_rows = list(latest_by_relation.values())
+        if not snapshot_rows:
+            self._replace_material_daily_rows(conn, normalized_customer_center_id, day_key, [])
+            self._replace_material_relation_daily_rows(conn, normalized_customer_center_id, day_key, [])
+            return {
+                "snapshot_time": "",
+                "material_daily_row_count": 0,
+                "material_relation_row_count": 0,
+                "material_snapshot_row_count": 0,
+            }
+        latest_snapshot_time = max(str(row.get("snapshot_time") or "") for row in snapshot_rows)
+        latest_row = sorted(
+            snapshot_rows,
+            key=lambda row: str(row.get("snapshot_time") or ""),
+            reverse=True,
+        )[0]
+        window_start = str(latest_row.get("window_start") or f"{day_key} 00:00:00")
+        window_end = str(latest_row.get("window_end") or f"{day_key} 23:59:59")
+        material_source_rows = self._material_source_rows_from_snapshot_rows(
+            conn,
+            normalized_customer_center_id,
+            snapshot_rows,
+            biz_date=day_key,
+        )
+        material_source_rows = self._normalize_material_source_rows_to_plan_metrics(
+            conn,
+            normalized_customer_center_id,
+            material_source_rows,
+            snapshot_time=latest_snapshot_time,
+            use_current=False,
+        )
+        material_rollup_rows = self._build_material_rollup_rows(
+            latest_snapshot_time,
+            window_start,
+            window_end,
+            groups=self._group_material_rows(material_source_rows),
+        )
+        material_relation_rows = self._build_material_relation_read_rows(
+            latest_snapshot_time,
+            window_start,
+            window_end,
+            material_source_rows,
+        )
+        self._replace_material_daily_rows(conn, normalized_customer_center_id, day_key, material_rollup_rows)
+        self._replace_material_relation_daily_rows(conn, normalized_customer_center_id, day_key, material_relation_rows)
+        updated_at = now_text()
+        self._upsert_material_relation_edges(
+            conn,
+            normalized_customer_center_id,
+            material_source_rows,
+            updated_at=updated_at,
+            snapshot_time=latest_snapshot_time,
+        )
+        self._upsert_material_profile_rows(
+            conn,
+            normalized_customer_center_id,
+            material_rollup_rows,
+            updated_at=updated_at,
+        )
+        return {
+            "snapshot_time": latest_snapshot_time,
+            "material_daily_row_count": len(material_rollup_rows),
+            "material_relation_row_count": len(material_relation_rows),
+            "material_snapshot_row_count": len(snapshot_rows),
+        }
+
+    @staticmethod
+    def _invalidate_material_ranking_indexes_for_day(conn: Any, biz_date: str) -> None:
+        day_key = str(biz_date or "").strip()
+        if not day_key:
+            return
+        conn.execute(
+            "DELETE FROM material_ranking_index WHERE start_date <= ? AND end_date >= ?",
+            (day_key, day_key),
+        )
+        conn.execute(
+            "DELETE FROM material_ranking_summary WHERE start_date <= ? AND end_date >= ?",
+            (day_key, day_key),
+        )
+
+    def _refresh_material_history_for_changed_plans(
+        self,
+        *,
+        client: OceanEngineClient,
+        customer_center_id: str,
+        target_date: str,
+        snapshot_time: str,
+        window_start: str,
+        window_end: str,
+        scoped_config: dict[str, Any],
+        changed_plan_ids: set[int] | list[int] | tuple[int, ...],
+        changed_plan_rows: list[PlanSummary] | list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        normalized_plan_ids = sorted({int(item or 0) for item in changed_plan_ids if int(item or 0) > 0})
+        if not normalized_plan_ids:
+            return {
+                "changed_plan_count": 0,
+                "material_plan_fetch_count": 0,
+                "material_row_count": 0,
+                "material_snapshot_row_count": 0,
+                "material_daily_row_count": 0,
+                "material_relation_row_count": 0,
+                "error_count": 0,
+                "errors": [],
+            }
+        plan_context_by_ad_id: dict[int, dict[str, Any]] = {}
+        material_candidate_rows: list[dict[str, Any]] = []
+        for raw_plan_row in changed_plan_rows:
+            plan_row = asdict(raw_plan_row) if isinstance(raw_plan_row, PlanSummary) else dict(raw_plan_row or {})
+            ad_id = int(plan_row.get("ad_id", 0) or 0)
+            if ad_id <= 0 or ad_id not in normalized_plan_ids:
+                continue
+            plan_context_by_ad_id[ad_id] = plan_row
+            if str(plan_row.get("plan_source") or "").strip().upper() not in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC}:
+                continue
+            if not self._plan_row_has_material_activity(plan_row):
+                continue
+            material_candidate_rows.append(plan_row)
+
+        errors: list[dict[str, Any]] = []
+        material_rows: list[tuple[Any, ...]] = []
+        plan_sync_results: list[dict[str, Any]] = []
+        material_types = self._detail_material_types(scoped_config)
+        workers = self._material_sync_workers(scoped_config)
+        request_timeout_seconds = self._material_sync_request_timeout_seconds()
+        request_attempts = self._material_sync_request_attempts()
+        plan_material_requests_per_minute = self._nightly_plan_material_requests_per_minute_default()
+        if plan_material_requests_per_minute > 0:
+            client.configure_plan_material_rate_limit(plan_material_requests_per_minute)
+        plan_material_batch_size = self._nightly_plan_material_batch_size_default()
+        plan_material_batch_sleep_seconds = self._nightly_plan_material_batch_sleep_seconds_default()
+        start_date = str(window_start or target_date)[:10]
+        end_date = str(window_end or target_date)[:10]
+        if material_candidate_rows:
+            if plan_material_batch_size > 0:
+                plan_batches = [
+                    material_candidate_rows[index : index + plan_material_batch_size]
+                    for index in range(0, len(material_candidate_rows), plan_material_batch_size)
+                ]
+            else:
+                plan_batches = [material_candidate_rows]
+            total_plan_batches = len(plan_batches)
+            for batch_index, plan_batch in enumerate(plan_batches, start=1):
+                if not plan_batch:
+                    continue
+                with ThreadPoolExecutor(max_workers=min(workers, len(plan_batch))) as pool:
+                    future_map = {
+                        pool.submit(
+                            self._collect_plan_materials_bundle,
+                            client,
+                            snapshot_time,
+                            window_start,
+                            window_end,
+                            start_date,
+                            end_date,
+                            material_types,
+                            plan_row,
+                            customer_center_id,
+                            batch_index,
+                            total_plan_batches,
+                            request_timeout_seconds,
+                            request_attempts,
+                            plan_material_requests_per_minute,
+                        ): plan_row
+                        for plan_row in plan_batch
+                    }
+                    for future in as_completed(future_map):
+                        plan_row = future_map[future]
+                        ad_id = int(plan_row.get("ad_id", 0) or 0)
+                        plan_error_items: list[dict[str, Any]] = []
+                        fetched_rows: list[tuple[Any, ...]] = []
+                        try:
+                            payload = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            plan_error_items.append(
+                                self._api_error_payload(
+                                    exc,
+                                    stage="history_changed_plan_materials",
+                                    advertiser_id=int(plan_row.get("advertiser_id", 0) or 0),
+                                    ad_id=ad_id,
+                                    start_date=start_date,
+                                    end_date=end_date,
+                                    window_start=window_start,
+                                    window_end=window_end,
+                                )
+                            )
+                        else:
+                            fetched_rows = list(payload.get("material_rows") or [])
+                            material_rows.extend(fetched_rows)
+                            plan_error_items.extend(dict(item) for item in (payload.get("errors") or []))
+                        errors.extend(plan_error_items)
+                        plan_sync_results.append(
+                            {
+                                "ad_id": ad_id,
+                                "advertiser_id": int(plan_row.get("advertiser_id", 0) or 0),
+                                "advertiser_name": str(plan_row.get("advertiser_name") or ""),
+                                "ad_name": str(plan_row.get("ad_name") or ""),
+                                "status": str(plan_row.get("status") or ""),
+                                "opt_status": str(plan_row.get("opt_status") or ""),
+                                "stat_cost": float(plan_row.get("stat_cost", 0.0) or 0.0),
+                                "pay_amount": float(plan_row.get("pay_amount", 0.0) or 0.0),
+                                "order_count": int(float(plan_row.get("order_count", 0) or 0)),
+                                "material_row_count": len(fetched_rows),
+                                "error_items": plan_error_items,
+                                "had_errors": bool(plan_error_items),
+                                "selected_hot": False,
+                                "selected_warm": False,
+                                "selected_priority": "history_account_diff",
+                            }
+                        )
+                if plan_material_batch_sleep_seconds > 0 and batch_index < total_plan_batches:
+                    time.sleep(plan_material_batch_sleep_seconds)
+
+        if material_rows:
+            material_rows, library_errors = self._enrich_material_rows_with_library_create_time(
+                client,
+                material_rows,
+                customer_center_id=customer_center_id,
+                apply_preview_media=False,
+            )
+            errors.extend(library_errors)
+
+        payload = {
+            "snapshot_time": snapshot_time,
+            "window_start": window_start,
+            "window_end": window_end,
+            "material_rows": material_rows,
+            "video_flag_rows": [],
+            "detail_rows": [],
+        }
+        material_source_rows = self._material_source_rows_from_extended_payload(payload)
+        for row in material_source_rows:
+            context = plan_context_by_ad_id.get(int(row.get("ad_id", 0) or 0), {})
+            if not str(row.get("top_anchor_name") or "").strip():
+                row["top_anchor_name"] = str(context.get("anchor_name") or "").strip()
+            product_name = str(context.get("product_name") or "").strip()
+            if product_name and not str(row.get("product_info_text") or "").strip():
+                row["product_info_text"] = product_name
+            if product_name and not row.get("product_names"):
+                row["product_names"] = [product_name]
+        with self.db() as conn:
+            if material_source_rows:
+                material_source_rows = self._normalize_material_source_rows_to_plan_metrics(
+                    conn,
+                    customer_center_id,
+                    material_source_rows,
+                    snapshot_time=snapshot_time,
+                    use_current=False,
+                )
+            material_snapshot_rows = [
+                self._material_snapshot_tuple_from_source_row(row)
+                for row in material_source_rows
+            ]
+            inserted_snapshot_rows = self._replace_material_snapshot_plan_subset(
+                conn,
+                customer_center_id,
+                target_date,
+                normalized_plan_ids,
+                material_snapshot_rows,
+            )
+            if material_source_rows:
+                updated_at = now_text()
+                material_rollup_rows = self._build_material_rollup_rows(
+                    snapshot_time,
+                    window_start,
+                    window_end,
+                    groups=self._group_material_rows(material_source_rows),
+                )
+                self._upsert_material_relation_edges(
+                    conn,
+                    customer_center_id,
+                    material_source_rows,
+                    updated_at=updated_at,
+                    snapshot_time=snapshot_time,
+                )
+                self._upsert_material_profile_rows(
+                    conn,
+                    customer_center_id,
+                    material_rollup_rows,
+                    updated_at=updated_at,
+                )
+            rebuild_result = self._restore_material_history_day_from_latest_snapshot(
+                conn,
+                customer_center_id,
+                target_date,
+            )
+            if not str(rebuild_result.get("snapshot_time") or "").strip():
+                rebuild_result = self._restore_material_history_day_from_all_snapshots(
+                    conn,
+                    customer_center_id,
+                    target_date,
+                )
+            self._invalidate_material_ranking_indexes_for_day(conn, target_date)
+            self._persist_plan_refresh_states(conn, customer_center_id, plan_sync_results)
+        return {
+            "changed_plan_count": len(normalized_plan_ids),
+            "material_plan_fetch_count": len(material_candidate_rows),
+            "material_row_count": len(material_rows),
+            "material_snapshot_row_count": inserted_snapshot_rows,
+            "material_daily_row_count": int(rebuild_result.get("material_daily_row_count", 0) or 0),
+            "material_relation_row_count": int(rebuild_result.get("material_relation_row_count", 0) or 0),
+            "error_count": len(errors),
+            "errors": errors,
+        }
 
     def _material_history_day_row_counts(
         self,
@@ -16749,11 +17753,707 @@ class DashboardService:
             if str(item.get("target_date") or "").strip() in selected_dates
         ]
 
-    def refresh_performance_history_targets(
+    @staticmethod
+    def _performance_account_money_changed(left: Any, right: Any) -> bool:
+        return abs(round(float(left or 0.0), 2) - round(float(right or 0.0), 2)) > 0.005
+
+    @classmethod
+    def _performance_account_diff_fields(
+        cls,
+        summary: AccountSummary,
+        existing_row: dict[str, Any] | None,
+    ) -> list[str]:
+        if not existing_row:
+            return ["missing"]
+        changed_fields: list[str] = []
+        if cls._performance_account_money_changed(summary.stat_cost, existing_row.get("stat_cost")):
+            changed_fields.append("stat_cost")
+        if cls._performance_account_money_changed(summary.pay_amount, existing_row.get("pay_amount")):
+            changed_fields.append("pay_amount")
+        if int(float(summary.order_count or 0)) != int(float(existing_row.get("order_count", 0) or 0)):
+            changed_fields.append("order_count")
+        return changed_fields
+
+    @classmethod
+    def _performance_plan_diff_fields(
+        cls,
+        summary: PlanSummary,
+        existing_row: dict[str, Any] | None,
+    ) -> list[str]:
+        if not existing_row:
+            return ["missing"]
+        changed_fields: list[str] = []
+        for field in ("stat_cost", "pay_amount", "total_pay_amount", "settled_pay_amount", "refund_amount_1h"):
+            if cls._performance_account_money_changed(getattr(summary, field, 0.0), existing_row.get(field)):
+                changed_fields.append(field)
+        for field in ("order_count", "settled_order_count"):
+            if int(float(getattr(summary, field, 0) or 0)) != int(float(existing_row.get(field, 0) or 0)):
+                changed_fields.append(field)
+        for field in (
+            "advertiser_name",
+            "ad_name",
+            "product_id",
+            "product_name",
+            "anchor_name",
+            "marketing_goal",
+            "status",
+            "opt_status",
+            "plan_source",
+            "plan_delivery_type",
+        ):
+            if str(getattr(summary, field, "") or "").strip() != str(existing_row.get(field) or "").strip():
+                changed_fields.append(field)
+        return changed_fields
+
+    @staticmethod
+    def _account_summary_has_performance(summary: AccountSummary) -> bool:
+        return (
+            abs(float(summary.stat_cost or 0.0)) > 0.005
+            or abs(float(summary.pay_amount or 0.0)) > 0.005
+            or int(float(summary.order_count or 0)) != 0
+        )
+
+    def _fetch_account_history_summaries(
+        self,
+        customer_center_id: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> tuple[list[dict[str, Any]], dict[int, AccountSummary], dict[int, str], dict[str, Any], OceanEngineClient]:
+        scoped_config = self._scoped_config_for_customer_center(customer_center_id)
+        client = self._build_scoped_customer_center_client(customer_center_id)
+        accounts = client.list_accounts()
+        account_workers = max(1, int(scoped_config.get("max_workers", 3) or 3))
+        summaries: dict[int, AccountSummary] = {}
+        errors: dict[int, str] = {}
+        if not accounts:
+            return [], summaries, errors, scoped_config, client
+        with ThreadPoolExecutor(max_workers=min(account_workers, len(accounts))) as pool:
+            future_map = {
+                pool.submit(fetch_account_bundle, client, item, start_dt, end_dt): item
+                for item in accounts
+            }
+            for future in as_completed(future_map):
+                item = future_map[future]
+                advertiser_id = int(item.get("advertiser_id", 0) or 0)
+                try:
+                    summary = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    if advertiser_id > 0:
+                        errors[advertiser_id] = str(exc)
+                    continue
+                if advertiser_id <= 0:
+                    advertiser_id = int(summary.advertiser_id or 0)
+                if advertiser_id <= 0:
+                    continue
+                summaries[advertiser_id] = summary
+                if not bool(summary.ok):
+                    errors[advertiser_id] = str(summary.error or "account summary failed")
+        return accounts, summaries, errors, scoped_config, client
+
+    @staticmethod
+    def _account_rows_by_advertiser_for_day(
+        conn: Any,
+        customer_center_id: str,
+        target_date: str,
+    ) -> dict[int, dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM account_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+            """,
+            (customer_center_id, target_date),
+        ).fetchall()
+        return {
+            int(row["advertiser_id"]): dict(row)
+            for row in rows
+            if int(row["advertiser_id"] or 0) > 0
+        }
+
+    @staticmethod
+    def _plan_rows_by_ad_id_for_day(
+        conn: Any,
+        customer_center_id: str,
+        target_date: str,
+        advertiser_ids: set[int] | list[int] | tuple[int, ...],
+    ) -> dict[int, dict[str, Any]]:
+        normalized_advertiser_ids = sorted({int(item or 0) for item in advertiser_ids if int(item or 0) > 0})
+        if not normalized_advertiser_ids:
+            return {}
+        rows_by_ad_id: dict[int, dict[str, Any]] = {}
+        for start in range(0, len(normalized_advertiser_ids), 400):
+            chunk = normalized_advertiser_ids[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM plan_daily
+                WHERE customer_center_id = ?
+                  AND biz_date = ?
+                  AND advertiser_id IN ({placeholders})
+                """,
+                [customer_center_id, target_date, *chunk],
+            ).fetchall()
+            for row in rows:
+                ad_id = int(row["ad_id"] or 0)
+                if ad_id > 0:
+                    rows_by_ad_id[ad_id] = dict(row)
+        return rows_by_ad_id
+
+    def _replace_performance_daily_account_subset(
+        self,
+        conn: Any,
+        *,
+        customer_center_id: str,
+        target_date: str,
+        snapshot_time: str,
+        account_rows: list[AccountSummary],
+        plan_rows: list[PlanSummary],
+    ) -> dict[str, Any]:
+        normalized_account_rows = [asdict(item) for item in account_rows]
+        plan_dicts = [
+            {
+                "customer_center_id": customer_center_id,
+                "snapshot_time": snapshot_time,
+                **asdict(item),
+            }
+            for item in plan_rows
+        ]
+        normalized_plan_rows = self._apply_plan_delivery_type_metadata_rows(conn, plan_dicts)
+        advertiser_ids = sorted(
+            {
+                int(item.get("advertiser_id", 0) or 0)
+                for item in [*normalized_account_rows, *normalized_plan_rows]
+                if int(item.get("advertiser_id", 0) or 0) > 0
+            }
+        )
+        if not advertiser_ids:
+            return {"updated": False, "advertiser_count": 0, "plan_count": 0}
+
+        placeholders = ",".join("?" for _ in advertiser_ids)
+        conn.execute(
+            f"""
+            DELETE FROM account_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+              AND advertiser_id IN ({placeholders})
+            """,
+            [customer_center_id, target_date, *advertiser_ids],
+        )
+        conn.execute(
+            f"""
+            DELETE FROM plan_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+              AND advertiser_id IN ({placeholders})
+            """,
+            [customer_center_id, target_date, *advertiser_ids],
+        )
+
+        if normalized_account_rows:
+            conn.executemany(
+                """
+                INSERT INTO account_daily (
+                    customer_center_id, biz_date, snapshot_time, advertiser_id, advertiser_name,
+                    stat_cost, roi, order_count, pay_amount, total_pay_amount, settled_pay_amount,
+                    settled_roi, settled_order_count, pay_order_cost, settled_amount_rate,
+                    refund_rate_1h, refund_amount_1h, plan_count, ok, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        customer_center_id,
+                        target_date,
+                        snapshot_time,
+                        int(item.get("advertiser_id", 0) or 0),
+                        str(item.get("advertiser_name") or ""),
+                        float(item.get("stat_cost", 0.0) or 0.0),
+                        float(item.get("roi", 0.0) or 0.0),
+                        int(float(item.get("order_count", 0.0) or 0.0)),
+                        float(item.get("pay_amount", 0.0) or 0.0),
+                        float(item.get("total_pay_amount", 0.0) or 0.0),
+                        float(item.get("settled_pay_amount", 0.0) or 0.0),
+                        float(item.get("settled_roi", 0.0) or 0.0),
+                        int(float(item.get("settled_order_count", 0.0) or 0.0)),
+                        float(item.get("pay_order_cost", 0.0) or 0.0),
+                        float(item.get("settled_amount_rate", 0.0) or 0.0),
+                        float(item.get("refund_rate_1h", 0.0) or 0.0),
+                        float(item.get("refund_amount_1h", 0.0) or 0.0),
+                        int(float(item.get("plan_count", 0.0) or 0.0)),
+                        1 if bool(item.get("ok", True)) else 0,
+                        str(item.get("error") or ""),
+                    )
+                    for item in normalized_account_rows
+                ],
+            )
+
+        if normalized_plan_rows:
+            conn.executemany(
+                """
+                INSERT INTO plan_daily (
+                    customer_center_id, biz_date, snapshot_time, advertiser_id, advertiser_name,
+                    ad_id, ad_name, product_id, product_name, anchor_name, marketing_goal,
+                    plan_source, plan_delivery_type, status, opt_status, roi_goal, stat_cost,
+                    roi, order_count, pay_amount, total_pay_amount, settled_pay_amount,
+                    settled_roi, settled_order_count, pay_order_cost, settled_amount_rate,
+                    refund_rate_1h, refund_amount_1h
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        customer_center_id,
+                        target_date,
+                        snapshot_time,
+                        int(item.get("advertiser_id", 0) or 0),
+                        str(item.get("advertiser_name") or ""),
+                        int(item.get("ad_id", 0) or 0),
+                        str(item.get("ad_name") or ""),
+                        str(item.get("product_id") or ""),
+                        str(item.get("product_name") or ""),
+                        str(item.get("anchor_name") or ""),
+                        str(item.get("marketing_goal") or ""),
+                        str(item.get("plan_source") or "UNI_PROMOTION"),
+                        str(item.get("plan_delivery_type") or "GLOBAL"),
+                        str(item.get("status") or ""),
+                        str(item.get("opt_status") or ""),
+                        float(item.get("roi_goal", 0.0) or 0.0),
+                        float(item.get("stat_cost", 0.0) or 0.0),
+                        float(item.get("roi", 0.0) or 0.0),
+                        int(float(item.get("order_count", 0.0) or 0.0)),
+                        float(item.get("pay_amount", 0.0) or 0.0),
+                        float(item.get("total_pay_amount", 0.0) or 0.0),
+                        float(item.get("settled_pay_amount", 0.0) or 0.0),
+                        float(item.get("settled_roi", 0.0) or 0.0),
+                        int(float(item.get("settled_order_count", 0.0) or 0.0)),
+                        float(item.get("pay_order_cost", 0.0) or 0.0),
+                        float(item.get("settled_amount_rate", 0.0) or 0.0),
+                        float(item.get("refund_rate_1h", 0.0) or 0.0),
+                        float(item.get("refund_amount_1h", 0.0) or 0.0),
+                    )
+                    for item in normalized_plan_rows
+                ],
+            )
+
+        account_summary = dict(
+            conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS account_count,
+                    COALESCE(SUM(CASE WHEN stat_cost > 0 THEN 1 ELSE 0 END), 0) AS active_account_count,
+                    COALESCE(SUM(stat_cost), 0) AS stat_cost,
+                    COALESCE(SUM(pay_amount), 0) AS pay_amount,
+                    COALESCE(SUM(order_count), 0) AS order_count,
+                    COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS account_failures,
+                    COALESCE(SUM(CASE WHEN ok = 0 AND COALESCE(error, '') <> '' THEN 1 ELSE 0 END), 0) AS plan_failures
+                FROM account_daily
+                WHERE customer_center_id = ?
+                  AND biz_date = ?
+                """,
+                (customer_center_id, target_date),
+            ).fetchone()
+        )
+        plan_summary = dict(
+            conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS plan_count,
+                    COALESCE(SUM(CASE WHEN stat_cost > 0 THEN 1 ELSE 0 END), 0) AS active_plan_count
+                FROM plan_daily
+                WHERE customer_center_id = ?
+                  AND biz_date = ?
+                """,
+                (customer_center_id, target_date),
+            ).fetchone()
+        )
+        stat_cost = round(float(account_summary.get("stat_cost", 0.0) or 0.0), 2)
+        pay_amount = round(float(account_summary.get("pay_amount", 0.0) or 0.0), 2)
+        order_count = int(float(account_summary.get("order_count", 0) or 0))
+        roi = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+        conn.execute(
+            """
+            INSERT INTO summary_daily (
+                customer_center_id, biz_date, snapshot_time, account_count, active_account_count,
+                plan_count, active_plan_count, stat_cost, pay_amount, order_count, roi,
+                account_failures, plan_failures
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (customer_center_id, biz_date) DO UPDATE SET
+                snapshot_time = excluded.snapshot_time,
+                account_count = excluded.account_count,
+                active_account_count = excluded.active_account_count,
+                plan_count = excluded.plan_count,
+                active_plan_count = excluded.active_plan_count,
+                stat_cost = excluded.stat_cost,
+                pay_amount = excluded.pay_amount,
+                order_count = excluded.order_count,
+                roi = excluded.roi,
+                account_failures = excluded.account_failures,
+                plan_failures = excluded.plan_failures
+            """,
+            (
+                customer_center_id,
+                target_date,
+                snapshot_time,
+                int(account_summary.get("account_count", 0) or 0),
+                int(account_summary.get("active_account_count", 0) or 0),
+                int(plan_summary.get("plan_count", 0) or 0),
+                int(plan_summary.get("active_plan_count", 0) or 0),
+                stat_cost,
+                pay_amount,
+                order_count,
+                roi,
+                int(account_summary.get("account_failures", 0) or 0),
+                int(account_summary.get("plan_failures", 0) or 0),
+            ),
+        )
+        return {
+            "updated": True,
+            "advertiser_count": len(advertiser_ids),
+            "plan_count": len(normalized_plan_rows),
+        }
+
+    def refresh_performance_history_targets_by_account_diff(
         self,
         targets: list[dict[str, Any]],
         progress_callback: Any | None = None,
     ) -> dict[str, Any]:
+        normalized_targets = self._normalize_history_refresh_targets(targets)
+        if not normalized_targets:
+            return {
+                "refresh_days": 0,
+                "refreshed_days": 0,
+                "no_change_days": 0,
+                "skipped_current_day": 0,
+                "error_count": 0,
+                "customer_center_count": 0,
+                "customer_centers": [],
+                "errors": [],
+                "range_start": "",
+                "range_end": "",
+                "mode": "account_diff",
+                "changed_plans": 0,
+                "material_refreshed_days": 0,
+                "material_plan_fetch_count": 0,
+                "material_rows_written": 0,
+            }
+        tz = ZoneInfo(self.read_config()["timezone"])
+        today = datetime.now(tz).date()
+        refreshed = 0
+        no_change_days = 0
+        skipped_current_day = 0
+        error_count = 0
+        checked_accounts = 0
+        changed_accounts = 0
+        direct_account_updates = 0
+        plan_refreshed_accounts = 0
+        plan_rows_written = 0
+        changed_plans = 0
+        material_refreshed_days = 0
+        material_plan_fetch_count = 0
+        material_rows_written = 0
+        errors: list[dict[str, Any]] = []
+        customer_center_stats: dict[str, dict[str, Any]] = {}
+        target_dates = [item["target_date"] for item in normalized_targets]
+        total_steps = len(normalized_targets)
+
+        for index, item in enumerate(normalized_targets, start=1):
+            customer_center_id = item["customer_center_id"]
+            target_date = item["target_date"]
+            stats = customer_center_stats.setdefault(
+                customer_center_id,
+                {
+                    "customer_center_id": customer_center_id,
+                    "refreshed_days": 0,
+                    "no_change_days": 0,
+                    "error_count": 0,
+                    "checked_accounts": 0,
+                    "changed_accounts": 0,
+                    "plan_refreshed_accounts": 0,
+                    "changed_plans": 0,
+                    "material_plan_fetch_count": 0,
+                    "material_rows_written": 0,
+                },
+            )
+            if callable(progress_callback):
+                progress_callback(
+                    {
+                        "customer_center_id": customer_center_id,
+                        "target_day": target_date,
+                        "completed_steps": index - 1,
+                        "total_steps": total_steps,
+                        "message": "account diff",
+                    }
+                )
+            target_day = datetime.strptime(target_date, "%Y-%m-%d").date()
+            if target_day >= today:
+                skipped_current_day += 1
+                if callable(progress_callback):
+                    progress_callback(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_date,
+                            "completed_steps": index,
+                            "total_steps": total_steps,
+                        }
+                    )
+                continue
+
+            day_start = datetime(target_day.year, target_day.month, target_day.day, 0, 0, 0, tzinfo=tz)
+            day_end = datetime(target_day.year, target_day.month, target_day.day, 23, 59, 59, tzinfo=tz)
+            snapshot_time = self._scoped_day_snapshot_time(day_end, customer_center_id)
+            try:
+                accounts, account_summaries, account_errors, scoped_config, client = self._fetch_account_history_summaries(
+                    customer_center_id,
+                    day_start,
+                    day_end,
+                )
+                accounts_by_id = {
+                    int(row.get("advertiser_id", 0) or 0): row
+                    for row in accounts
+                    if int(row.get("advertiser_id", 0) or 0) > 0
+                }
+                with self.db() as conn:
+                    existing_accounts = self._account_rows_by_advertiser_for_day(
+                        conn,
+                        customer_center_id,
+                        target_date,
+                    )
+
+                direct_summaries: list[AccountSummary] = []
+                plan_refresh_accounts: list[dict[str, Any]] = []
+                changed_fields_by_account: dict[int, list[str]] = {}
+                for advertiser_id, account in accounts_by_id.items():
+                    summary = account_summaries.get(advertiser_id)
+                    existing_row = existing_accounts.get(advertiser_id)
+                    checked_accounts += 1
+                    stats["checked_accounts"] += 1
+                    if summary is None or not bool(summary.ok):
+                        plan_refresh_accounts.append(account)
+                        changed_fields_by_account[advertiser_id] = ["account_probe_failed"]
+                        continue
+                    changed_fields = self._performance_account_diff_fields(summary, existing_row)
+                    if not changed_fields:
+                        continue
+                    changed_fields_by_account[advertiser_id] = changed_fields
+                    if not existing_row and not self._account_summary_has_performance(summary):
+                        direct_summaries.append(summary)
+                        continue
+                    plan_refresh_accounts.append(account)
+
+                changed_accounts += len(changed_fields_by_account)
+                stats["changed_accounts"] += len(changed_fields_by_account)
+                plan_rows: list[PlanSummary] = []
+                plan_errors_by_advertiser: dict[int, str] = {}
+                if plan_refresh_accounts:
+                    plan_workers = max(1, int(scoped_config.get("plan_max_workers", 3) or 3))
+                    with ThreadPoolExecutor(max_workers=min(plan_workers, len(plan_refresh_accounts))) as pool:
+                        future_map = {
+                            pool.submit(
+                                fetch_plan_bundle,
+                                client,
+                                account,
+                                day_start,
+                                day_end,
+                                allow_standard_fallback=False,
+                                allow_report_fallback=False,
+                                merge_report_only_cubic=True,
+                            ): account
+                            for account in plan_refresh_accounts
+                        }
+                        for future in as_completed(future_map):
+                            account = future_map[future]
+                            advertiser_id = int(account.get("advertiser_id", 0) or 0)
+                            try:
+                                account_plans, plan_error = future.result()
+                            except Exception as exc:  # noqa: BLE001
+                                account_plans, plan_error = [], str(exc)
+                            plan_rows.extend(account_plans)
+                            if plan_error:
+                                plan_errors_by_advertiser[advertiser_id] = str(plan_error)
+
+                successful_plan_accounts = [
+                    account
+                    for account in plan_refresh_accounts
+                    if int(account.get("advertiser_id", 0) or 0) not in plan_errors_by_advertiser
+                ]
+                successful_plan_advertiser_ids = {
+                    int(account.get("advertiser_id", 0) or 0)
+                    for account in successful_plan_accounts
+                    if int(account.get("advertiser_id", 0) or 0) > 0
+                }
+                changed_plan_ids: set[int] = set()
+                changed_plan_rows_by_ad_id: dict[int, PlanSummary] = {}
+                if successful_plan_advertiser_ids:
+                    with self.db() as conn:
+                        existing_plan_rows = self._plan_rows_by_ad_id_for_day(
+                            conn,
+                            customer_center_id,
+                            target_date,
+                            successful_plan_advertiser_ids,
+                        )
+                    new_plan_rows_by_ad_id = {
+                        int(row.ad_id or 0): row
+                        for row in plan_rows
+                        if int(row.ad_id or 0) > 0
+                    }
+                    for ad_id, plan_row in new_plan_rows_by_ad_id.items():
+                        existing_plan_row = existing_plan_rows.get(ad_id)
+                        changed_fields = self._performance_plan_diff_fields(plan_row, existing_plan_row)
+                        if not changed_fields:
+                            continue
+                        changed_plan_ids.add(ad_id)
+                        changed_plan_rows_by_ad_id[ad_id] = plan_row
+                    for ad_id in existing_plan_rows:
+                        if ad_id not in new_plan_rows_by_ad_id:
+                            changed_plan_ids.add(ad_id)
+                account_rollup_rows, _failures = build_account_summaries_from_plan_rollups(
+                    successful_plan_accounts,
+                    plan_rows,
+                    plan_errors_by_advertiser={},
+                )
+                update_account_rows = [*direct_summaries, *account_rollup_rows]
+                if update_account_rows:
+                    with self.db() as conn:
+                        write_result = self._replace_performance_daily_account_subset(
+                            conn,
+                            customer_center_id=customer_center_id,
+                            target_date=target_date,
+                            snapshot_time=snapshot_time,
+                            account_rows=update_account_rows,
+                            plan_rows=plan_rows,
+                        )
+                    if bool(write_result.get("updated")):
+                        refreshed += 1
+                        stats["refreshed_days"] += 1
+                        direct_account_updates += len(direct_summaries)
+                        plan_refreshed_accounts += len(successful_plan_accounts)
+                        stats["plan_refreshed_accounts"] += len(successful_plan_accounts)
+                        plan_rows_written += int(write_result.get("plan_count", 0) or 0)
+                        if changed_plan_ids:
+                            material_result = self._refresh_material_history_for_changed_plans(
+                                client=client,
+                                customer_center_id=customer_center_id,
+                                target_date=target_date,
+                                snapshot_time=snapshot_time,
+                                window_start=day_start.strftime("%Y-%m-%d %H:%M:%S"),
+                                window_end=day_end.strftime("%Y-%m-%d %H:%M:%S"),
+                                scoped_config=scoped_config,
+                                changed_plan_ids=changed_plan_ids,
+                                changed_plan_rows=list(changed_plan_rows_by_ad_id.values()),
+                            )
+                            changed_plans += int(material_result.get("changed_plan_count", 0) or 0)
+                            stats["changed_plans"] += int(material_result.get("changed_plan_count", 0) or 0)
+                            material_plan_fetch_count += int(material_result.get("material_plan_fetch_count", 0) or 0)
+                            stats["material_plan_fetch_count"] += int(
+                                material_result.get("material_plan_fetch_count", 0) or 0
+                            )
+                            material_rows_written += int(material_result.get("material_snapshot_row_count", 0) or 0)
+                            stats["material_rows_written"] += int(
+                                material_result.get("material_snapshot_row_count", 0) or 0
+                            )
+                            if int(material_result.get("changed_plan_count", 0) or 0) > 0:
+                                material_refreshed_days += 1
+                            material_error_count = int(material_result.get("error_count", 0) or 0)
+                            if material_error_count:
+                                error_count += material_error_count
+                                stats["error_count"] += material_error_count
+                                for material_error in material_result.get("errors") or []:
+                                    errors.append(
+                                        {
+                                            "customer_center_id": customer_center_id,
+                                            "target_day": target_date,
+                                            "stage": "history_changed_plan_materials",
+                                            **dict(material_error),
+                                        }
+                                    )
+                    else:
+                        no_change_days += 1
+                        stats["no_change_days"] += 1
+                else:
+                    no_change_days += 1
+                    stats["no_change_days"] += 1
+
+                for advertiser_id, plan_error in plan_errors_by_advertiser.items():
+                    error_count += 1
+                    stats["error_count"] += 1
+                    errors.append(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_date,
+                            "advertiser_id": advertiser_id,
+                            "stage": "performance_plan_refresh",
+                            "account_probe_error": account_errors.get(advertiser_id, ""),
+                            "changed_fields": changed_fields_by_account.get(advertiser_id, []),
+                            "error": plan_error,
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001
+                error_count += 1
+                stats["error_count"] += 1
+                errors.append(
+                    {
+                        "customer_center_id": customer_center_id,
+                        "target_day": target_date,
+                        "stage": "performance_account_diff",
+                        "error": str(exc),
+                    }
+                )
+
+            if callable(progress_callback):
+                progress_callback(
+                    {
+                        "customer_center_id": customer_center_id,
+                        "target_day": target_date,
+                        "completed_steps": index,
+                        "total_steps": total_steps,
+                        "checked_accounts": stats["checked_accounts"],
+                        "changed_accounts": stats["changed_accounts"],
+                        "plan_refreshed_accounts": stats["plan_refreshed_accounts"],
+                        "changed_plans": stats["changed_plans"],
+                        "material_plan_fetch_count": stats["material_plan_fetch_count"],
+                    }
+                )
+
+        if refreshed:
+            self.clear_performance_runtime_caches()
+            self._prewarm_performance_range_caches()
+        if material_refreshed_days or material_rows_written:
+            self.clear_material_runtime_caches(scope=MATERIAL_CACHE_SCOPE_HISTORY)
+        return {
+            "refresh_days": len(normalized_targets),
+            "refreshed_days": refreshed,
+            "no_change_days": no_change_days,
+            "skipped_current_day": skipped_current_day,
+            "error_count": error_count,
+            "customer_center_count": len(customer_center_stats),
+            "customer_centers": list(customer_center_stats.values()),
+            "errors": errors,
+            "range_start": min(target_dates) if target_dates else "",
+            "range_end": max(target_dates) if target_dates else "",
+            "mode": "account_diff",
+            "checked_accounts": checked_accounts,
+            "changed_accounts": changed_accounts,
+            "direct_account_updates": direct_account_updates,
+            "plan_refreshed_accounts": plan_refreshed_accounts,
+            "plan_rows_written": plan_rows_written,
+            "changed_plans": changed_plans,
+            "material_refreshed_days": material_refreshed_days,
+            "material_plan_fetch_count": material_plan_fetch_count,
+            "material_rows_written": material_rows_written,
+        }
+
+    def refresh_performance_history_targets(
+        self,
+        targets: list[dict[str, Any]],
+        progress_callback: Any | None = None,
+        *,
+        account_diff_only: bool = False,
+    ) -> dict[str, Any]:
+        if account_diff_only:
+            return self.refresh_performance_history_targets_by_account_diff(
+                targets,
+                progress_callback=progress_callback,
+            )
         normalized_targets = self._normalize_history_refresh_targets(targets)
         if not normalized_targets:
             return {
@@ -17909,6 +19609,34 @@ class DashboardService:
         nightly_plan_material_batch_sleep_seconds = self._nightly_plan_material_batch_sleep_seconds_default()
         gap_summary = self.history_catchup_gap_summary(performance_days=performance_days, extended_days=extended_days)
         timezone_name = str(self.read_config().get("timezone") or TIMEZONE).strip() or TIMEZONE
+        forced_performance_targets: list[dict[str, str]] = []
+        if trigger_text == "nightly":
+            forced_performance_days = self._nightly_history_force_performance_days()
+            forced_performance_targets = self._nightly_forced_performance_targets(
+                tz_name=timezone_name,
+                customer_center_ids=list(gap_summary.get("customer_center_ids") or []),
+                days=forced_performance_days,
+            )
+            if forced_performance_targets:
+                performance_targets = self._normalize_history_refresh_targets(
+                    [
+                        *list(gap_summary.get("performance_targets") or []),
+                        *forced_performance_targets,
+                    ]
+                )
+                gap_summary = {
+                    **gap_summary,
+                    "performance_targets": performance_targets,
+                    "performance_force_targets": forced_performance_targets,
+                    "performance_force_count": len(forced_performance_targets),
+                    "performance_missing_count": len(performance_targets),
+                    "performance_target_count": len(performance_targets),
+                    "performance_days_needed": max(
+                        int(gap_summary.get("performance_days_needed", 0) or 0),
+                        forced_performance_days,
+                    ),
+                    "up_to_date": False,
+                }
         missing_extended_keys = {
             (
                 str(item.get("customer_center_id") or "").strip(),
@@ -18204,7 +19932,7 @@ class DashboardService:
 
             current_stage_key = ""
             try:
-                if performance_targets and int(gap_summary.get("performance_days_needed", 0) or 0) > 0:
+                if performance_targets:
                     current_stage_key = "performance"
                     stage_message = "历史表现补缺中。"
                     stage_payloads["performance"] = {"status": "running", "message": stage_message, "result": {}}
@@ -18244,6 +19972,7 @@ class DashboardService:
                         )
                     performance_result = self.refresh_performance_history_targets(
                         performance_targets,
+                        account_diff_only=bool(gap_summary.get("performance_force_targets")),
                     )
                     performance_error_message = str(
                         (performance_result.get("errors") or [{}])[0].get("error")
@@ -21446,24 +23175,8 @@ class DashboardService:
                 payload["material_rows"] = self._replace_snapshot_time_in_rows(list(payload.get("material_rows") or []), resolved_snapshot_time)
                 payload["video_flag_rows"] = self._replace_snapshot_time_in_rows(list(payload.get("video_flag_rows") or []), resolved_snapshot_time)
         material_source_rows = self._material_source_rows_from_extended_payload(payload)
-        material_groups = self._group_material_rows(material_source_rows)
-        self._apply_material_report_metrics(
-            material_groups,
-            material_source_rows,
-            list(payload.get("material_report_rows") or []),
-        )
-        material_rollup_rows = self._build_material_rollup_rows(
-            payload["snapshot_time"],
-            payload["window_start"],
-            payload["window_end"],
-            groups=material_groups,
-        )
-        material_relation_rows = self._build_material_relation_read_rows(
-            str(payload.get("snapshot_time") or ""),
-            str(payload.get("window_start") or ""),
-            str(payload.get("window_end") or ""),
-            material_source_rows,
-        )
+        material_rollup_rows: list[tuple[Any, ...]] = []
+        material_relation_rows: list[tuple[Any, ...]] = []
         material_report_snapshot_rows: list[tuple[Any, ...]] = []
         for index, row in enumerate(payload.get("material_report_rows") or []):
             material_id = str(row.get("material_id") or "").strip()
@@ -21505,6 +23218,28 @@ class DashboardService:
         day_key = str(payload["snapshot_time"] or "")[:10]
         with self.db() as conn:
             updated_at = now_text()
+            # Extended history contains separate TITLE/VIDEO material rows; align them to plan totals before writing read models.
+            material_source_rows = self._normalize_material_source_rows_to_plan_metrics(
+                conn,
+                customer_center_id,
+                material_source_rows,
+                snapshot_time=str(payload.get("snapshot_time") or ""),
+                use_current=False,
+            )
+            payload["material_rows"] = [self._material_snapshot_tuple_from_source_row(row) for row in material_source_rows]
+            material_groups = self._group_material_rows(material_source_rows)
+            material_rollup_rows = self._build_material_rollup_rows(
+                payload["snapshot_time"],
+                payload["window_start"],
+                payload["window_end"],
+                groups=material_groups,
+            )
+            material_relation_rows = self._build_material_relation_read_rows(
+                str(payload.get("snapshot_time") or ""),
+                str(payload.get("window_start") or ""),
+                str(payload.get("window_end") or ""),
+                material_source_rows,
+            )
             if replace_same_day and day_key:
                 conn.execute(
                     "DELETE FROM plan_detail_snapshots WHERE substr(snapshot_time, 1, 10) = ? AND customer_center_id = ?",

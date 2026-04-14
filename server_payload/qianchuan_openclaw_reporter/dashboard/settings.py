@@ -85,6 +85,7 @@ class DashboardSettings:
     material_daily_rolling_window_days: int
     material_daily_rolling_batch_days: int
     nightly_history_workers: int
+    nightly_history_force_performance_days: int
     enable_hot_sync_schedules: bool
     full_refresh_lock_ttl_seconds: int
     full_refresh_stale_seconds: int
@@ -157,6 +158,7 @@ def load_settings() -> DashboardSettings:
         material_daily_rolling_window_days=_env_int("MATERIAL_DAILY_ROLLING_WINDOW_DAYS", 0),
         material_daily_rolling_batch_days=_env_int("MATERIAL_DAILY_ROLLING_BATCH_DAYS", 0),
         nightly_history_workers=_env_int("NIGHTLY_HISTORY_WORKERS", 6),
+        nightly_history_force_performance_days=_env_int("NIGHTLY_HISTORY_FORCE_PERFORMANCE_DAYS", 30),
         enable_hot_sync_schedules=_env_bool("ENABLE_HOT_SYNC_SCHEDULES", True),
         full_refresh_lock_ttl_seconds=_env_int("FULL_REFRESH_LOCK_TTL_SECONDS", 3600),
         full_refresh_stale_seconds=_env_int("FULL_REFRESH_STALE_SECONDS", 1800),

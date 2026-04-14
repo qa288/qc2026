@@ -168,6 +168,14 @@ const state = {
   dashboardFetchQueued: false,
   dashboardFetchQueuedOptions: null,
   dashboardFetchedAt: 0,
+  bootstrapFetchPromise: null,
+  bootstrapFetchedAt: 0,
+  overviewFetchPromise: null,
+  overviewFetchedAt: 0,
+  adminRuntimeFetchPromise: null,
+  adminRuntimeFetchedAt: 0,
+  adminAlertsFetchPromise: null,
+  adminAlertsFetchedAt: 0,
   initialActiveViewPromise: null,
   fullRefreshStatus: null,
   fullRefreshStatusPromise: null,
@@ -1255,6 +1263,18 @@ function buildAccountRelationItemsFromPlans(plans) {
   });
 }
 
+function sortAccountRelationItems(items) {
+  return [...(items || [])].sort((left, right) => {
+    const costDelta = Number(right?.stat_cost || 0) - Number(left?.stat_cost || 0);
+    if (costDelta) return costDelta;
+    const planDelta = Number(right?.plan_count || 0) - Number(left?.plan_count || 0);
+    if (planDelta) return planDelta;
+    const orderDelta = Number(right?.order_count || 0) - Number(left?.order_count || 0);
+    if (orderDelta) return orderDelta;
+    return Number(left?.advertiser_id || 0) - Number(right?.advertiser_id || 0);
+  });
+}
+
 function loadedPlanLookup() {
   const lookup = new Map();
   Object.values(state.rangePayloads || {}).forEach((payload) => {
@@ -1285,15 +1305,25 @@ function loadedAccountLookup() {
   return lookup;
 }
 
-function resolvePlanRelationItemsByIds(planIds) {
+function resolvePlanRelationItemsByIds(planIds, options = {}) {
+  const includeMetrics = options?.includeMetrics !== false;
   const lookup = loadedPlanLookup();
   const uniquePlanIds = [...new Set((planIds || []).map((item) => Number(item || 0)).filter((item) => item > 0))];
   return uniquePlanIds
     .map((planId) => {
       const plan = lookup.get(planId);
-      if (plan) return enrichPlanRow(plan);
+      if (plan) {
+        if (includeMetrics) return enrichPlanRow(plan);
+        return {
+          ad_id: planId,
+          advertiser_id: Number(plan?.advertiser_id || 0),
+          ad_name: String(plan?.ad_name || "").trim(),
+          advertiser_name: String(plan?.advertiser_name || "").trim(),
+        };
+      }
       return {
         ad_id: planId,
+        advertiser_id: 0,
         ad_name: "",
         advertiser_name: "",
       };
@@ -1301,13 +1331,21 @@ function resolvePlanRelationItemsByIds(planIds) {
     .sort((left, right) => Number(left.ad_id || 0) - Number(right.ad_id || 0));
 }
 
-function resolveAccountRelationItemsByIds(advertiserIds) {
+function resolveAccountRelationItemsByIds(advertiserIds, options = {}) {
+  const includeMetrics = options?.includeMetrics !== false;
   const lookup = loadedAccountLookup();
   const uniqueAdvertiserIds = [...new Set((advertiserIds || []).map((item) => Number(item || 0)).filter((item) => item > 0))];
   return uniqueAdvertiserIds
     .map((advertiserId) => {
       const row = lookup.get(advertiserId);
       if (row) {
+        if (!includeMetrics) {
+          return {
+            advertiser_id: advertiserId,
+            advertiser_name: String(row.advertiser_name || "").trim(),
+            top_plan_name: String(row.top_plan_name || "").trim(),
+          };
+        }
         return {
           advertiser_id: advertiserId,
           advertiser_name: String(row.advertiser_name || "").trim(),
@@ -1326,11 +1364,14 @@ function resolveAccountRelationItemsByIds(advertiserIds) {
     .sort((left, right) => Number(left.advertiser_id || 0) - Number(right.advertiser_id || 0));
 }
 
-function materialRelationDetailCacheKey(row) {
+function materialRelationDetailCacheKey(row, filter = materialFilter()) {
+  const normalizedFilter = normalizeRangeFilter(filter);
+  const payload = materialRangePayload(filter);
   const planIds = [...new Set((row?.plan_ids || []).map((item) => Number(item || 0)).filter((item) => item > 0))].sort((left, right) => left - right);
   const advertiserIds = [...new Set((row?.advertiser_ids || []).map((item) => Number(item || 0)).filter((item) => item > 0))].sort((left, right) => left - right);
   return [
-    requestDisplayScope(),
+    performanceFilterKey(filter),
+    normalizedFilter.mode === "day" ? String(payload?.snapshot_time || row?.snapshot_time || "").trim() : "",
     materialRowIdentity(row),
     `plans:${planIds.join(",")}`,
     `accounts:${advertiserIds.join(",")}`,
@@ -1338,7 +1379,10 @@ function materialRelationDetailCacheKey(row) {
 }
 
 async function fetchMaterialRelationDetail(row, force = false) {
-  const cacheKey = materialRelationDetailCacheKey(row);
+  const filter = materialFilter();
+  const normalizedFilter = normalizeRangeFilter(filter);
+  const rangePayload = materialRangePayload(filter) || {};
+  const cacheKey = materialRelationDetailCacheKey(row, filter);
   if (!force && state.materialRelationDetailCache[cacheKey]) {
     return state.materialRelationDetailCache[cacheKey];
   }
@@ -1347,6 +1391,12 @@ async function fetchMaterialRelationDetail(row, force = false) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      material_key: row?.material_key || "",
+      material_type: row?.material_type || "",
+      range: normalizedFilter.mode,
+      start_date: normalizedFilter.mode === "custom" ? normalizedFilter.start : "",
+      end_date: normalizedFilter.mode === "custom" ? normalizedFilter.end : "",
+      snapshot_time: normalizedFilter.mode === "day" ? String(rangePayload?.snapshot_time || row?.snapshot_time || "").trim() : "",
       plan_ids: row?.plan_ids || [],
       advertiser_ids: row?.advertiser_ids || [],
     }),
@@ -1355,9 +1405,9 @@ async function fetchMaterialRelationDetail(row, force = false) {
     const errorPayload = response ? await response.json().catch(() => ({})) : {};
     throw new Error(errorPayload.detail || "material relation detail fetch failed");
   }
-  const payload = await response.json();
-  state.materialRelationDetailCache[cacheKey] = payload;
-  return payload;
+  const detailPayload = await response.json();
+  state.materialRelationDetailCache[cacheKey] = detailPayload;
+  return detailPayload;
 }
 
 function materialPlanRelationItemsNeedResolve(items) {
@@ -1369,8 +1419,12 @@ function materialAccountRelationItemsNeedResolve(items) {
 }
 
 function mergeMaterialPlanRelationItems(localItems, resolvedItems) {
+  if (!(localItems || []).length) {
+    return buildPlanRelationItems(resolvedItems || []);
+  }
   const resolvedMap = new Map((resolvedItems || []).map((item) => [Number(item?.ad_id || 0), item]));
-  return (localItems || []).map((item) => {
+  const localIds = new Set((localItems || []).map((item) => Number(item?.ad_id || 0)).filter((item) => item > 0));
+  const merged = (localItems || []).map((item) => {
     const resolved = resolvedMap.get(Number(item?.ad_id || 0));
     if (!resolved) return item;
     return {
@@ -1379,30 +1433,49 @@ function mergeMaterialPlanRelationItems(localItems, resolvedItems) {
       advertiser_id: Number(item?.advertiser_id || resolved?.advertiser_id || 0),
       advertiser_name: String(item?.advertiser_name || "").trim() || String(resolved?.advertiser_name || "").trim(),
       ad_name: String(item?.ad_name || "").trim() || String(resolved?.ad_name || "").trim(),
-      stat_cost: item?.stat_cost ?? resolved?.stat_cost,
-      pay_amount: item?.pay_amount ?? resolved?.pay_amount,
-      order_count: item?.order_count ?? resolved?.order_count,
-      roi: item?.roi ?? resolved?.roi,
+      stat_cost: resolved?.stat_cost ?? item?.stat_cost,
+      pay_amount: resolved?.pay_amount ?? item?.pay_amount,
+      total_pay_amount: resolved?.total_pay_amount ?? item?.total_pay_amount,
+      settled_pay_amount: resolved?.settled_pay_amount ?? item?.settled_pay_amount,
+      order_count: resolved?.order_count ?? item?.order_count,
+      settled_order_count: resolved?.settled_order_count ?? item?.settled_order_count,
+      roi: resolved?.roi ?? item?.roi,
     };
   });
+  (resolvedItems || []).forEach((item) => {
+    if (!localIds.has(Number(item?.ad_id || 0))) {
+      merged.push(item);
+    }
+  });
+  return buildPlanRelationItems(merged);
 }
 
 function mergeMaterialAccountRelationItems(localItems, resolvedItems) {
+  if (!(localItems || []).length) {
+    return sortAccountRelationItems(resolvedItems || []);
+  }
   const resolvedMap = new Map((resolvedItems || []).map((item) => [Number(item?.advertiser_id || 0), item]));
-  return (localItems || []).map((item) => {
+  const localIds = new Set((localItems || []).map((item) => Number(item?.advertiser_id || 0)).filter((item) => item > 0));
+  const merged = (localItems || []).map((item) => {
     const resolved = resolvedMap.get(Number(item?.advertiser_id || 0));
     if (!resolved) return item;
     return {
       ...resolved,
       ...item,
       advertiser_name: String(item?.advertiser_name || "").trim() || String(resolved?.advertiser_name || "").trim(),
-      top_plan_name: String(item?.top_plan_name || "").trim() || String(resolved?.top_plan_name || "").trim(),
-      plan_count: item?.plan_count ?? resolved?.plan_count,
-      stat_cost: item?.stat_cost ?? resolved?.stat_cost,
-      pay_amount: item?.pay_amount ?? resolved?.pay_amount,
-      order_count: item?.order_count ?? resolved?.order_count,
+      top_plan_name: String(resolved?.top_plan_name || "").trim() || String(item?.top_plan_name || "").trim(),
+      plan_count: resolved?.plan_count ?? item?.plan_count,
+      stat_cost: resolved?.stat_cost ?? item?.stat_cost,
+      pay_amount: resolved?.pay_amount ?? item?.pay_amount,
+      order_count: resolved?.order_count ?? item?.order_count,
     };
   });
+  (resolvedItems || []).forEach((item) => {
+    if (!localIds.has(Number(item?.advertiser_id || 0))) {
+      merged.push(item);
+    }
+  });
+  return sortAccountRelationItems(merged);
 }
 
 function formatMaterialTotalPayAmount(row) {
@@ -2772,6 +2845,10 @@ function clearDashboardDataCaches() {
   state.materialPreviewSourceCache = {};
   state.catalogAccounts = [];
   state.dashboardFetchedAt = 0;
+  state.bootstrapFetchedAt = 0;
+  state.overviewFetchedAt = 0;
+  state.adminRuntimeFetchedAt = 0;
+  state.adminAlertsFetchedAt = 0;
   state.dashboardFetchQueued = false;
 }
 
@@ -3121,6 +3198,36 @@ function renderAlerts(events) {
   `).join("");
 }
 
+const TABLE_NUMERIC_COLUMN_KEYS = new Set([
+  "overall_ctr",
+  "stat_cost",
+  "total_pay_amount",
+  "settled_pay_amount",
+  "roi",
+  "pay_amount",
+  "order_count",
+  "settled_order_count",
+  "overall_show_count",
+  "overall_click_count",
+  "refund_amount_1h",
+  "refund_rate_1h",
+  "seen_count",
+  "active_day_count",
+  "plan_count",
+  "advertiser_count",
+]);
+
+const TABLE_CENTER_COLUMN_KEYS = new Set(["preview"]);
+const TABLE_DATE_COLUMN_KEYS = new Set(["create_time", "first_seen_at", "last_seen_at"]);
+
+function tableColumnClassName(columnKey) {
+  const key = String(columnKey || "");
+  if (TABLE_NUMERIC_COLUMN_KEYS.has(key)) return "is-numeric";
+  if (TABLE_CENTER_COLUMN_KEYS.has(key)) return "is-center";
+  if (TABLE_DATE_COLUMN_KEYS.has(key)) return "is-date";
+  return "is-text";
+}
+
 function makeHeader(columns, sortState, storageKey, onSort) {
   return `
     <thead>
@@ -3128,7 +3235,8 @@ function makeHeader(columns, sortState, storageKey, onSort) {
         ${columns.map((column) => {
           const active = sortState.key === column.key;
           const hint = !column.sortable ? "" : active ? (sortState.dir === "asc" ? "↑" : "↓") : "↕";
-          return `<th data-key="${column.key}" data-sort-hint="${hint}" class="${column.sortable ? "th-sort" : ""}">${column.label}</th>`;
+          const className = [column.sortable ? "th-sort" : "", tableColumnClassName(column.key)].filter(Boolean).join(" ");
+          return `<th data-key="${column.key}" data-sort-hint="${hint}" class="${className}">${column.label}</th>`;
         }).join("")}
       </tr>
     </thead>
@@ -3454,8 +3562,9 @@ function makeMaterialHeader(columns, sortState, summaryText, summaryMetrics, mod
           const active = sortState.key === column.key;
           const hint = !column.sortable ? "" : active ? (sortState.dir === "asc" ? "↑" : "↓") : "↕";
           const value = column.key === "material_name" ? summaryText : formatMaterialHeaderValue(column.key, summaryMetrics, mode);
+          const columnClass = tableColumnClassName(column.key);
           return `
-            <th data-key="${column.key}" class="account-table-th ${column.sortable ? "is-sortable" : ""}">
+            <th data-key="${column.key}" class="account-table-th ${column.sortable ? "is-sortable" : ""} ${columnClass}">
               <div class="account-table-head ${column.key === "material_name" ? "is-primary" : ""}">
                 <div class="account-table-head-main">
                   <span class="account-table-head-label">${column.label}</span>
@@ -3498,10 +3607,28 @@ const MATERIAL_TABLE_COLUMN_WIDTHS = Object.freeze({
   advertiser_count: 112,
 });
 
-function buildMaterialTableColgroup(columns) {
+const MATERIAL_OPERATOR_COLUMN_WIDTHS = Object.freeze({
+  material_name: 400,
+  product_info_text: 520,
+  preview: 144,
+  create_time: 156,
+  overall_ctr: 128,
+  stat_cost: 156,
+  top_anchor_name: 216,
+  plan_count: 128,
+});
+
+function materialColumnWidth(columnKey, variant = "default") {
+  const key = String(columnKey || "");
+  const override = variant === "operator" ? Number(MATERIAL_OPERATOR_COLUMN_WIDTHS[key]) : 0;
+  if (Number.isFinite(override) && override > 0) return override;
+  const configuredWidth = Number(MATERIAL_TABLE_COLUMN_WIDTHS[key]);
+  return Number.isFinite(configuredWidth) && configuredWidth > 0 ? configuredWidth : 132;
+}
+
+function buildMaterialTableColgroup(columns, variant = "default") {
   const widths = columns.map((column) => {
-    const configuredWidth = Number(MATERIAL_TABLE_COLUMN_WIDTHS[column?.key]);
-    return Number.isFinite(configuredWidth) && configuredWidth > 0 ? configuredWidth : 132;
+    return materialColumnWidth(column?.key, variant);
   });
   const totalWidth = widths.reduce((sum, width) => sum + width, 0);
   return {
@@ -4375,7 +4502,7 @@ function renderMaterialTable(payload) {
   const mode = normalizeMaterialViewMode(normalizedPayload.material_mode || materialViewMode());
   const libraryMode = mode === MATERIAL_VIEW_LIBRARY;
   const relationMode = mode === MATERIAL_VIEW_RELATION;
-  materialTable.className = `data-table aggregate-matrix-table ${relationMode ? "material-relation-table" : (libraryMode ? "material-library-table" : "material-performance-table")}`;
+  materialTable.className = `data-table aggregate-matrix-table ${relationMode ? "material-relation-table" : (libraryMode ? "material-library-table" : "material-performance-table")} ${operatorMode ? "is-operator-table" : ""}`;
   const pagination = normalizedPayload.pagination || {};
   const enrichedRows = (normalizedPayload.items || []).map((row) => enrichMaterialRow(row));
   const allowedSortKeys = relationMode
@@ -4455,7 +4582,7 @@ function renderMaterialTable(payload) {
           { key: "plan_count", label: "计划数", sortable: true },
           { key: "advertiser_count", label: "账户数", sortable: true },
         ]));
-  const tableLayout = buildMaterialTableColgroup(columns);
+  const tableLayout = buildMaterialTableColgroup(columns, operatorMode && !relationMode ? "operator" : "default");
   applyTableFixedWidth(materialTable, tableLayout.totalWidth);
   const totalRows = Number(pagination.total_count || enrichedRows.length || 0);
   const totalPages = Math.max(1, Number(pagination.total_pages || (totalRows > 0 ? Math.ceil(totalRows / MATERIAL_PAGE_SIZE) : 1)));
@@ -4654,7 +4781,7 @@ function renderTeamMaterialTable(payload) {
   if (!teamMaterialTable) return;
   const operatorMode = isOperator();
   const normalizedPayload = Array.isArray(payload) ? { items: payload } : (payload || {});
-  teamMaterialTable.className = "data-table team-material-table";
+  teamMaterialTable.className = `data-table team-material-table ${operatorMode ? "is-operator-table" : ""}`;
   const pagination = normalizedPayload.pagination || {};
   const pageRows = (Array.isArray(normalizedPayload.items) ? normalizedPayload.items : []).map((row) => enrichMaterialRow(row));
   if (
@@ -4690,7 +4817,7 @@ function renderTeamMaterialTable(payload) {
         { key: "top_plan_name", label: "归属计划", sortable: true },
         { key: "top_anchor_name", label: "达人", sortable: true },
       ];
-  const tableLayout = buildMaterialTableColgroup(columns);
+  const tableLayout = buildMaterialTableColgroup(columns, operatorMode ? "operator" : "default");
   applyTableFixedWidth(teamMaterialTable, tableLayout.totalWidth);
   const totalRows = Number(pagination.total_count || pageRows.length || 0);
   const totalPages = Math.max(1, Number(pagination.total_pages || (totalRows > 0 ? Math.ceil(totalRows / MATERIAL_PAGE_SIZE) : 1)));
@@ -4977,19 +5104,15 @@ async function openMaterialRelationDetail(row, kind) {
   const title = kind === "account" ? `${label} 覆盖账户` : `${label} 关联计划`;
   const meta = `${formatDateWindowMeta(payload)} · 基于当前素材汇总关系`;
   const localItems = kind === "account"
-    ? resolveAccountRelationItemsByIds(row?.advertiser_ids || [])
-    : resolvePlanRelationItemsByIds(row?.plan_ids || []);
+    ? resolveAccountRelationItemsByIds(row?.advertiser_ids || [], { includeMetrics: false })
+    : resolvePlanRelationItemsByIds(row?.plan_ids || [], { includeMetrics: false });
   openRelationDetailModal({
     title,
     meta,
     kind,
-    items: localItems,
+    items: kind === "account" ? sortAccountRelationItems(localItems) : buildPlanRelationItems(localItems),
     emptyText: kind === "account" ? "当前素材没有可展示的关联账户。" : "当前素材没有可展示的关联计划。",
   });
-  const shouldResolve = kind === "account"
-    ? materialAccountRelationItemsNeedResolve(localItems)
-    : materialPlanRelationItemsNeedResolve(localItems);
-  if (!shouldResolve) return;
   const requestToken = ++state.materialRelationDetailRequestToken;
   try {
     const resolvedPayload = await fetchMaterialRelationDetail(row);
@@ -7644,6 +7767,10 @@ async function refreshPerformanceSection(sectionKey, force = false) {
 
 async function ensureActiveViewData(force = false) {
   const activeView = String(state.activeView || "").trim();
+  if (activeView === "overview") {
+    await refreshOverviewShell(force);
+    return;
+  }
   const performanceSection = performanceSectionForView(activeView);
   if (performanceSection) {
     await refreshPerformanceSection(performanceSection, force);
@@ -7662,7 +7789,11 @@ async function ensureActiveViewData(force = false) {
     return;
   }
   if (activeView === "access") {
-    await ensureAccessData(force);
+    await refreshAccessShell(force);
+    return;
+  }
+  if (activeView === "signals") {
+    await refreshSignalsShell(force);
     return;
   }
   if (activeView === "uploads" && canUseUploadModule()) {
@@ -8030,12 +8161,17 @@ function bindInputs() {
       setOceanEnginePopoverOpen(false);
     }
   });
-  customerCenterChip?.addEventListener("click", (event) => {
+  customerCenterChip?.addEventListener("click", async (event) => {
     if (!isAdmin()) return;
     event.stopPropagation();
     const nextOpen = !state.oceanEnginePopoverOpen;
     setOceanEnginePopoverOpen(nextOpen);
     if (nextOpen) {
+      try {
+        await fetchAdminRuntimeData(false);
+      } catch (error) {
+        console.error("fetchAdminRuntimeData failed", error);
+      }
       window.setTimeout(() => {
         const allScopeButton = oceanEngineBoundAccounts?.querySelector('[data-action="switch-display-scope-all"]:not(:disabled)');
         if (allScopeButton) {
@@ -8669,6 +8805,206 @@ function bindInputs() {
   resetRuleFormState();
 }
 
+function mergeDashboardPayload(payload = {}) {
+  const incoming = payload && typeof payload === "object" ? payload : {};
+  const current = state.payload && typeof state.payload === "object" ? state.payload : {};
+  const next = { ...current, ...incoming };
+  if (current.latest && incoming.latest) {
+    next.latest = { ...current.latest, ...incoming.latest };
+  }
+  state.payload = next;
+  if (Object.prototype.hasOwnProperty.call(incoming, "session")) {
+    state.session = incoming.session || null;
+  }
+  if (Object.prototype.hasOwnProperty.call(incoming, "oceanEngineConfig")) {
+    state.oceanEngineConfig = incoming.oceanEngineConfig || null;
+  }
+  if (Object.prototype.hasOwnProperty.call(incoming, "alertRules")) {
+    state.alertRules = incoming.alertRules || [];
+  }
+  return next;
+}
+
+function renderBootstrapShell(payload = {}) {
+  const merged = mergeDashboardPayload(payload);
+  applyRoleViewPolicy();
+  const latest = merged.latest || {};
+  const snapshotText = latest.snapshot_time || "--";
+  if (lastSnapshotText) {
+    lastSnapshotText.textContent = snapshotText;
+  }
+  if (heroStatusText) {
+    heroStatusText.textContent = latest.snapshot_time || "\u7b49\u5f85\u6570\u636e";
+  }
+  if (heroStatusHint && !state.oceanEngineConfig) {
+    heroStatusHint.textContent = "1 \u5206\u949f";
+  }
+  if (customerCenterChip && !state.oceanEngineConfig) {
+    customerCenterChip.textContent = usingAllCustomerCenters()
+      ? "\u5168\u90e8\u8d26\u53f7"
+      : `CC ${merged.customerCenterId || "--"}`;
+  }
+  if (state.oceanEngineConfig) {
+    renderOceanEngineConfig(state.oceanEngineConfig);
+  } else {
+    syncOceanEnginePopoverState();
+  }
+  if (refreshHintText) {
+    refreshHintText.textContent = dashboardRefreshHintText(state.oceanEngineConfig);
+  }
+  applyFullRefreshStatus();
+  return merged;
+}
+
+async function fetchBootstrap(force = false) {
+  const now = Date.now();
+  if (state.bootstrapFetchPromise && !force) {
+    return state.bootstrapFetchPromise;
+  }
+  if (!force && state.payload && now - Number(state.bootstrapFetchedAt || 0) < DASHBOARD_FETCH_DEDUPE_MS) {
+    return state.payload;
+  }
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    const response = await fetch(`/api/bootstrap?${params.toString()}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.detail || payload?.message || "bootstrap fetch failed");
+    }
+    state.bootstrapFetchedAt = Date.now();
+    return renderBootstrapShell(payload);
+  })();
+  state.bootstrapFetchPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    state.bootstrapFetchPromise = null;
+  }
+}
+
+async function fetchOverviewPayload(force = false) {
+  const now = Date.now();
+  if (state.overviewFetchPromise && !force) {
+    return state.overviewFetchPromise;
+  }
+  if (!force && state.payload?.latest?.summary && now - Number(state.overviewFetchedAt || 0) < PERFORMANCE_CACHE_TTL_MS) {
+    return state.payload;
+  }
+  const requestPromise = (async () => {
+    const params = appendDisplayScopeParam(new URLSearchParams());
+    if (force) {
+      params.set("fresh", "1");
+    }
+    const response = await fetch(`/api/overview?${params.toString()}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.detail || payload?.message || "overview fetch failed");
+    }
+    state.overviewFetchedAt = Date.now();
+    return mergeDashboardPayload(payload);
+  })();
+  state.overviewFetchPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    state.overviewFetchPromise = null;
+  }
+}
+
+async function fetchAdminRuntimeData(force = false) {
+  if (!isAdmin()) {
+    return null;
+  }
+  const now = Date.now();
+  if (state.adminRuntimeFetchPromise && !force) {
+    return state.adminRuntimeFetchPromise;
+  }
+  if (!force && state.oceanEngineConfig && now - Number(state.adminRuntimeFetchedAt || 0) < PERFORMANCE_CACHE_TTL_MS) {
+    return state.payload;
+  }
+  const requestPromise = (async () => {
+    const response = await fetch("/api/admin/runtime");
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.detail || payload?.message || "admin runtime fetch failed");
+    }
+    state.adminRuntimeFetchedAt = Date.now();
+    const merged = mergeDashboardPayload(payload);
+    renderOceanEngineConfig(merged.oceanEngineConfig || { customer_center_id: merged.customerCenterId || "" });
+    if (refreshHintText) {
+      refreshHintText.textContent = dashboardRefreshHintText(merged.oceanEngineConfig || state.oceanEngineConfig);
+    }
+    return merged;
+  })();
+  state.adminRuntimeFetchPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    state.adminRuntimeFetchPromise = null;
+  }
+}
+
+function renderAdminAlertsPayload(payload = state.payload || {}) {
+  const merged = mergeDashboardPayload(payload);
+  state.alertRules = merged.alertRules || [];
+  renderAlerts(merged.alertEvents || []);
+  renderSignalOverview(merged.notificationSettings || {}, state.alertRules);
+  renderNotificationSettings(merged.notificationSettings || {});
+  renderRuleTable(state.alertRules);
+  syncRuleFormFields();
+  return merged;
+}
+
+async function fetchAdminAlertsData(force = false) {
+  if (!isAdmin()) {
+    return null;
+  }
+  const now = Date.now();
+  if (state.adminAlertsFetchPromise && !force) {
+    return state.adminAlertsFetchPromise;
+  }
+  if (!force && Number(state.adminAlertsFetchedAt || 0) > 0 && now - Number(state.adminAlertsFetchedAt || 0) < PERFORMANCE_CACHE_TTL_MS) {
+    return state.payload;
+  }
+  const requestPromise = (async () => {
+    const response = await fetch("/api/admin/alerts");
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.detail || payload?.message || "admin alerts fetch failed");
+    }
+    state.adminAlertsFetchedAt = Date.now();
+    return renderAdminAlertsPayload(payload);
+  })();
+  state.adminAlertsFetchPromise = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    state.adminAlertsFetchPromise = null;
+  }
+}
+
+async function refreshOverviewShell(force = false) {
+  const tasks = [fetchOverviewPayload(force)];
+  if (isAdmin()) {
+    tasks.push(fetchAdminRuntimeData(force), fetchAdminAlertsData(force));
+  }
+  await Promise.all(tasks);
+  await render(state.payload || {});
+  return state.payload;
+}
+
+async function refreshSignalsShell(force = false) {
+  await fetchAdminAlertsData(force);
+  renderAdminAlertsPayload(state.payload || {});
+  return state.payload;
+}
+
+async function refreshAccessShell(force = false) {
+  await Promise.all([ensureAccessData(force), fetchAdminRuntimeData(force)]);
+  renderOceanEngineConfig(state.oceanEngineConfig || { customer_center_id: state.payload?.customerCenterId || "" });
+  return state.payload;
+}
+
 async function fetchDashboard(force = false, options = {}) {
   const refreshMode = String(options?.refreshMode || "active").trim().toLowerCase() || "active";
   const now = Date.now();
@@ -8686,23 +9022,14 @@ async function fetchDashboard(force = false, options = {}) {
     return state.payload;
   }
   const requestPromise = (async () => {
-    const params = appendDisplayScopeParam(new URLSearchParams());
-    if (force) {
-      params.set("fresh", "1");
-    }
-    const response = await fetch(`/api/dashboard?${params.toString()}`);
-    const payload = await response.json();
-    state.payload = payload;
-    state.session = payload.session || null;
-    state.oceanEngineConfig = payload.oceanEngineConfig || null;
+    await fetchBootstrap(force);
     state.dashboardFetchedAt = Date.now();
-    if (!payload.latest) {
-      applyRoleViewPolicy();
-      renderOceanEngineConfig(payload.oceanEngineConfig || { customer_center_id: payload.customerCenterId || "" });
-      return payload;
+    const skipActiveViewRefresh = refreshMode === "skip"
+      || (refreshMode === "passive" && shouldSkipActiveViewRefresh(state.activeView));
+    if (!skipActiveViewRefresh) {
+      await ensureActiveViewData(force);
     }
-    await render(payload, { refreshMode });
-    return payload;
+    return state.payload;
   })();
   state.dashboardFetchPromise = requestPromise;
   try {
@@ -8822,37 +9149,31 @@ async function fetchFullRefreshStatus(force = false) {
 }
 
 async function render(payload, options = {}) {
-  const latest = payload.latest;
-  const refreshMode = String(options?.refreshMode || "active").trim().toLowerCase() || "active";
-  state.alertRules = payload.alertRules || [];
+  const merged = mergeDashboardPayload(payload);
+  const latest = merged.latest || {};
+  state.alertRules = merged.alertRules || [];
   applyRoleViewPolicy();
-  renderOceanEngineConfig(payload.oceanEngineConfig || { customer_center_id: payload.customerCenterId || "" });
+  renderOceanEngineConfig(merged.oceanEngineConfig || { customer_center_id: merged.customerCenterId || "" });
   renderOverviewHero(latest);
   renderKpis(latest);
-  renderSystemCards(latest, payload.extendedSync || latest?.extendedSync, payload.tokenInfo || {});
-  renderAlerts(payload.alertEvents || []);
-  renderSignalOverview(payload.notificationSettings || {}, state.alertRules);
-  renderNotificationSettings(payload.notificationSettings || {});
+  renderSystemCards(latest, merged.extendedSync || latest?.extendedSync, merged.tokenInfo || {});
+  renderAlerts(merged.alertEvents || []);
+  renderSignalOverview(merged.notificationSettings || {}, state.alertRules);
+  renderNotificationSettings(merged.notificationSettings || {});
   renderRuleTable(state.alertRules);
   syncRuleFormFields();
-  lastSnapshotText.textContent = latest.snapshot_time;
+  if (lastSnapshotText) {
+    lastSnapshotText.textContent = latest.snapshot_time || "--";
+  }
   applyFullRefreshStatus();
   if (refreshHintText) {
-    refreshHintText.textContent = dashboardRefreshHintText(payload.oceanEngineConfig || state.oceanEngineConfig);
+    refreshHintText.textContent = dashboardRefreshHintText(merged.oceanEngineConfig || state.oceanEngineConfig);
   }
   setActiveView(state.activeView);
-  const skipActiveViewRefresh = refreshMode === "skip"
-    || (refreshMode === "passive" && shouldSkipActiveViewRefresh(state.activeView));
-  if (!skipActiveViewRefresh) {
-    ensureActiveViewData(false).catch((error) => {
-      console.error("ensureActiveViewData failed", error);
-    });
-  }
 }
 
 bindInputs();
 setActiveView(state.activeView);
-bootstrapInitialActiveViewData().catch(() => {});
 fetchDashboard().catch(() => {});
 fetchFullRefreshStatus().catch(() => {});
 window.setInterval(() => {

@@ -19,6 +19,18 @@ def register_query_routes(
     role_operator: str,
     timezone: str,
 ) -> None:
+    def session_payload(user: dict[str, Any], allowed: set[int] | None) -> dict[str, Any]:
+        return {
+            "id": user["id"],
+            "username": user["username"],
+            "role": user["role"],
+            "display_name": user.get("display_name") or "",
+            "upload_materials_enabled": bool(user.get("upload_materials_enabled")),
+            "can_upload_materials": service.can_upload_materials(user),
+            "scope_type": "all" if allowed is None else "restricted",
+            "scope_count": None if allowed is None else len(allowed),
+        }
+
     @app.get("/api/operator-rankings")
     async def operator_rankings(
         range: str = "day",
@@ -66,18 +78,7 @@ def register_query_routes(
     @app.get("/api/session/me")
     async def current_session(user: dict[str, Any] = Depends(require_auth)) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
-        return api_response(
-            {
-                "id": user["id"],
-                "username": user["username"],
-                "role": user["role"],
-                "display_name": user.get("display_name") or "",
-                "upload_materials_enabled": bool(user.get("upload_materials_enabled")),
-                "can_upload_materials": service.can_upload_materials(user),
-                "scope_type": "all" if allowed is None else "restricted",
-                "scope_count": None if allowed is None else len(allowed),
-            }
-        )
+        return api_response(session_payload(user, allowed))
 
     @app.get("/api/catalog/accounts")
     async def available_accounts(
@@ -88,6 +89,66 @@ def register_query_routes(
         items = await asyncio.to_thread(service.latest_account_catalog, allowed, display_scope)
         return api_response({"items": items})
 
+    @app.get("/api/bootstrap")
+    async def bootstrap_data(
+        display_scope: str = "current",
+        user: dict[str, Any] = Depends(require_auth),
+    ) -> JSONResponse:
+        allowed = service.allowed_advertiser_ids_for_user(user)
+        effective_display_scope = display_scope if str(user.get("role") or "") == role_admin else "current"
+        latest_task = asyncio.create_task(asyncio.to_thread(service.dashboard_bootstrap_payload, effective_display_scope))
+        extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, effective_display_scope))
+        config_task = asyncio.create_task(asyncio.to_thread(service.read_config))
+        latest, extended_sync, current_config = await asyncio.gather(
+            latest_task,
+            extended_sync_task,
+            config_task,
+        )
+        return api_response(
+            {
+                "session": session_payload(user, allowed),
+                "latest": latest,
+                "materialSync": extended_sync,
+                "extendedSync": extended_sync,
+                "summaryHistory": [],
+                "customerCenterId": current_config["customer_center_id"],
+                "displayScope": effective_display_scope,
+                "timezone": timezone,
+            }
+        )
+
+    @app.get("/api/overview")
+    async def overview_data(
+        display_scope: str = "current",
+        fresh: bool = False,
+        user: dict[str, Any] = Depends(require_auth),
+    ) -> JSONResponse:
+        allowed = service.allowed_advertiser_ids_for_user(user)
+        effective_display_scope = display_scope if str(user.get("role") or "") == role_admin else "current"
+        latest_task = asyncio.create_task(
+            asyncio.to_thread(service.dashboard_overview_payload, allowed, effective_display_scope, user, bool(fresh))
+        )
+        extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, effective_display_scope))
+        latest, extended_sync = await asyncio.gather(latest_task, extended_sync_task)
+        return api_response(
+            {
+                "latest": latest,
+                "materialSync": extended_sync,
+                "extendedSync": extended_sync,
+                "summaryHistory": [],
+                "displayScope": effective_display_scope,
+                "timezone": timezone,
+            }
+        )
+
+    @app.get("/api/admin/runtime")
+    async def admin_runtime_data(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+        return api_response(await asyncio.to_thread(service.admin_runtime_payload))
+
+    @app.get("/api/admin/alerts")
+    async def admin_alerts_data(_user: dict[str, Any] = Depends(require_admin)) -> JSONResponse:
+        return api_response(await asyncio.to_thread(service.admin_alerts_payload))
+
     @app.get("/api/dashboard")
     async def dashboard_data(
         display_scope: str = "current",
@@ -96,69 +157,35 @@ def register_query_routes(
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
         is_admin = str(user.get("role") or "") == role_admin
+        effective_display_scope = display_scope if is_admin else "current"
         latest_task = asyncio.create_task(
-            asyncio.to_thread(service.dashboard_overview_payload, allowed, display_scope, user, bool(fresh))
+            asyncio.to_thread(service.dashboard_overview_payload, allowed, effective_display_scope, user, bool(fresh))
         )
-        extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, display_scope))
+        extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, effective_display_scope))
         config_task = asyncio.create_task(asyncio.to_thread(service.read_config))
-        token_task = (
-            asyncio.create_task(asyncio.to_thread(lambda: service.latest_token_payload(masked=True)))
-            if is_admin
-            else None
-        )
-        ocean_config_task = (
-            asyncio.create_task(asyncio.to_thread(service.ocean_engine_runtime_config))
-            if is_admin
-            else None
-        )
-        notification_settings_task = (
-            asyncio.create_task(asyncio.to_thread(service.get_notification_settings))
-            if is_admin
-            else None
-        )
-        alert_rules_task = (
-            asyncio.create_task(asyncio.to_thread(service.list_alert_rules))
-            if is_admin
-            else None
-        )
-        alert_events_task = (
-            asyncio.create_task(asyncio.to_thread(service.alert_events))
-            if is_admin
-            else None
-        )
+        admin_runtime_task = asyncio.create_task(asyncio.to_thread(service.admin_runtime_payload)) if is_admin else None
+        admin_alerts_task = asyncio.create_task(asyncio.to_thread(service.admin_alerts_payload)) if is_admin else None
         latest, extended_sync, current_config = await asyncio.gather(
             latest_task,
             extended_sync_task,
             config_task,
         )
-        token_info = await token_task if token_task else None
-        ocean_engine_config = await ocean_config_task if ocean_config_task else None
-        notification_settings = await notification_settings_task if notification_settings_task else {}
-        alert_rules = await alert_rules_task if alert_rules_task else []
-        alert_events = await alert_events_task if alert_events_task else []
+        admin_runtime = await admin_runtime_task if admin_runtime_task else {}
+        admin_alerts = await admin_alerts_task if admin_alerts_task else {}
         return api_response(
             {
-                "session": {
-                    "id": user["id"],
-                    "username": user["username"],
-                    "role": user["role"],
-                    "display_name": user.get("display_name") or "",
-                    "upload_materials_enabled": bool(user.get("upload_materials_enabled")),
-                    "can_upload_materials": service.can_upload_materials(user),
-                    "scope_type": "all" if allowed is None else "restricted",
-                    "scope_count": None if allowed is None else len(allowed),
-                },
+                "session": session_payload(user, allowed),
                 "latest": latest,
                 "materialSync": extended_sync,
                 "extendedSync": extended_sync,
-                "tokenInfo": token_info,
-                "oceanEngineConfig": ocean_engine_config,
+                "tokenInfo": admin_runtime.get("tokenInfo"),
+                "oceanEngineConfig": admin_runtime.get("oceanEngineConfig"),
                 "summaryHistory": [],
-                "notificationSettings": notification_settings,
-                "alertRules": alert_rules,
-                "alertEvents": alert_events,
+                "notificationSettings": admin_alerts.get("notificationSettings", {}),
+                "alertRules": admin_alerts.get("alertRules", []),
+                "alertEvents": admin_alerts.get("alertEvents", []),
                 "customerCenterId": current_config["customer_center_id"],
-                "displayScope": display_scope,
+                "displayScope": effective_display_scope,
                 "timezone": timezone,
             }
         )
@@ -290,6 +317,12 @@ def register_query_routes(
         try:
             payload = await asyncio.to_thread(
                 service.material_relation_detail_lookup,
+                material_key=str(relation_row.get("material_key") or "").strip(),
+                material_type=str(relation_row.get("material_type") or "").strip(),
+                range_key=str(relation_row.get("range") or relation_row.get("range_key") or "day").strip().lower() or "day",
+                start_date=str(relation_row.get("start_date") or "").strip(),
+                end_date=str(relation_row.get("end_date") or "").strip(),
+                snapshot_time=str(relation_row.get("snapshot_time") or "").strip(),
                 plan_ids=relation_row.get("plan_ids") or [],
                 advertiser_ids=relation_row.get("advertiser_ids") or [],
                 allowed_advertiser_ids=allowed,
