@@ -300,6 +300,71 @@ class UserAccess:
             item["enabled"] = bool(item["enabled"])
         return item
 
+    def create_user_keywords(self, user_id: int, keywords: list[str], enabled: bool = True) -> list[dict[str, Any]]:
+        user = self.get_user_by_id(user_id, include_disabled=True)
+        if not user:
+            raise ValueError("user not found")
+        if str(user.get("role") or "") != self._role_operator:
+            raise ValueError("only operator users can manage keywords")
+        normalized_keywords: list[str] = []
+        seen: set[str] = set()
+        for item in list(keywords or []):
+            keyword = str(item or "").strip()
+            if not keyword:
+                continue
+            folded = keyword.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            normalized_keywords.append(keyword)
+        if not normalized_keywords:
+            return []
+        now = self._now_text()
+        enabled_value = 1 if enabled else 0
+        placeholders = ",".join(["?"] * len(normalized_keywords))
+        with self._db() as conn:
+            existing_rows = conn.execute(
+                f"""
+                SELECT keyword
+                FROM user_keywords
+                WHERE user_id = ?
+                  AND keyword IN ({placeholders})
+                """,
+                (user_id, *normalized_keywords),
+            ).fetchall()
+            existing_keywords = {
+                str(row["keyword"] or "").strip().casefold()
+                for row in existing_rows
+                if str(row["keyword"] or "").strip()
+            }
+            insert_rows = [
+                (user_id, keyword, enabled_value, now, now)
+                for keyword in normalized_keywords
+                if keyword.casefold() not in existing_keywords
+            ]
+            if insert_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO user_keywords (user_id, keyword, enabled, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    insert_rows,
+                )
+            rows = conn.execute(
+                f"""
+                SELECT id, user_id, keyword, enabled, created_at, updated_at
+                FROM user_keywords
+                WHERE user_id = ?
+                  AND keyword IN ({placeholders})
+                ORDER BY id ASC
+                """,
+                (user_id, *normalized_keywords),
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            item["enabled"] = bool(item["enabled"])
+        return items
+
     def delete_user_keyword(self, keyword_id: int) -> None:
         with self._db() as conn:
             conn.execute("DELETE FROM user_keywords WHERE id = ?", (keyword_id,))

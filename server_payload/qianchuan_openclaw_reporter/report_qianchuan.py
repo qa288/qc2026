@@ -121,6 +121,24 @@ UNI_PLAN_REPORT_FALLBACK_METRICS = [
     "total_order_settle_count_for_roi2_1h",
     "total_prepay_and_pay_settle_roi2_1h",
 ]
+UNI_PRODUCT_AD_HISTORY_TOPIC = "SITE_PROMOTION_PRODUCT_AD"
+UNI_PRODUCT_AD_HISTORY_DIMENSIONS = [
+    "ad_id",
+]
+UNI_PRODUCT_AD_HISTORY_METRICS = [
+    "stat_cost",
+    "total_pay_order_gmv_for_roi2",
+    "total_pay_order_gmv_include_coupon_for_roi2",
+    "total_pay_order_count_for_roi2",
+    "total_prepay_and_pay_order_roi2",
+    "total_order_settle_amount_for_roi2_1h",
+    "total_order_settle_count_for_roi2_1h",
+    "total_prepay_and_pay_settle_roi2_1h",
+    "total_cost_per_pay_order_for_roi2",
+    "total_order_settle_amount_rate_for_roi2_1h",
+    "total_refund_order_gmv_for_roi2_1h_all",
+    "total_refund_order_gmv_for_roi2_1h_rate",
+]
 UNI_CUBIC_PLAN_DIMENSIONS = [
     "ad_id",
     "ad_name",
@@ -137,6 +155,15 @@ UNI_CUBIC_PRODUCT_DIMENSIONS = [
 ]
 UNI_CUBIC_PRODUCT_METRICS = [
     "stat_cost_for_roi2",
+    "total_pay_order_gmv_for_roi2",
+    "total_pay_order_gmv_include_coupon_for_roi2",
+    "total_pay_order_count_for_roi2",
+    "total_prepay_and_pay_order_roi2",
+    "total_order_settle_amount_for_roi2_1h",
+    "total_order_settle_count_for_roi2_1h",
+    "total_prepay_and_pay_settle_roi2_1h",
+    "total_refund_order_gmv_for_roi2_1h_all",
+    "total_refund_order_gmv_for_roi2_1h_rate",
 ]
 UNI_CUBIC_PLAN_METRICS = [
     "stat_cost_for_roi2",
@@ -204,11 +231,12 @@ TOKEN_LOCK_BLOCKING_TIMEOUT_SECONDS = int(
 
 PLAN_MONEY_SCALE = 100000.0
 ACCOUNT_FUND_MONEY_SCALE = 100.0
-RETRYABLE_API_CODES = {40100, 40110, 50000}
+RETRYABLE_API_CODES = {40100, 40110, 50000, 51010}
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 RETRYABLE_TRANSIENT_40000_MESSAGE_FRAGMENTS = (
     "下游依赖服务相关错误",
     "GetUniPromMaterial fail",
+    "\u5343\u5ddd\u670d\u52a1\u9519\u8bef",
 )
 TOKEN_FORCE_REFRESH_CODES = {40100, 40105}
 try:
@@ -776,7 +804,7 @@ def get_json_with_retries(
             if should_force_refresh and attempt < attempts:
                 retry_code = 40100
                 retry_response = response
-            elif code not in RETRYABLE_API_CODES or attempt >= attempts:
+            elif not _is_retryable_api_response(code, response) or attempt >= attempts:
                 return response
             else:
                 last_response = response
@@ -838,7 +866,7 @@ def post_api_json_with_retries(
             if should_force_refresh and attempt < attempts:
                 retry_code = 40100
                 retry_response = response
-            elif code not in RETRYABLE_API_CODES or attempt >= attempts:
+            elif not _is_retryable_api_response(code, response) or attempt >= attempts:
                 return response
             else:
                 last_response = response
@@ -902,7 +930,7 @@ def post_api_multipart_with_retries(
             if should_force_refresh and attempt < attempts:
                 retry_code = 40100
                 retry_response = response
-            elif code not in RETRYABLE_API_CODES or attempt >= attempts:
+            elif not _is_retryable_api_response(code, response) or attempt >= attempts:
                 return response
             else:
                 last_response = response
@@ -2511,6 +2539,113 @@ class OceanEngineClient:
             hydrate_plan_detail=hydrate_plan_detail,
         )
 
+    def list_site_promotion_product_ad_plan_summaries(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        *,
+        hydrate_plan_detail: bool = True,
+    ) -> list[PlanSummary]:
+        page = 1
+        page_size = min(normalize_plan_page_size(self.config), 100)
+        plans_by_ad_id: dict[int, PlanSummary] = {}
+        while True:
+            response = self.get_uni_promotion_data(
+                advertiser_id=advertiser_id,
+                data_topic=UNI_PRODUCT_AD_HISTORY_TOPIC,
+                dimensions=list(UNI_PRODUCT_AD_HISTORY_DIMENSIONS),
+                metrics=list(UNI_PRODUCT_AD_HISTORY_METRICS),
+                start_time=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_time=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                filters=[],
+                order_by=[{"field": "stat_cost", "type": 2}],
+                page=page,
+                page_size=page_size,
+            )
+            data = response.get("data") or {}
+            rows = data.get("rows") or []
+            for row in rows:
+                dimensions = row.get("dimensions") or {}
+                metrics = row.get("metrics") or {}
+                ad_id = int(self._report_cell_value(dimensions.get("ad_id")) or 0)
+                if not ad_id or ad_id in plans_by_ad_id:
+                    continue
+
+                stat_cost = normalize_metric(self._report_cell_value(metrics.get("stat_cost")))
+                pay_amount = normalize_metric(self._report_cell_value(metrics.get("total_pay_order_gmv_for_roi2")))
+                total_pay_amount = normalize_metric(
+                    self._report_cell_value(metrics.get("total_pay_order_gmv_include_coupon_for_roi2"))
+                )
+                order_count = int(
+                    float(self._report_cell_value(metrics.get("total_pay_order_count_for_roi2")) or 0.0)
+                )
+                settled_pay_amount = normalize_metric(
+                    self._report_cell_value(metrics.get("total_order_settle_amount_for_roi2_1h"))
+                )
+                settled_order_count = int(
+                    float(self._report_cell_value(metrics.get("total_order_settle_count_for_roi2_1h")) or 0.0)
+                )
+                refund_amount_1h = normalize_metric(
+                    self._report_cell_value(metrics.get("total_refund_order_gmv_for_roi2_1h_all"))
+                )
+                plan = PlanSummary(
+                    advertiser_id=advertiser_id,
+                    advertiser_name=advertiser_name,
+                    ad_id=ad_id,
+                    ad_name=f"ad_{ad_id}",
+                    product_id="",
+                    product_name="",
+                    anchor_name="",
+                    marketing_goal="VIDEO_PROM_GOODS",
+                    status="",
+                    opt_status="",
+                    roi_goal=0.0,
+                    stat_cost=stat_cost,
+                    roi=normalize_metric(self._report_cell_value(metrics.get("total_prepay_and_pay_order_roi2"))),
+                    order_count=order_count,
+                    pay_amount=pay_amount,
+                    total_pay_amount=total_pay_amount,
+                    settled_pay_amount=settled_pay_amount,
+                    settled_roi=normalize_metric(
+                        self._report_cell_value(metrics.get("total_prepay_and_pay_settle_roi2_1h"))
+                    ),
+                    settled_order_count=settled_order_count,
+                    pay_order_cost=derive_ratio(
+                        stat_cost,
+                        order_count,
+                        self._report_cell_value(metrics.get("total_cost_per_pay_order_for_roi2")),
+                    ),
+                    settled_amount_rate=derive_percent(
+                        settled_pay_amount,
+                        total_pay_amount,
+                        self._report_cell_value(metrics.get("total_order_settle_amount_rate_for_roi2_1h")),
+                    ),
+                    refund_rate_1h=derive_percent(
+                        refund_amount_1h,
+                        total_pay_amount,
+                        self._report_cell_value(metrics.get("total_refund_order_gmv_for_roi2_1h_rate")),
+                    ),
+                    refund_amount_1h=refund_amount_1h,
+                    plan_source=PLAN_SOURCE_UNI_REPORT,
+                    plan_delivery_type=PLAN_DELIVERY_TYPE_GLOBAL,
+                )
+                if hydrate_plan_detail:
+                    try:
+                        detail_response = self.get_plan_detail(advertiser_id, ad_id)
+                        self._apply_report_plan_detail(plan, detail_response.get("data") or {})
+                    except Exception:  # noqa: BLE001
+                        pass
+                plans_by_ad_id[ad_id] = plan
+
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page:
+                break
+            page += 1
+        return list(plans_by_ad_id.values())
+
     def list_cubic_plan_summaries(
         self,
         advertiser_id: int,
@@ -2609,9 +2744,65 @@ class OceanEngineClient:
         except Exception:  # noqa: BLE001
             cubic_product_metadata = {}
         for ad_id, metadata in cubic_product_metadata.items():
+            stat_cost = normalize_metric(metadata.get("stat_cost"))
+            pay_amount = normalize_metric(metadata.get("pay_amount"))
+            total_pay_amount = normalize_metric(metadata.get("total_pay_amount"))
+            order_count = int(float(metadata.get("order_count", 0) or 0))
+            settled_pay_amount = normalize_metric(metadata.get("settled_pay_amount"))
+            settled_order_count = int(float(metadata.get("settled_order_count", 0) or 0))
+            refund_amount_1h = normalize_metric(metadata.get("refund_amount_1h"))
+            product_plan = PlanSummary(
+                advertiser_id=advertiser_id,
+                advertiser_name=advertiser_name,
+                ad_id=ad_id,
+                ad_name=str(metadata.get("ad_name") or f"ad_{ad_id}"),
+                product_id=str(metadata.get("product_id") or ""),
+                product_name=str(metadata.get("product_name") or ""),
+                anchor_name=str(metadata.get("anchor_name") or ""),
+                marketing_goal="VIDEO_PROM_GOODS",
+                status="",
+                opt_status="",
+                roi_goal=0.0,
+                stat_cost=stat_cost,
+                roi=derive_ratio(pay_amount, stat_cost, metadata.get("roi")),
+                order_count=order_count,
+                pay_amount=pay_amount,
+                total_pay_amount=total_pay_amount,
+                settled_pay_amount=settled_pay_amount,
+                settled_roi=derive_ratio(settled_pay_amount, stat_cost, metadata.get("settled_roi")),
+                settled_order_count=settled_order_count,
+                pay_order_cost=derive_ratio(stat_cost, order_count, metadata.get("pay_order_cost")),
+                settled_amount_rate=derive_percent(
+                    settled_pay_amount,
+                    total_pay_amount,
+                    metadata.get("settled_amount_rate"),
+                ),
+                refund_rate_1h=derive_percent(
+                    refund_amount_1h,
+                    total_pay_amount,
+                    metadata.get("refund_rate_1h"),
+                ),
+                refund_amount_1h=refund_amount_1h,
+                plan_source=PLAN_SOURCE_UNI_CUBIC,
+                plan_delivery_type=PLAN_DELIVERY_TYPE_CUBIC,
+            )
             plan = plans_by_ad_id.get(ad_id)
             if plan is None:
+                plans_by_ad_id[ad_id] = product_plan
                 continue
+            if stat_cost > 0:
+                plan.stat_cost = product_plan.stat_cost
+                plan.roi = product_plan.roi
+                plan.order_count = product_plan.order_count
+                plan.pay_amount = product_plan.pay_amount
+                plan.total_pay_amount = product_plan.total_pay_amount
+                plan.settled_pay_amount = product_plan.settled_pay_amount
+                plan.settled_roi = product_plan.settled_roi
+                plan.settled_order_count = product_plan.settled_order_count
+                plan.pay_order_cost = product_plan.pay_order_cost
+                plan.settled_amount_rate = product_plan.settled_amount_rate
+                plan.refund_rate_1h = product_plan.refund_rate_1h
+                plan.refund_amount_1h = product_plan.refund_amount_1h
             product_id = str(metadata.get("product_id") or "").strip()
             if not str(plan.product_id or "").strip() and product_id:
                 plan.product_id = product_id
@@ -2659,18 +2850,60 @@ class OceanEngineClient:
                     continue
                 stat_cost = normalize_metric(self._report_cell_value(metrics.get("stat_cost_for_roi2")))
                 existing = metadata_by_ad_id.get(ad_id)
-                if existing is not None and float(existing.get("_score", 0.0) or 0.0) >= stat_cost:
-                    continue
-                metadata_by_ad_id[ad_id] = {
-                    "advertiser_id": advertiser_id,
-                    "advertiser_name": advertiser_name,
-                    "ad_id": ad_id,
-                    "ad_name": str(self._report_cell_value(dimensions.get("ad_name")) or f"ad_{ad_id}"),
-                    "product_id": str(self._report_cell_value(dimensions.get("qianchuan_product_id")) or ""),
-                    "product_name": str(self._report_cell_value(dimensions.get("qianchuan_product_name")) or ""),
-                    "anchor_name": str(self._report_cell_value(dimensions.get("anchor_name")) or ""),
-                    "_score": stat_cost,
-                }
+                if existing is None:
+                    existing = {
+                        "advertiser_id": advertiser_id,
+                        "advertiser_name": advertiser_name,
+                        "ad_id": ad_id,
+                        "ad_name": str(self._report_cell_value(dimensions.get("ad_name")) or f"ad_{ad_id}"),
+                        "product_id": str(self._report_cell_value(dimensions.get("qianchuan_product_id")) or ""),
+                        "product_name": str(self._report_cell_value(dimensions.get("qianchuan_product_name")) or ""),
+                        "anchor_name": str(self._report_cell_value(dimensions.get("anchor_name")) or ""),
+                        "stat_cost": 0.0,
+                        "pay_amount": 0.0,
+                        "total_pay_amount": 0.0,
+                        "settled_pay_amount": 0.0,
+                        "order_count": 0,
+                        "settled_order_count": 0,
+                        "refund_amount_1h": 0.0,
+                        "_score": 0.0,
+                    }
+                    metadata_by_ad_id[ad_id] = existing
+                if stat_cost > float(existing.get("_score", 0.0) or 0.0):
+                    existing["ad_name"] = str(self._report_cell_value(dimensions.get("ad_name")) or f"ad_{ad_id}")
+                    existing["product_id"] = str(self._report_cell_value(dimensions.get("qianchuan_product_id")) or "")
+                    existing["product_name"] = str(self._report_cell_value(dimensions.get("qianchuan_product_name")) or "")
+                    existing["anchor_name"] = str(self._report_cell_value(dimensions.get("anchor_name")) or "")
+                    existing["_score"] = stat_cost
+                existing["stat_cost"] = round(float(existing.get("stat_cost", 0.0) or 0.0) + stat_cost, 2)
+                existing["pay_amount"] = round(
+                    float(existing.get("pay_amount", 0.0) or 0.0)
+                    + normalize_metric(self._report_cell_value(metrics.get("total_pay_order_gmv_for_roi2"))),
+                    2,
+                )
+                existing["total_pay_amount"] = round(
+                    float(existing.get("total_pay_amount", 0.0) or 0.0)
+                    + normalize_metric(
+                        self._report_cell_value(metrics.get("total_pay_order_gmv_include_coupon_for_roi2"))
+                    ),
+                    2,
+                )
+                existing["settled_pay_amount"] = round(
+                    float(existing.get("settled_pay_amount", 0.0) or 0.0)
+                    + normalize_metric(self._report_cell_value(metrics.get("total_order_settle_amount_for_roi2_1h"))),
+                    2,
+                )
+                existing["order_count"] = int(existing.get("order_count", 0) or 0) + int(
+                    float(self._report_cell_value(metrics.get("total_pay_order_count_for_roi2")) or 0.0)
+                )
+                existing["settled_order_count"] = int(existing.get("settled_order_count", 0) or 0) + int(
+                    float(self._report_cell_value(metrics.get("total_order_settle_count_for_roi2_1h")) or 0.0)
+                )
+                existing["refund_amount_1h"] = round(
+                    float(existing.get("refund_amount_1h", 0.0) or 0.0)
+                    + normalize_metric(self._report_cell_value(metrics.get("total_refund_order_gmv_for_roi2_1h_all"))),
+                    2,
+                )
             page_info = data.get("page_info") or {}
             total_page = int(page_info.get("total_page", 1) or 1)
             if page >= total_page:
@@ -2931,6 +3164,7 @@ def fetch_plan_bundle(
     errors: list[str] = []
     primary_plans: list[PlanSummary] = []
     cubic_plans: list[PlanSummary] = []
+    product_ad_history_plans: list[PlanSummary] = []
     try:
         primary_plans = client.list_plan_summaries(
             advertiser_id,
@@ -2951,16 +3185,27 @@ def fetch_plan_bundle(
         )
     except Exception as exc:  # noqa: BLE001
         errors.append(f"uni_cubic: {exc}")
+    try:
+        product_ad_history_plans = client.list_site_promotion_product_ad_plan_summaries(
+            advertiser_id,
+            advertiser_name,
+            start_dt,
+            end_dt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"site_product_ad: {exc}")
 
     plans_by_ad_id: dict[int, PlanSummary] = {}
-    for plan in primary_plans:
-        ad_id = int(getattr(plan, "ad_id", 0) or 0)
-        if ad_id > 0:
-            plans_by_ad_id[ad_id] = plan
-    for plan in cubic_plans:
-        ad_id = int(getattr(plan, "ad_id", 0) or 0)
-        if ad_id > 0 and ad_id not in plans_by_ad_id:
-            plans_by_ad_id[ad_id] = plan
+    for plan_group in (primary_plans, cubic_plans, product_ad_history_plans):
+        for plan in plan_group:
+            ad_id = int(getattr(plan, "ad_id", 0) or 0)
+            if ad_id <= 0:
+                continue
+            existing = plans_by_ad_id.get(ad_id)
+            if existing is None:
+                plans_by_ad_id[ad_id] = plan
+                continue
+            client._merge_plan_summary(existing, plan)
 
     merged_plans = sorted(
         plans_by_ad_id.values(),

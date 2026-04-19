@@ -60,6 +60,7 @@ const RULE_ENTITY_CONFIG = {
 };
 
 const MATERIAL_PAGE_SIZE = 20;
+const ACCESS_USER_MATERIAL_PAGE_SIZE = 50;
 const PERFORMANCE_CACHE_TTL_MS = 55 * 1000;
 const MATERIAL_CACHE_TTL_MS = 55 * 1000;
 const MATERIAL_SEARCH_DEBOUNCE_MS = 180;
@@ -113,6 +114,8 @@ const state = {
   materialPayloads: {},
   materialPayloadFetchedAt: {},
   materialRequestPromises: {},
+  materialRankingIndexPollTimer: 0,
+  materialRankingIndexPollKey: "",
   teamMaterialPayloads: {},
   teamMaterialPayloadFetchedAt: {},
   teamMaterialRequestPromises: {},
@@ -156,6 +159,7 @@ const state = {
   rangeEditorDrafts: {},
   materialPage: 1,
   teamMaterialPage: 1,
+  userMatchedMaterialPage: 1,
   commentPage: 1,
   selectedEmployeeName: null,
   selectedPlanId: null,
@@ -329,6 +333,7 @@ const toggleOperatorMaterialsButton = document.getElementById("toggleOperatorMat
 const operatorMaterialContent = document.getElementById("operatorMaterialContent");
 const operatorMaterialSearch = document.getElementById("operatorMaterialSearch");
 const operatorMaterialTable = document.getElementById("operatorMaterialTable");
+const operatorMaterialTablePager = document.getElementById("operatorMaterialTablePager");
 const uploadSearchForm = document.getElementById("uploadSearchForm");
 const uploadScopeSelect = document.getElementById("uploadScopeSelect");
 const uploadKeywordInput = document.getElementById("uploadKeywordInput");
@@ -1014,7 +1019,10 @@ function planSourceTone(source) {
 function renderPlanSourceBadge(row) {
   const source = String(row?.plan_source || "").trim().toUpperCase();
   const deliveryType = String(row?.plan_delivery_type || "").trim().toUpperCase();
-  const text = row?.plan_source_text || (deliveryType === "CUBIC" ? "\u4e58\u65b9\u6295\u653e" : "\u5168\u57df\u6295\u653e");
+  const fallbackText = (source === "UNI_CUBIC" || source === "UNI_REPORT") && deliveryType === "CUBIC"
+    ? "\u4e58\u65b9\u6295\u653e"
+    : "\u5168\u57df\u6295\u653e";
+  const text = row?.plan_source_text || fallbackText;
   const tone = planSourceTone(source);
   const title = source || text;
   return `<span class="pill plan-source-pill ${tone}" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
@@ -1029,7 +1037,12 @@ function enrichPlanRow(row) {
   const refundAmount1h = Number(row?.refund_amount_1h || 0);
   return {
     ...row,
-    plan_source_text: row?.plan_source_text || (String(row?.plan_delivery_type || "").trim().toUpperCase() === "CUBIC" ? "\u4e58\u65b9\u6295\u653e" : "\u5168\u57df\u6295\u653e"),
+    plan_source_text: row?.plan_source_text || (
+      ["UNI_CUBIC", "UNI_REPORT"].includes(String(row?.plan_source || "").trim().toUpperCase())
+        && String(row?.plan_delivery_type || "").trim().toUpperCase() === "CUBIC"
+        ? "\u4e58\u65b9\u6295\u653e"
+        : "\u5168\u57df\u6295\u653e"
+    ),
     marketing_goal_text: row?.marketing_goal_text || row?.marketing_goal_label || row?.marketing_goal || "-",
     status_text: row?.status_text || `${row?.status || ""}/${row?.opt_status || ""}`,
     settled_roi: statCost > 0 ? Number((settledPayAmount / statCost).toFixed(2)) : Number(row?.settled_roi || 0),
@@ -2742,6 +2755,7 @@ function breakdownDetailEmptyCopy(payload) {
 }
 
 function renderSystemCards(latest, extendedSync, tokenInfo) {
+  if (!systemStatusCard || !detailSyncCard) return;
   const summary = latest?.summary || {};
   const hardAccountFailures = Number(summary.account_failures || 0);
   const planFailures = Number(summary.plan_failures || 0);
@@ -4607,7 +4621,9 @@ function renderMaterialTable(payload) {
     ${tableLayout.markup}
     ${makeMaterialHeader(columns, state.materialSort, summaryText, summaryMetrics, mode)}
     <tbody>
-      ${pageRows.map((row) => {
+      ${normalizedPayload.ranking_index_pending
+        ? `<tr><td colspan="${columns.length}" class="empty-cell">\u6b63\u5728\u751f\u6210\u8be5\u65e5\u671f\u8303\u56f4\u7d22\u5f15\uff0c\u5b8c\u6210\u540e\u81ea\u52a8\u5237\u65b0\u3002</td></tr>`
+        : pageRows.map((row) => {
         const rowKey = materialRowIdentity(row);
         return `
         <tr data-material-key="${escapeHtml(rowKey)}" class="${supportsMaterialDetail && state.selectedMaterialKey === rowKey ? "active-row" : ""}">
@@ -5426,8 +5442,13 @@ async function fetchMaterialRankings(force = false) {
       throw new Error(errorPayload.detail || "material rankings fetch failed");
     }
     const payload = await response.json();
-    state.materialPayloads[cacheKey] = payload;
-    state.materialPayloadFetchedAt[cacheKey] = Date.now();
+    if (payload?.ranking_index_pending) {
+      delete state.materialPayloads[cacheKey];
+      delete state.materialPayloadFetchedAt[cacheKey];
+    } else {
+      state.materialPayloads[cacheKey] = payload;
+      state.materialPayloadFetchedAt[cacheKey] = Date.now();
+    }
     return payload;
   })();
   state.materialRequestPromises[cacheKey] = requestPromise;
@@ -6125,8 +6146,10 @@ function roleLabel(role) {
   return role || "--";
 }
 
-function confirmAccountMutation(payload, keywordSeeds = []) {
-  const editing = isEditingSelectedUser();
+function confirmAccountMutation(payload, keywordSeeds = [], options = {}) {
+  const editing = Object.prototype.hasOwnProperty.call(options, "editing")
+    ? Boolean(options.editing)
+    : isEditingSelectedUser();
   const title = editing ? "\u4fdd\u5b58\u8d26\u53f7\u53d8\u66f4" : "\u65b0\u5efa\u8d26\u53f7";
   const lines = [
     `${title}\u540e\u5c06\u7acb\u5373\u751f\u6548\u3002`,
@@ -7009,9 +7032,53 @@ function openMaterialPreview(materialKey) {
   openMaterialPreviewFromRow(row);
 }
 
+function emptyUserMatchedMaterialPayload(page = 1, pageSize = ACCESS_USER_MATERIAL_PAGE_SIZE, query = "") {
+  return {
+    items: [],
+    pagination: {
+      page,
+      page_size: pageSize,
+      total_count: 0,
+      total_pages: 1,
+      start_index: 0,
+      end_index: 0,
+      search: query,
+    },
+  };
+}
+
+function selectedUserMatchedMaterialPayload() {
+  if (!state.selectedUserId) {
+    return emptyUserMatchedMaterialPayload(state.userMatchedMaterialPage);
+  }
+  const entry = state.userMatchedMaterials[state.selectedUserId];
+  return entry?.payload || emptyUserMatchedMaterialPayload(state.userMatchedMaterialPage);
+}
+
 function selectedUserMatchedMaterials() {
-  if (!state.selectedUserId) return [];
-  return state.userMatchedMaterials[state.selectedUserId] || [];
+  const payload = selectedUserMatchedMaterialPayload();
+  return Array.isArray(payload.items) ? payload.items : [];
+}
+
+function userMatchedMaterialRequestState(overrides = {}) {
+  return {
+    page: Math.max(1, Number(overrides.page ?? state.userMatchedMaterialPage) || 1),
+    pageSize: Math.max(
+      1,
+      Math.min(Number(overrides.pageSize ?? ACCESS_USER_MATERIAL_PAGE_SIZE) || ACCESS_USER_MATERIAL_PAGE_SIZE, 500),
+    ),
+    query: String(overrides.query ?? operatorMaterialSearch?.value ?? "").trim(),
+  };
+}
+
+function userMatchedMaterialCacheKey(userId, overrides = {}) {
+  const requestState = userMatchedMaterialRequestState(overrides);
+  return [
+    Number(userId || 0),
+    requestState.page,
+    requestState.pageSize,
+    requestState.query.toLowerCase(),
+  ].join(":");
 }
 
 async function fetchUserKeywords(userId, force = false) {
@@ -7023,13 +7090,37 @@ async function fetchUserKeywords(userId, force = false) {
   return state.userKeywords[userId];
 }
 
-async function fetchUserMatchedMaterials(userId, force = false) {
-  if (!userId || !isAdmin()) return [];
-  if (!force && state.userMatchedMaterials[userId]) return state.userMatchedMaterials[userId];
-  const response = await fetch(`/api/users/${userId}/matched-materials?range=month`);
-  const payload = await response.json();
-  state.userMatchedMaterials[userId] = payload.items || [];
-  return state.userMatchedMaterials[userId];
+async function fetchUserMatchedMaterials(userId, force = false, overrides = {}) {
+  if (!userId || !isAdmin()) return emptyUserMatchedMaterialPayload();
+  const requestState = userMatchedMaterialRequestState(overrides);
+  const cacheKey = userMatchedMaterialCacheKey(userId, requestState);
+  const cachedEntry = state.userMatchedMaterials[userId];
+  if (!force && cachedEntry?.cacheKey === cacheKey && cachedEntry?.payload) return cachedEntry.payload;
+  const params = new URLSearchParams();
+  params.set("range", "month");
+  params.set("page", String(requestState.page));
+  params.set("page_size", String(requestState.pageSize));
+  if (requestState.query) {
+    params.set("q", requestState.query);
+  }
+  const response = await fetch(`/api/users/${userId}/matched-materials?${params.toString()}`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.detail || "加载运营命中素材失败");
+  }
+  const emptyPayload = emptyUserMatchedMaterialPayload(requestState.page, requestState.pageSize, requestState.query);
+  const normalizedPayload = {
+    ...emptyPayload,
+    ...payload,
+    items: Array.isArray(payload.items) ? payload.items : [],
+    pagination: {
+      ...emptyPayload.pagination,
+      ...(payload.pagination || {}),
+    },
+  };
+  state.userMatchedMaterialPage = Math.max(1, Number(normalizedPayload.pagination.page || requestState.page) || 1);
+  state.userMatchedMaterials[userId] = { cacheKey, payload: normalizedPayload };
+  return normalizedPayload;
 }
 
 function renderUserKeywordTable() {
@@ -7070,8 +7161,62 @@ function renderUserKeywordTable() {
   `;
 }
 
+function renderUserMatchedMaterialPager(totalRows, currentPage, totalPages, startIndex, endIndex) {
+  if (!operatorMaterialTablePager) return;
+  if (totalRows <= 0 || totalPages <= 1) {
+    operatorMaterialTablePager.innerHTML = "";
+    operatorMaterialTablePager.classList.add("hidden");
+    return;
+  }
+  const pages = materialPagerPages(totalPages, currentPage);
+  operatorMaterialTablePager.classList.remove("hidden");
+  operatorMaterialTablePager.innerHTML = `
+    <div class="table-pager-summary">显示 ${formatNumber(startIndex)}-${formatNumber(endIndex)} / ${formatNumber(totalRows)}，按页加载以避免整月全量查询。</div>
+    <div class="table-pager-actions">
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage - 1}"
+        ${currentPage <= 1 ? "disabled" : ""}
+      >上一页</button>
+      ${pages.map((page, index) => `
+        ${index > 0 && page - pages[index - 1] > 1 ? '<span class="table-pager-ellipsis">...</span>' : ""}
+        <button
+          type="button"
+          class="button ghost compact table-page-button ${page === currentPage ? "is-active" : ""}"
+          data-page="${page}"
+          ${page === currentPage ? 'aria-current="page"' : ""}
+        >${formatNumber(page)}</button>
+      `).join("")}
+      <button
+        type="button"
+        class="button ghost compact table-page-button"
+        data-page="${currentPage + 1}"
+        ${currentPage >= totalPages ? "disabled" : ""}
+      >下一页</button>
+    </div>
+  `;
+  operatorMaterialTablePager.querySelectorAll("button[data-page]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const nextPage = Number(button.dataset.page || 0);
+      if (!nextPage || nextPage === state.userMatchedMaterialPage || !state.selectedUserId) return;
+      state.userMatchedMaterialPage = nextPage;
+      try {
+        await fetchUserMatchedMaterials(state.selectedUserId, true, { page: nextPage });
+        renderUserMatchedMaterialTable();
+      } catch (error) {
+        setInlineFeedback(operatorMaterialStatus, error.message || "加载运营命中素材失败。", "error");
+      }
+    });
+  });
+}
+
 function renderUserMatchedMaterialTable() {
   if (!operatorMaterialTable) return;
+  if (operatorMaterialTablePager) {
+    operatorMaterialTablePager.innerHTML = "";
+    operatorMaterialTablePager.classList.add("hidden");
+  }
   if (!isAdmin()) {
     operatorMaterialTable.innerHTML = '<tbody><tr><td class="empty-cell">只有管理员可以查看运营账号的命中素材。</td></tr></tbody>';
     return;
@@ -7085,12 +7230,20 @@ function renderUserMatchedMaterialTable() {
     operatorMaterialTable.innerHTML = '<tbody><tr><td colspan="4" class="empty-cell">只有运营账号才会显示命中素材列表。</td></tr></tbody>';
     return;
   }
-  const query = String(operatorMaterialSearch?.value || "").trim().toLowerCase();
-  const items = selectedUserMatchedMaterials().filter((item) => {
-    if (!query) return true;
-    const haystack = [item.material_name].join(" ").toLowerCase();
-    return haystack.includes(query);
-  });
+  const payload = selectedUserMatchedMaterialPayload();
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const pagination = payload.pagination || {};
+  const totalRows = Number(pagination.total_count || items.length || 0);
+  const totalPages = Math.max(1, Number(pagination.total_pages || 1));
+  const currentPage = Math.min(Math.max(Number(pagination.page || state.userMatchedMaterialPage) || 1, 1), totalPages);
+  const pageSize = Number(pagination.page_size || ACCESS_USER_MATERIAL_PAGE_SIZE || 0);
+  const startIndex = Number(
+    pagination.start_index || (totalRows > 0 ? (currentPage - 1) * pageSize + 1 : 0),
+  );
+  const endIndex = Number(
+    pagination.end_index || (startIndex > 0 ? startIndex + items.length - 1 : 0),
+  );
+  state.userMatchedMaterialPage = currentPage;
   operatorMaterialTable.innerHTML = `
     <thead>
       <tr>
@@ -7130,6 +7283,7 @@ function renderUserMatchedMaterialTable() {
       openMaterialPreviewFromRow(row);
     });
   });
+  renderUserMatchedMaterialPager(totalRows, currentPage, totalPages, startIndex, endIndex);
 }
 
 function setOperatorMaterialVisibility(visible) {
@@ -7327,6 +7481,7 @@ function applyRoleViewPolicy() {
     setActiveView(fallback);
   }
   userFormReset && (userFormReset.disabled = !admin);
+  syncUserFormActionButtons();
 }
 
 function isEditingSelectedUser() {
@@ -7336,6 +7491,11 @@ function isEditingSelectedUser() {
 function selectedUserRecord() {
   if (!isEditingSelectedUser()) return null;
   return state.users.find((item) => Number(item.id) === Number(state.selectedUserId)) || null;
+}
+
+function syncUserFormActionButtons() {
+  if (!userFormReset) return;
+  userFormReset.textContent = "新建账号";
 }
 
 
@@ -7400,6 +7560,7 @@ function resetUserFormState() {
   state.selectedUserScopeIds = [];
   state.userKeywords = {};
   state.userMatchedMaterials = {};
+  state.userMatchedMaterialPage = 1;
   if (userForm) userForm.reset();
   const roleInput = userForm?.querySelector('select[name="role"]');
   if (roleInput) roleInput.value = "operator";
@@ -7409,6 +7570,7 @@ function resetUserFormState() {
   if (uploadInput) uploadInput.checked = false;
   const keywordSeedInput = userForm?.querySelector('textarea[name="keyword_seed"]');
   if (keywordSeedInput) keywordSeedInput.value = "";
+  if (operatorMaterialSearch) operatorMaterialSearch.value = "";
   resetScopeSearch();
   syncUserRoleFields();
   setInlineFeedback(
@@ -7428,6 +7590,7 @@ function resetUserFormState() {
   renderUserKeywordTable();
   renderUserMatchedMaterialTable();
   syncAccessRolePanels();
+  syncUserFormActionButtons();
   renderAccessOverview();
   if (isAdmin()) focusFirstInput(userForm, 'input[name="username"]');
 }
@@ -7449,6 +7612,7 @@ function fillUserForm(user) {
     "neutral",
   );
   syncAccessRolePanels();
+  syncUserFormActionButtons();
   renderAccessOverview();
 }
 
@@ -7611,6 +7775,8 @@ async function fetchUserScopes(userId, force = false) {
 async function selectUserManager(userId) {
   state.userEditorMode = "edit";
   state.selectedUserId = userId;
+  state.userMatchedMaterialPage = 1;
+  if (operatorMaterialSearch) operatorMaterialSearch.value = "";
   resetScopeSearch();
   const user = selectedUserRecord();
   fillUserForm(user);
@@ -7623,7 +7789,7 @@ async function selectUserManager(userId) {
   }
   if (user?.role === "operator") {
     await fetchUserKeywords(userId, true);
-    state.userMatchedMaterials[userId] = [];
+    delete state.userMatchedMaterials[userId];
   }
   renderScopeChecklist();
   renderUserKeywordTable();
@@ -7650,7 +7816,10 @@ async function ensureAccessData(force = false) {
     if (user?.role === "operator" && isAdmin()) {
       await fetchUserKeywords(state.selectedUserId, force);
       if (!state.userMatchedMaterials[state.selectedUserId]) {
-        state.userMatchedMaterials[state.selectedUserId] = [];
+        state.userMatchedMaterials[state.selectedUserId] = {
+          cacheKey: "",
+          payload: emptyUserMatchedMaterialPayload(),
+        };
       }
     }
   } else if (state.userEditorMode !== "create") {
@@ -7661,6 +7830,105 @@ async function ensureAccessData(force = false) {
   renderUserMatchedMaterialTable();
   setOperatorMaterialVisibility(false);
   syncAccessRolePanels();
+}
+
+async function submitUserAccountForm({ mode = "", forceCreate = false } = {}) {
+  if (!isAdmin() || !userForm) return;
+  const normalizedMode = String(mode || (forceCreate ? "create" : "edit")).trim().toLowerCase();
+  const editing = normalizedMode !== "create";
+  if (editing && !isEditingSelectedUser()) {
+    window.alert("请选择已有账号后再保存；创建新账号请点击新建账号。");
+    return;
+  }
+  const form = new FormData(userForm);
+  const keywordSeeds = parseKeywordSeedInput(form.get("keyword_seed"));
+  const payload = {
+    username: String(form.get("username") || "").trim(),
+    display_name: String(form.get("display_name") || "").trim(),
+    role: String(form.get("role") || "operator"),
+    password: String(form.get("password") || ""),
+    enabled: form.get("enabled") === "on",
+    upload_materials_enabled: form.get("upload_materials_enabled") === "on",
+  };
+  if (!confirmAccountMutation(payload, keywordSeeds, { editing })) {
+    setInlineFeedback(userEditorStatus, "已取消提交账号变更。", "neutral");
+    return;
+  }
+  const url = editing ? `/api/users/${state.selectedUserId}` : "/api/users";
+  const method = editing ? "PUT" : "POST";
+  const response = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(() => ({}));
+    window.alert(errorPayload.detail || (editing ? "保存账号失败" : "新建账号失败"));
+    return;
+  }
+  const item = await response.json();
+  if (item?.id && !editing) {
+    let addedKeywordCount = 0;
+    if (item.role === "operator" && keywordSeeds.length) {
+      const keywordResponse = await fetch(`/api/users/${item.id}/keywords/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keywords: keywordSeeds, enabled: true }),
+      });
+      if (keywordResponse.ok) {
+        const keywordPayload = await keywordResponse.json().catch(() => ({}));
+        addedKeywordCount = Array.isArray(keywordPayload?.items)
+          ? keywordPayload.items.length
+          : Number(keywordPayload?.count || 0);
+      }
+    }
+    await fetchUsers(true);
+    resetUserFormState();
+    renderUserTable();
+    const keywordSuffix = addedKeywordCount ? `, and added ${addedKeywordCount} keywords` : "";
+    setInlineFeedback(userEditorStatus, `Created account ${item.username || payload.username}${keywordSuffix}.`, "success");
+    setInlineFeedback(scopeEditorMeta, "Ready for the next account.", "neutral");
+    setInlineFeedback(operatorKeywordStatus, "Ready for the next operator keyword set.", "neutral");
+    return;
+  }
+  await fetchUsers(true);
+  if (item?.id) {
+    await selectUserManager(Number(item.id));
+    let addedKeywordCount = 0;
+    if (item.role === "operator" && keywordSeeds.length) {
+      const existingKeywords = new Set(
+        (state.userKeywords[item.id] || []).map((entry) => String(entry.keyword || "").trim().toLowerCase()),
+      );
+      for (const keyword of keywordSeeds) {
+        if (existingKeywords.has(keyword.toLowerCase())) continue;
+        const keywordResponse = await fetch(`/api/users/${item.id}/keywords`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword, enabled: true }),
+        });
+        if (keywordResponse.ok) {
+          addedKeywordCount += 1;
+          existingKeywords.add(keyword.toLowerCase());
+        }
+      }
+      await fetchUserKeywords(item.id, true);
+    }
+    const keywordSuffix = addedKeywordCount ? `，并新增 ${addedKeywordCount} 个关键词` : "";
+    setInlineFeedback(userEditorStatus, `${editing ? "已保存账号" : "已新建账号"} ${item.username || payload.username}${keywordSuffix}。`, "success");
+    if (item.role === "supervisor") {
+      setInlineFeedback(scopeEditorMeta, "继续勾选该主管可见账户。", "success");
+      focusScopeControl();
+    } else if (item.role === "operator") {
+      if (addedKeywordCount) {
+        setInlineFeedback(operatorKeywordStatus, "关键词已保存，可继续追加。", "success");
+      } else {
+        setInlineFeedback(operatorKeywordStatus, "可继续追加关键词。", "success");
+        focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
+      }
+    }
+  } else {
+    await ensureAccessData(true);
+  }
 }
 
 async function fetchPerformance(filter, force = false) {
@@ -7827,6 +8095,33 @@ function bootstrapInitialActiveViewData() {
   });
 }
 
+function scheduleMaterialRankingIndexRetry(payload) {
+  if (!payload?.ranking_index_pending) {
+    return;
+  }
+  const retryKey = materialPayloadKey(materialFilter(), materialRequestState());
+  const delaySeconds = Math.min(Math.max(Number(payload.ranking_index_refresh_after_seconds || 3) || 3, 2), 10);
+  if (state.materialRankingIndexPollTimer && state.materialRankingIndexPollKey === retryKey) {
+    return;
+  }
+  if (state.materialRankingIndexPollTimer) {
+    window.clearTimeout(state.materialRankingIndexPollTimer);
+  }
+  state.materialRankingIndexPollKey = retryKey;
+  state.materialRankingIndexPollTimer = window.setTimeout(() => {
+    state.materialRankingIndexPollTimer = 0;
+    if (state.activeView !== "materials") {
+      return;
+    }
+    if (materialPayloadKey(materialFilter(), materialRequestState()) !== retryKey) {
+      return;
+    }
+    refreshMaterialSection(false).catch((error) => {
+      console.error("material ranking index retry failed", error);
+    });
+  }, delaySeconds * 1000);
+}
+
 async function refreshMaterialSection(force = false) {
   syncSectionRangeControls("material");
   syncMaterialViewModeControls();
@@ -7864,7 +8159,10 @@ async function refreshMaterialSection(force = false) {
         ? `${rangeText} · 汇总 ${formatNumber(payload?.snapshot_count || 0)} 个日快照 · 最近素材热同步 ${payload.snapshot_time} · 素材 ${formatNumber(materialCount)} 条 · 错误 ${formatNumber(meta.error_count || 0)}${todaySuffix}`
         : `${rangeText} · 当前时间范围内暂无素材快照${todaySuffix}`
     ));
-  materialSyncMeta.textContent = syncText;
+  materialSyncMeta.textContent = payload?.ranking_index_pending
+    ? `${rangeText} - \u6b63\u5728\u751f\u6210\u8be5\u65e5\u671f\u8303\u56f4\u7d22\u5f15\uff0c\u5b8c\u6210\u540e\u81ea\u52a8\u5237\u65b0`
+    : syncText;
+  scheduleMaterialRankingIndexRetry(payload);
   if (materialSemanticsNotice) {
     const noticeState = materialNoticeState(payload);
     if (noticeState.text) {
@@ -8112,6 +8410,20 @@ function bindInputs() {
     state.commentPage = 1;
     renderCommentTable(commentRowsForCurrentFilter());
   }, COMMENT_SEARCH_DEBOUNCE_MS);
+  const debouncedOperatorMaterialSearch = debounce(() => {
+    if (!state.selectedUserId || !isAdmin()) {
+      renderUserMatchedMaterialTable();
+      return;
+    }
+    state.userMatchedMaterialPage = 1;
+    fetchUserMatchedMaterials(state.selectedUserId, true, { page: 1 })
+      .then(() => {
+        renderUserMatchedMaterialTable();
+      })
+      .catch((error) => {
+        setInlineFeedback(operatorMaterialStatus, error.message || "加载运营命中素材失败。", "error");
+      });
+  }, MATERIAL_SEARCH_DEBOUNCE_MS);
   materialModeSwitch?.querySelectorAll(".range-button").forEach((button) => {
     button.addEventListener("click", async () => {
       const nextMode = normalizeMaterialViewMode(button.dataset.mode);
@@ -8228,13 +8540,18 @@ function bindInputs() {
   materialSearch?.addEventListener("input", debouncedMaterialSearch);
   teamMaterialSearch?.addEventListener("input", debouncedTeamMaterialSearch);
   commentSearch?.addEventListener("input", debouncedCommentSearch);
-  operatorMaterialSearch?.addEventListener("input", () => renderUserMatchedMaterialTable());
+  operatorMaterialSearch?.addEventListener("input", debouncedOperatorMaterialSearch);
   toggleOperatorMaterialsButton?.addEventListener("click", async () => {
     const nextVisible = operatorMaterialContent?.classList.contains("hidden");
     setOperatorMaterialVisibility(Boolean(nextVisible));
     if (nextVisible && state.selectedUserId && isAdmin()) {
-      await fetchUserMatchedMaterials(state.selectedUserId, true);
-      renderUserMatchedMaterialTable();
+      try {
+        await fetchUserMatchedMaterials(state.selectedUserId, true, { page: state.userMatchedMaterialPage });
+        renderUserMatchedMaterialTable();
+      } catch (error) {
+        setOperatorMaterialVisibility(false);
+        setInlineFeedback(operatorMaterialStatus, error.message || "加载运营命中素材失败。", "error");
+      }
     }
   });
   planAccountFilter?.addEventListener("change", () => renderPlanTable(rangePayload(sectionFilter("plan"))?.plans || []));
@@ -8581,78 +8898,11 @@ function bindInputs() {
 
   userForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!isAdmin()) return;
-    const editing = isEditingSelectedUser();
-    const form = new FormData(userForm);
-    const keywordSeeds = parseKeywordSeedInput(form.get("keyword_seed"));
-    const payload = {
-      username: String(form.get("username") || "").trim(),
-      display_name: String(form.get("display_name") || "").trim(),
-      role: String(form.get("role") || "operator"),
-      password: String(form.get("password") || ""),
-      enabled: form.get("enabled") === "on",
-      upload_materials_enabled: form.get("upload_materials_enabled") === "on",
-    };
-    if (!confirmAccountMutation(payload, keywordSeeds)) {
-      setInlineFeedback(userEditorStatus, "已取消提交账号变更。", "neutral");
-      return;
-    }
-    const url = editing ? `/api/users/${state.selectedUserId}` : "/api/users";
-    const method = editing ? "PUT" : "POST";
-    const response = await fetch(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({}));
-      window.alert(errorPayload.detail || "保存账号失败");
-      return;
-    }
-    const item = await response.json();
-    await fetchUsers(true);
-    if (item?.id) {
-      await selectUserManager(Number(item.id));
-      let addedKeywordCount = 0;
-      if (item.role === "operator" && keywordSeeds.length) {
-        const existingKeywords = new Set(
-          (state.userKeywords[item.id] || []).map((entry) => String(entry.keyword || "").trim().toLowerCase()),
-        );
-        for (const keyword of keywordSeeds) {
-          if (existingKeywords.has(keyword.toLowerCase())) continue;
-          const keywordResponse = await fetch(`/api/users/${item.id}/keywords`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ keyword, enabled: true }),
-          });
-          if (keywordResponse.ok) {
-            addedKeywordCount += 1;
-            existingKeywords.add(keyword.toLowerCase());
-          }
-        }
-        await fetchUserKeywords(item.id, true);
-      }
-      const keywordSuffix = addedKeywordCount ? `，并新增 ${addedKeywordCount} 个关键词` : "";
-      setInlineFeedback(userEditorStatus, `已保存账号 ${item.username || payload.username}${keywordSuffix}。`, "success");
-      if (item.role === "supervisor") {
-        setInlineFeedback(scopeEditorMeta, "继续勾选该主管可见账户。", "success");
-        focusScopeControl();
-      } else if (item.role === "operator") {
-        if (addedKeywordCount) {
-          setInlineFeedback(operatorKeywordStatus, "关键词已保存，可继续追加。", "success");
-        } else {
-          setInlineFeedback(operatorKeywordStatus, "可继续追加关键词。", "success");
-          focusFirstInput(operatorKeywordForm, 'input[name="keyword"]');
-        }
-      }
-    } else {
-      await ensureAccessData(true);
-    }
+    await submitUserAccountForm({ mode: "edit" });
   });
-
-  userFormReset?.addEventListener("click", () => {
-    resetUserFormState();
-    renderUserTable();
+  userFormReset?.addEventListener("click", async () => {
+    if (!isAdmin()) return;
+    await submitUserAccountForm({ mode: "create" });
   });
 
   userForm?.querySelector('select[name="role"]')?.addEventListener("change", () => {
@@ -8747,7 +8997,12 @@ function bindInputs() {
     operatorKeywordForm.reset();
     operatorKeywordForm.querySelector('input[name="enabled"]').checked = true;
     await fetchUserKeywords(state.selectedUserId, true);
-    await fetchUserMatchedMaterials(state.selectedUserId, true);
+    state.userMatchedMaterialPage = 1;
+    try {
+      await fetchUserMatchedMaterials(state.selectedUserId, true, { page: 1 });
+    } catch (error) {
+      setInlineFeedback(operatorMaterialStatus, error.message || "加载运营命中素材失败。", "error");
+    }
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
     setInlineFeedback(operatorKeywordStatus, `已添加关键词“${payload.keyword}”。`, "success");
@@ -8768,7 +9023,12 @@ function bindInputs() {
     }
     if (state.selectedUserId) {
       await fetchUserKeywords(state.selectedUserId, true);
-      await fetchUserMatchedMaterials(state.selectedUserId, true);
+      state.userMatchedMaterialPage = 1;
+      try {
+        await fetchUserMatchedMaterials(state.selectedUserId, true, { page: 1 });
+      } catch (error) {
+        setInlineFeedback(operatorMaterialStatus, error.message || "加载运营命中素材失败。", "error");
+      }
     }
     renderUserKeywordTable();
     renderUserMatchedMaterialTable();
@@ -8811,6 +9071,19 @@ function mergeDashboardPayload(payload = {}) {
   const next = { ...current, ...incoming };
   if (current.latest && incoming.latest) {
     next.latest = { ...current.latest, ...incoming.latest };
+    const currentSummary = current.latest.summary;
+    const incomingSummary = incoming.latest.summary;
+    const currentSummaryReady = currentSummary
+      && typeof currentSummary === "object"
+      && !Array.isArray(currentSummary)
+      && Object.keys(currentSummary).length > 0;
+    const incomingSummaryEmpty = incomingSummary
+      && typeof incomingSummary === "object"
+      && !Array.isArray(incomingSummary)
+      && Object.keys(incomingSummary).length === 0;
+    if (currentSummaryReady && incomingSummaryEmpty) {
+      next.latest.summary = currentSummary;
+    }
   }
   state.payload = next;
   if (Object.prototype.hasOwnProperty.call(incoming, "session")) {
@@ -9156,7 +9429,6 @@ async function render(payload, options = {}) {
   renderOceanEngineConfig(merged.oceanEngineConfig || { customer_center_id: merged.customerCenterId || "" });
   renderOverviewHero(latest);
   renderKpis(latest);
-  renderSystemCards(latest, merged.extendedSync || latest?.extendedSync, merged.tokenInfo || {});
   renderAlerts(merged.alertEvents || []);
   renderSignalOverview(merged.notificationSettings || {}, state.alertRules);
   renderNotificationSettings(merged.notificationSettings || {});

@@ -5,8 +5,14 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+ARG PIP_INDEX_URL=
+
 COPY dashboard/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN if [ -n "$PIP_INDEX_URL" ]; then \
+        pip install --no-cache-dir -i "$PIP_INDEX_URL" -r /tmp/requirements.txt; \
+    else \
+        pip install --no-cache-dir -r /tmp/requirements.txt; \
+    fi
 
 COPY . /app
 

@@ -97,19 +97,15 @@ def register_query_routes(
         allowed = service.allowed_advertiser_ids_for_user(user)
         effective_display_scope = display_scope if str(user.get("role") or "") == role_admin else "current"
         latest_task = asyncio.create_task(asyncio.to_thread(service.dashboard_bootstrap_payload, effective_display_scope))
-        extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, effective_display_scope))
         config_task = asyncio.create_task(asyncio.to_thread(service.read_config))
-        latest, extended_sync, current_config = await asyncio.gather(
+        latest, current_config = await asyncio.gather(
             latest_task,
-            extended_sync_task,
             config_task,
         )
         return api_response(
             {
                 "session": session_payload(user, allowed),
                 "latest": latest,
-                "materialSync": extended_sync,
-                "extendedSync": extended_sync,
                 "summaryHistory": [],
                 "customerCenterId": current_config["customer_center_id"],
                 "displayScope": effective_display_scope,
@@ -128,13 +124,10 @@ def register_query_routes(
         latest_task = asyncio.create_task(
             asyncio.to_thread(service.dashboard_overview_payload, allowed, effective_display_scope, user, bool(fresh))
         )
-        extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, effective_display_scope))
-        latest, extended_sync = await asyncio.gather(latest_task, extended_sync_task)
+        latest = await latest_task
         return api_response(
             {
                 "latest": latest,
-                "materialSync": extended_sync,
-                "extendedSync": extended_sync,
                 "summaryHistory": [],
                 "displayScope": effective_display_scope,
                 "timezone": timezone,
@@ -161,13 +154,11 @@ def register_query_routes(
         latest_task = asyncio.create_task(
             asyncio.to_thread(service.dashboard_overview_payload, allowed, effective_display_scope, user, bool(fresh))
         )
-        extended_sync_task = asyncio.create_task(asyncio.to_thread(service.latest_extended_sync, effective_display_scope))
         config_task = asyncio.create_task(asyncio.to_thread(service.read_config))
         admin_runtime_task = asyncio.create_task(asyncio.to_thread(service.admin_runtime_payload)) if is_admin else None
         admin_alerts_task = asyncio.create_task(asyncio.to_thread(service.admin_alerts_payload)) if is_admin else None
-        latest, extended_sync, current_config = await asyncio.gather(
+        latest, current_config = await asyncio.gather(
             latest_task,
-            extended_sync_task,
             config_task,
         )
         admin_runtime = await admin_runtime_task if admin_runtime_task else {}
@@ -176,8 +167,6 @@ def register_query_routes(
             {
                 "session": session_payload(user, allowed),
                 "latest": latest,
-                "materialSync": extended_sync,
-                "extendedSync": extended_sync,
                 "tokenInfo": admin_runtime.get("tokenInfo"),
                 "oceanEngineConfig": admin_runtime.get("oceanEngineConfig"),
                 "summaryHistory": [],
@@ -284,6 +273,7 @@ def register_query_routes(
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
+        effective_display_scope = "current"
         try:
             payload = await asyncio.to_thread(
                 service.material_rankings_page_for_user,
@@ -293,7 +283,7 @@ def register_query_routes(
                 end_date,
                 snapshot_time,
                 allowed,
-                display_scope,
+                effective_display_scope,
                 mode,
                 page,
                 page_size,
@@ -348,6 +338,7 @@ def register_query_routes(
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
         allowed = service.allowed_advertiser_ids_for_user(user)
+        effective_display_scope = "current"
         try:
             payload = await asyncio.to_thread(
                 service.team_material_rankings_page_for_user,
@@ -356,7 +347,7 @@ def register_query_routes(
                 start_date,
                 end_date,
                 allowed,
-                display_scope,
+                effective_display_scope,
                 page,
                 page_size,
                 sort_key,

@@ -6,7 +6,7 @@ from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from dashboard.api_response import api_response
-from dashboard.user_schemas import AppUserPayload, UserKeywordPayload, UserScopePayload
+from dashboard.user_schemas import AppUserPayload, UserKeywordBatchPayload, UserKeywordPayload, UserScopePayload
 
 
 def register_user_routes(app: Any, service: Any, require_admin: Any) -> None:
@@ -70,6 +70,18 @@ def register_user_routes(app: Any, service: Any, require_admin: Any) -> None:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return api_response(item)
 
+    @app.post("/api/users/{user_id}/keywords/batch")
+    async def create_user_keywords(
+        user_id: int,
+        payload: UserKeywordBatchPayload,
+        _user: dict[str, Any] = Depends(require_admin),
+    ) -> JSONResponse:
+        try:
+            items = service.create_user_keywords(user_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return api_response({"items": items, "count": len(items)})
+
     @app.get("/api/users/{user_id}/matched-materials")
     async def user_matched_materials(
         user_id: int,
@@ -77,10 +89,12 @@ def register_user_routes(app: Any, service: Any, require_admin: Any) -> None:
         start_date: str = "",
         end_date: str = "",
         q: str = "",
+        page: int = 1,
+        page_size: int = 500,
         _user: dict[str, Any] = Depends(require_admin),
     ) -> JSONResponse:
         try:
-            payload = service.matched_materials_for_user(user_id, range, start_date, end_date, q)
+            payload = service.matched_materials_for_user(user_id, range, start_date, end_date, q, page, page_size)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return api_response(payload)

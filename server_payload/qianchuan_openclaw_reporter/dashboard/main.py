@@ -103,7 +103,7 @@ from dashboard.upload_routes import register_upload_routes  # noqa: E402
 from dashboard.upload_access import UploadAccess  # noqa: E402
 from dashboard.user_access import UserAccess  # noqa: E402
 from dashboard.user_routes import register_user_routes  # noqa: E402
-from dashboard.user_schemas import AppUserPayload, UserKeywordPayload, UserScopePayload  # noqa: E402
+from dashboard.user_schemas import AppUserPayload, UserKeywordBatchPayload, UserKeywordPayload, UserScopePayload  # noqa: E402
 from dashboard.video_probe import (  # noqa: E402
     VideoProbeError,
     format_video_probe_summary,
@@ -151,6 +151,10 @@ COMMENT_CACHE_SECONDS = max(RANGE_CACHE_SECONDS, COMMENT_SYNC_SUCCESS_TTL_SECOND
 COMMENT_SYNC_ERROR_RETRY_SECONDS = settings.comment_sync_error_retry_seconds
 BACKFILL_QUEUE_DEBOUNCE_SECONDS = settings.backfill_queue_debounce_seconds
 COMMENT_SYNC_QUEUE_DEBOUNCE_SECONDS = max(30, min(COMMENT_SYNC_SUCCESS_TTL_SECONDS, 120))
+COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS = max(
+    int(os.environ.get("COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS") or "0"),
+    0,
+)
 PERFORMANCE_RANGES = {"day", "yesterday", "week", "month", "custom"}
 MATERIAL_RANGES = PERFORMANCE_RANGES | {"all"}
 MATERIAL_VIEW_PERFORMANCE = "performance"
@@ -173,6 +177,11 @@ MATERIAL_RANKING_INDEX_SORT_KEYS = (
     "order_count",
 )
 MATERIAL_RANKING_INDEX_DEFAULT_PAGE_SIZE = 20
+MATERIAL_PLAN_MATERIAL_STATUS = (
+    str(os.environ.get("MATERIAL_PLAN_MATERIAL_STATUS") or "ALL").strip().upper() or "ALL"
+)
+if MATERIAL_PLAN_MATERIAL_STATUS not in {"ALL", "DELIVERY_OK"}:
+    MATERIAL_PLAN_MATERIAL_STATUS = "ALL"
 RANGE_LABEL_MAP = {
     "day": "今日",
     "yesterday": "昨日",
@@ -558,6 +567,8 @@ class DashboardService:
         self._redis_client: Any | None = None
         self._backfill_queue_marks: dict[str, float] = {}
         self._material_page_prewarm_marks: dict[str, str] = {}
+        self._material_ranking_index_build_marks: dict[str, float] = {}
+        self._material_ranking_index_build_lock = threading.Lock()
         self.user_access = UserAccess(
             self.db,
             now_text,
@@ -1409,6 +1420,8 @@ class DashboardService:
             if stale_payload is not None:
                 return stale_payload
             raise
+        if isinstance(payload, dict) and payload.pop("_skip_payload_cache", False):
+            return copy.deepcopy(payload)
         self._local_dict_cache_set_entry(cache_store, cache_key, payload)
         self._shared_payload_cache_entry_set(namespace, raw_cache_key, cache_version, payload, stale_ttl)
         return copy.deepcopy(payload)
@@ -3333,6 +3346,9 @@ class DashboardService:
     def create_user_keyword(self, user_id: int, payload: UserKeywordPayload) -> dict[str, Any]:
         return self.user_access.create_user_keyword(user_id, payload)
 
+    def create_user_keywords(self, user_id: int, payload: UserKeywordBatchPayload) -> list[dict[str, Any]]:
+        return self.user_access.create_user_keywords(user_id, payload.keywords, payload.enabled)
+
     def delete_user_keyword(self, keyword_id: int) -> None:
         self.user_access.delete_user_keyword(keyword_id)
 
@@ -5179,6 +5195,7 @@ class DashboardService:
                         page_size=20,
                         sort_key="stat_cost",
                         sort_dir="desc",
+                        rank_zero_metrics_last=True,
                     )
                     continue
                 if self._display_scope_uses_all_customer_centers(display_scope):
@@ -5206,6 +5223,8 @@ class DashboardService:
         return [
             (DISPLAY_SCOPE_CURRENT, "day"),
             (DISPLAY_SCOPE_ALL, "day"),
+            (DISPLAY_SCOPE_CURRENT, "yesterday"),
+            (DISPLAY_SCOPE_ALL, "yesterday"),
             (DISPLAY_SCOPE_CURRENT, "week"),
             (DISPLAY_SCOPE_ALL, "week"),
             (DISPLAY_SCOPE_CURRENT, "month"),
@@ -5276,46 +5295,162 @@ class DashboardService:
             f"{build_material_cache_namespace(MATERIAL_VIEW_PERFORMANCE, scope=MATERIAL_CACHE_SCOPE_HISTORY)}:page",
         ]
 
+    def _material_ranking_index_dynamic_windows(self) -> list[dict[str, str]]:
+        config = self.read_config()
+        tz_name = str(config.get("timezone") or TIMEZONE)
+        tz = ZoneInfo(tz_name)
+        windows: list[dict[str, str]] = []
+        for display_range_key in ("day", "yesterday", "week", "month"):
+            start_dt, end_dt, _ = build_performance_window(display_range_key, tz_name)
+            start_day = start_dt.astimezone(tz).strftime("%Y-%m-%d")
+            end_day = end_dt.astimezone(tz).strftime("%Y-%m-%d")
+            if start_day != end_day:
+                continue
+            index_range_key = material_ranking_index.index_range_key(
+                display_range_key,
+                start_day,
+                end_day,
+            )
+            if not index_range_key:
+                continue
+            windows.append(
+                {
+                    "display_range_key": display_range_key,
+                    "index_range_key": index_range_key,
+                    "start_day": start_day,
+                    "end_day": end_day,
+                }
+            )
+        return windows
+
+    def _material_ranking_index_summary_exists(
+        self,
+        *,
+        range_key: str,
+        start_day: str,
+        end_day: str,
+        all_customer_centers: bool,
+    ) -> bool:
+        try:
+            scope_key_value = material_ranking_index.scope_key(
+                self,
+                all_customer_centers=all_customer_centers,
+            )
+            with self.db() as conn:
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM material_ranking_summary
+                    WHERE scope_key = ?
+                      AND range_key = ?
+                      AND start_date = ?
+                      AND end_date = ?
+                    LIMIT 1
+                    """,
+                    [scope_key_value, range_key, start_day, end_day],
+                ).fetchone()
+            return bool(row)
+        except Exception:  # noqa: BLE001
+            return False
+
     def _refresh_material_ranking_indexes_after_hot_sync(self) -> None:
         try:
-            tz_name = str(self.read_config().get("timezone") or TIMEZONE)
-            today = datetime.now(ZoneInfo(tz_name)).date()
-            today_key = today.strftime("%Y-%m-%d")
-            with self.db() as conn:
-                conn.execute(
-                    """
-                    DELETE FROM material_ranking_index
-                    WHERE range_key = 'day'
-                      AND start_date = ?
-                      AND end_date = ?
-                    """,
-                    (today_key, today_key),
-                )
-                conn.execute(
-                    """
-                    DELETE FROM material_ranking_summary
-                    WHERE range_key = 'day'
-                      AND start_date = ?
-                      AND end_date = ?
-                    """,
-                    (today_key, today_key),
-                )
-            for all_customer_centers in (False, True):
-                self.refresh_material_ranking_index_for_window(
-                    start_day=today_key,
-                    end_day=today_key,
-                    range_key="day",
-                    all_customer_centers=all_customer_centers,
-                )
+            windows = self._material_ranking_index_dynamic_windows()
         except Exception as exc:  # noqa: BLE001
             self._emit_material_sync_observation(
                 "material_ranking_index_refresh_error",
                 error=str(exc),
             )
+            return
+        if not windows:
+            return
 
-    def _prewarm_material_performance_page_caches(self, *, force_refresh: bool = False) -> None:
+        def refresh_indexes() -> None:
+            refreshed_count = 0
+            try:
+                for all_customer_centers in (False, True):
+                    for window in windows:
+                        range_key = str(window.get("index_range_key") or "").strip()
+                        start_day = str(window.get("start_day") or "").strip()
+                        end_day = str(window.get("end_day") or "").strip()
+                        if not range_key or not start_day or not end_day:
+                            continue
+                        build_key = self._material_ranking_index_build_key(
+                            start_day=start_day,
+                            end_day=end_day,
+                            range_key=range_key,
+                            all_customer_centers=all_customer_centers,
+                        )
+                        with self._distributed_runtime_lock(
+                            self._material_ranking_index_lock_name(build_key),
+                            timeout_seconds=900,
+                            blocking_timeout_seconds=0,
+                        ) as acquired:
+                            if not acquired:
+                                continue
+                            self.refresh_material_ranking_index_for_window(
+                                start_day=start_day,
+                                end_day=end_day,
+                                range_key=range_key,
+                                all_customer_centers=all_customer_centers,
+                                sort_keys=material_ranking_index.SORT_KEYS,
+                                sort_dirs=("desc", "asc"),
+                            )
+                        refreshed_count += 1
+                if refreshed_count:
+                    self._invalidate_cache_namespaces(*self._material_performance_page_cache_namespaces())
+                    self._prewarm_material_performance_page_caches(
+                        force_refresh=True,
+                        queue_missing_indexes=False,
+                    )
+                self._emit_material_sync_observation(
+                    "material_ranking_index_refresh_done",
+                    refreshed_count=refreshed_count,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._emit_material_sync_observation(
+                    "material_ranking_index_refresh_error",
+                    error=str(exc),
+                )
+
+        threading.Thread(
+            target=refresh_indexes,
+            daemon=True,
+            name="material-ranking-index-rolling",
+        ).start()
+
+    def _prewarm_material_performance_page_caches(
+        self,
+        *,
+        force_refresh: bool = False,
+        queue_missing_indexes: bool = True,
+    ) -> None:
+        window_by_display_range = {
+            str(window.get("display_range_key") or ""): window
+            for window in self._material_ranking_index_dynamic_windows()
+        }
         for display_scope, range_key in self._material_performance_page_prewarm_targets():
             try:
+                window = window_by_display_range.get(range_key)
+                if window and not self._material_ranking_index_summary_exists(
+                    range_key=str(window.get("index_range_key") or ""),
+                    start_day=str(window.get("start_day") or ""),
+                    end_day=str(window.get("end_day") or ""),
+                    all_customer_centers=self._display_scope_uses_all_customer_centers(display_scope),
+                ):
+                    if queue_missing_indexes:
+                        cache_scope = material_cache_scope_for_range(range_key, snapshot_time="")
+                        cache_namespace = (
+                            f"{build_material_cache_namespace(MATERIAL_VIEW_PERFORMANCE, scope=cache_scope)}:page"
+                        )
+                        self._queue_material_ranking_index_for_request(
+                            start_day=str(window.get("start_day") or ""),
+                            end_day=str(window.get("end_day") or ""),
+                            range_key=str(window.get("index_range_key") or ""),
+                            all_customer_centers=self._display_scope_uses_all_customer_centers(display_scope),
+                            cache_namespace=cache_namespace,
+                        )
+                    continue
                 self._material_performance_page_payload(
                     range_key=range_key,
                     all_customer_centers=self._display_scope_uses_all_customer_centers(display_scope),
@@ -5324,6 +5459,7 @@ class DashboardService:
                     sort_key="stat_cost",
                     sort_dir="desc",
                     force_refresh=force_refresh,
+                    rank_zero_metrics_last=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 self._emit_material_sync_observation(
@@ -5347,7 +5483,10 @@ class DashboardService:
         self._prune_payload_refresh_markers([f"{namespace}:" for namespace in namespaces])
         self._invalidate_cache_namespaces(*namespaces)
         self._refresh_material_ranking_indexes_after_hot_sync()
-        self._prewarm_material_performance_page_caches(force_refresh=True)
+        self._prewarm_material_performance_page_caches(
+            force_refresh=True,
+            queue_missing_indexes=False,
+        )
         self._emit_material_sync_observation(
             "material_page_prewarm_refreshed",
             force_refresh=bool(force_refresh),
@@ -5426,11 +5565,6 @@ class DashboardService:
             "window_start": str(scoped_payload.get("window_start") or "").strip(),
             "window_end": str(scoped_payload.get("window_end") or "").strip(),
             "summary": dict(scoped_payload.get("summary") or {}),
-            "materialTodayStatus": self._material_today_hot_status(all_customer_centers=all_customer_centers),
-            "materialHistoryStatus": self._material_history_dashboard_status(
-                tz_name=timezone_name,
-                all_customer_centers=all_customer_centers,
-            ),
             "snapshot_count": int(scoped_payload.get("snapshot_count", 0) or 0),
             "customer_center_count": int(scoped_payload.get("customer_center_count", 0) or 0),
             **fallback_meta,
@@ -5959,6 +6093,15 @@ class DashboardService:
                       AND substr(COALESCE(esr.window_end, ''), 1, 10) = {day_expr}
                       AND substr(COALESCE(esr.window_end, ''), 12, 8) >= '23:59:00'
                 )
+                OR EXISTS (
+                    SELECT 1
+                    FROM material_daily md_stable
+                    WHERE md_stable.customer_center_id = {customer_center_expr}
+                      AND md_stable.biz_date = {day_expr}
+                      AND substr(COALESCE(md_stable.window_start, ''), 1, 10) = {day_expr}
+                      AND substr(COALESCE(md_stable.window_end, ''), 1, 10) = {day_expr}
+                      AND substr(COALESCE(md_stable.window_end, ''), 12, 8) >= '23:59:00'
+                )
             )
         """
 
@@ -5995,10 +6138,22 @@ class DashboardService:
                   AND substr(COALESCE(window_start, ''), 1, 10) = substr(snapshot_time, 1, 10)
                   AND substr(COALESCE(window_end, ''), 1, 10) = substr(snapshot_time, 1, 10)
                   AND substr(COALESCE(window_end, ''), 12, 8) >= '23:59:00'
+                UNION
+                SELECT biz_date AS day_key
+                FROM material_daily
+                WHERE customer_center_id = ?
+                  AND biz_date >= ?
+                  AND biz_date <= ?
+                  AND substr(COALESCE(window_start, ''), 1, 10) = biz_date
+                  AND substr(COALESCE(window_end, ''), 1, 10) = biz_date
+                  AND substr(COALESCE(window_end, ''), 12, 8) >= '23:59:00'
             ) stable_days
             WHERE COALESCE(day_key, '') <> ''
             """,
             (
+                normalized_customer_center_id,
+                start_day,
+                end_day,
                 normalized_customer_center_id,
                 start_day,
                 end_day,
@@ -6012,6 +6167,59 @@ class DashboardService:
             for row in rows
             if str(row["day_key"] or "").strip()
         }
+
+    @staticmethod
+    def _history_metric_totals_aligned(
+        candidate_totals: dict[str, Any] | None,
+        summary_totals: dict[str, Any] | None,
+    ) -> bool:
+        if not candidate_totals or not summary_totals:
+            return False
+        money_tolerance = 1.0
+        for field in ("stat_cost", "pay_amount"):
+            if abs(float(candidate_totals.get(field, 0.0) or 0.0) - float(summary_totals.get(field, 0.0) or 0.0)) > money_tolerance:
+                return False
+        return int(candidate_totals.get("order_count", 0) or 0) == int(summary_totals.get("order_count", 0) or 0)
+
+    @staticmethod
+    def _daily_metric_totals_by_day(
+        conn: Any,
+        table_name: str,
+        customer_center_id: str,
+        start_day: str,
+        end_day: str,
+    ) -> dict[str, dict[str, Any]]:
+        table = str(table_name or "").strip()
+        if table not in {"summary_daily", "material_daily", "material_relation_daily"}:
+            return {}
+        if not db_table_exists(conn, table):
+            return {}
+        rows = conn.execute(
+            f"""
+            SELECT
+                biz_date,
+                COALESCE(SUM(stat_cost), 0) AS stat_cost,
+                COALESCE(SUM(pay_amount), 0) AS pay_amount,
+                COALESCE(SUM(order_count), 0) AS order_count
+            FROM {table}
+            WHERE customer_center_id = ?
+              AND biz_date >= ?
+              AND biz_date <= ?
+            GROUP BY biz_date
+            """,
+            (str(customer_center_id or "").strip(), start_day, end_day),
+        ).fetchall()
+        totals_by_day: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            day_key = str(row["biz_date"] or "").strip()
+            if not day_key:
+                continue
+            totals_by_day[day_key] = {
+                "stat_cost": round(float(row["stat_cost"] or 0.0), 2),
+                "pay_amount": round(float(row["pay_amount"] or 0.0), 2),
+                "order_count": int(float(row["order_count"] or 0)),
+            }
+        return totals_by_day
 
     def _stable_material_history_target_keys(
         self,
@@ -6076,6 +6284,22 @@ class DashboardService:
             for row in material_rows
             if str(row["biz_date"] or "").strip()
         }
+        start_day_key = start_day.strftime("%Y-%m-%d")
+        end_day_key = end_day.strftime("%Y-%m-%d")
+        summary_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "summary_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
+        material_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "material_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
         stable_days = self._stable_material_history_days_for_customer_center(
             conn,
             normalized_customer_center_id,
@@ -6159,6 +6383,12 @@ class DashboardService:
         while cursor <= end_day:
             day_key = cursor.strftime("%Y-%m-%d")
             if day_key in material_days and day_key in stable_days:
+                cursor += timedelta(days=1)
+                continue
+            if day_key in material_days and self._history_metric_totals_aligned(
+                material_totals_by_day.get(day_key),
+                summary_totals_by_day.get(day_key),
+            ):
                 cursor += timedelta(days=1)
                 continue
             has_activity = bool(activity_by_day.get(day_key))
@@ -6382,6 +6612,22 @@ class DashboardService:
             for row in relation_rows
             if str(row["biz_date"] or "").strip()
         }
+        start_day_key = start_day.strftime("%Y-%m-%d")
+        end_day_key = end_day.strftime("%Y-%m-%d")
+        summary_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "summary_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
+        relation_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "material_relation_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
         relation_count_rows = (
             conn.execute(
                 """
@@ -6539,6 +6785,12 @@ class DashboardService:
                 and day_key in stable_days
                 and relation_row_count > 0
                 and relation_row_count >= expected_relation_count
+            ):
+                cursor += timedelta(days=1)
+                continue
+            if day_key in relation_days and self._history_metric_totals_aligned(
+                relation_totals_by_day.get(day_key),
+                summary_totals_by_day.get(day_key),
             ):
                 cursor += timedelta(days=1)
                 continue
@@ -7394,22 +7646,39 @@ class DashboardService:
         allowed_advertiser_ids: set[int] | None = None,
         display_scope: str = DISPLAY_SCOPE_CURRENT,
     ) -> list[dict[str, Any]]:
-        latest_payload = self._compute_latest_snapshot(
-            allowed_advertiser_ids=allowed_advertiser_ids,
-            display_scope=display_scope,
-        )
-        if not latest_payload:
+        allowed = None if allowed_advertiser_ids is None else sorted(int(item) for item in allowed_advertiser_ids if int(item or 0) > 0)
+        if allowed_advertiser_ids is not None and not allowed:
             return []
+        filters = ["advertiser_id > 0"]
+        params: list[Any] = []
+        if self._display_scope_uses_all_customer_centers(display_scope):
+            filters.append("COALESCE(customer_center_id, '') <> ''")
+        else:
+            filters.append("customer_center_id = ?")
+            params.append(self._current_customer_center_id())
+        if allowed:
+            filters.append(f"advertiser_id IN ({','.join('?' for _ in allowed)})")
+            params.extend(allowed)
+        with self.db() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    advertiser_id,
+                    COALESCE(MAX(NULLIF(advertiser_name, '')), CAST(advertiser_id AS TEXT)) AS advertiser_name
+                FROM account_current
+                WHERE {' AND '.join(filters)}
+                GROUP BY advertiser_id
+                ORDER BY advertiser_name ASC, advertiser_id ASC
+                """,
+                params,
+            ).fetchall()
         items = [
             {
-                "advertiser_id": int(item.get("advertiser_id", 0) or 0),
-                "advertiser_name": str(item.get("advertiser_name") or "").strip(),
+                "advertiser_id": int(row.get("advertiser_id", 0) or 0),
+                "advertiser_name": str(row.get("advertiser_name") or row.get("advertiser_id") or "").strip(),
             }
-            for item in latest_payload.get("accounts", [])
+            for row in rows
         ]
-        if allowed_advertiser_ids is not None:
-            allowed = {int(item) for item in allowed_advertiser_ids}
-            items = [item for item in items if int(item.get("advertiser_id", 0) or 0) in allowed]
         deduped: dict[int, dict[str, Any]] = {}
         for item in items:
             advertiser_id = int(item.get("advertiser_id", 0) or 0)
@@ -9424,9 +9693,12 @@ class DashboardService:
         source_text = "升级版主链"
         if normalized_source == "STANDARD":
             source_text = "标准补链"
+        profile_text = "\u5168\u57df\u6295\u653e"
+        if normalized_source in {PLAN_SOURCE_UNI_CUBIC, PLAN_SOURCE_UNI_REPORT} and normalized_delivery_type == PLAN_DELIVERY_TYPE_CUBIC:
+            profile_text = "\u4e58\u65b9\u6295\u653e"
         return {
             "metric_profile": "FULL",
-            "metric_profile_text": "乘方投放" if normalized_delivery_type == PLAN_DELIVERY_TYPE_CUBIC else "全域投放",
+            "metric_profile_text": profile_text,
             "metric_source_text": source_text,
             "metric_source_title": "today 表现来自升级版 uni_promotion 主链",
             "supports_pay_amount": True,
@@ -11684,6 +11956,8 @@ class DashboardService:
 
     @staticmethod
     def _distribute_money_metric_to_target(rows: list[dict[str, Any]], field: str, target_value: Any) -> None:
+        if not rows:
+            return
         try:
             target_cents = max(0, int(round(float(target_value or 0.0) * 100)))
         except Exception:
@@ -11713,6 +11987,8 @@ class DashboardService:
 
     @staticmethod
     def _distribute_integer_metric_to_target(rows: list[dict[str, Any]], field: str, target_value: Any) -> None:
+        if not rows:
+            return
         try:
             target_units = max(0, int(round(float(target_value or 0))))
         except Exception:
@@ -11796,7 +12072,7 @@ class DashboardService:
             return
         title_stat_cost = self._sum_money_metric(title_rows, "stat_cost")
         non_title_stat_cost = self._sum_money_metric(non_title_rows, "stat_cost")
-        if title_stat_cost <= 0 or abs(non_title_stat_cost - target_stat_cost) > 0.01:
+        if title_stat_cost <= 0 or non_title_stat_cost <= 0:
             return
         for row in title_rows:
             row["stat_cost"] = 0.0
@@ -11805,6 +12081,12 @@ class DashboardService:
             row["settled_pay_amount"] = 0.0
             row["order_count"] = 0
             row["settled_order_count"] = 0
+            row["product_show_count"] = 0
+            row["product_click_count"] = 0
+            if "overall_show_count" in row:
+                row["overall_show_count"] = 0
+            if "overall_click_count" in row:
+                row["overall_click_count"] = 0
 
     def _normalize_material_source_rows_to_plan_metrics(
         self,
@@ -11875,21 +12157,33 @@ class DashboardService:
             if advertiser_id > 0 and ad_id > 0:
                 rows_by_plan.setdefault((advertiser_id, ad_id), []).append(row)
 
+        def material_money_sum(plan_rows: list[dict[str, Any]], field: str) -> float:
+            return sum(float(row.get(field, 0.0) or 0.0) for row in plan_rows)
+
+        def material_integer_sum(plan_rows: list[dict[str, Any]], field: str) -> int:
+            return sum(int(float(row.get(field, 0) or 0)) for row in plan_rows)
+
+        def material_money_exceeds_target(plan_rows: list[dict[str, Any]], field: str, target_value: Any) -> bool:
+            return material_money_sum(plan_rows, field) - float(target_value or 0.0) > 0.01
+
+        def material_integer_exceeds_target(plan_rows: list[dict[str, Any]], field: str, target_value: Any) -> bool:
+            return material_integer_sum(plan_rows, field) > int(float(target_value or 0))
+
         for key, plan_rows in rows_by_plan.items():
             target = targets.get(key)
             if not target:
                 continue
             self._prefer_non_title_material_metrics(plan_rows, target)
             for field in ("stat_cost", "pay_amount", "settled_pay_amount"):
-                if not self._money_metric_matches_target(plan_rows, field, target.get(field)):
+                if material_money_exceeds_target(plan_rows, field, target.get(field)) and not self._money_metric_matches_target(plan_rows, field, target.get(field)):
                     self._distribute_money_metric_to_target(plan_rows, field, target.get(field))
             total_pay_target = float(target.get("total_pay_amount", 0.0) or 0.0)
             if total_pay_target <= 0 and float(target.get("pay_amount", 0.0) or 0.0) > 0:
                 total_pay_target = float(target.get("pay_amount", 0.0) or 0.0)
-            if not self._money_metric_matches_target(plan_rows, "total_pay_amount", total_pay_target):
+            if material_money_exceeds_target(plan_rows, "total_pay_amount", total_pay_target) and not self._money_metric_matches_target(plan_rows, "total_pay_amount", total_pay_target):
                 self._distribute_money_metric_to_target(plan_rows, "total_pay_amount", total_pay_target)
             for field in ("order_count", "settled_order_count"):
-                if not self._integer_metric_matches_target(plan_rows, field, target.get(field)):
+                if material_integer_exceeds_target(plan_rows, field, target.get(field)) and not self._integer_metric_matches_target(plan_rows, field, target.get(field)):
                     self._distribute_integer_metric_to_target(plan_rows, field, target.get(field))
         return normalized_rows
 
@@ -12791,7 +13085,7 @@ class DashboardService:
                     "window_end": str(snapshot_row.get("window_end") or ""),
                     "advertiser_id": int(snapshot_row.get("advertiser_id", 0) or 0),
                     "advertiser_name": str(snapshot_row.get("advertiser_name") or ""),
-                    "ad_id": int(snapshot_row.get("ad_id", 0) or 0),
+                    "ad_id": ad_id,
                     "ad_name": str(snapshot_row.get("ad_name") or ""),
                     "material_type": str(snapshot_row.get("material_type") or ""),
                     "material_key": str(snapshot_row.get("material_key") or ""),
@@ -12931,6 +13225,7 @@ class DashboardService:
         material_source_rows: list[dict[str, Any]] = []
         for snapshot_row in snapshot_rows:
             advertiser_id = int(snapshot_row.get("advertiser_id", 0) or 0)
+            ad_id = int(snapshot_row.get("ad_id", 0) or 0)
             material_key = str(snapshot_row.get("material_key") or "").strip()
             material_id = str(snapshot_row.get("material_id") or "").strip()
             profile_row = dict(profile_map.get(material_key) or {})
@@ -12941,7 +13236,7 @@ class DashboardService:
                     "window_end": str(snapshot_row.get("window_end") or ""),
                     "advertiser_id": advertiser_id,
                     "advertiser_name": str(snapshot_row.get("advertiser_name") or ""),
-                    "ad_id": int(snapshot_row.get("ad_id", 0) or 0),
+                    "ad_id": ad_id,
                     "ad_name": str(snapshot_row.get("ad_name") or ""),
                     "material_type": str(snapshot_row.get("material_type") or ""),
                     "material_key": material_key,
@@ -12965,10 +13260,8 @@ class DashboardService:
                     "top_anchor_name": str(profile_row.get("top_anchor_name") or ""),
                     "product_info_text": str(profile_row.get("product_info_text") or ""),
                     "product_names": self._json_text_list(profile_row.get("product_names_json")),
-                    "plan_ids": sorted(self._json_int_set(profile_row.get("plan_ids_json"))),
-                    "advertiser_ids": sorted(
-                        self._json_int_set(profile_row.get("advertiser_ids_json")) or ({advertiser_id} if advertiser_id > 0 else set())
-                    ),
+                    "plan_ids": [ad_id] if ad_id > 0 else [],
+                    "advertiser_ids": [advertiser_id] if advertiser_id > 0 else [],
                     "raw_json": str(snapshot_row.get("raw_json") or "{}"),
                     "is_original": (
                         (advertiser_id, material_id) in original_material_keys
@@ -13351,7 +13644,11 @@ class DashboardService:
             if ad_id <= 0 or ad_id not in normalized_plan_ids:
                 continue
             plan_context_by_ad_id[ad_id] = plan_row
-            if str(plan_row.get("plan_source") or "").strip().upper() not in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC}:
+            if str(plan_row.get("plan_source") or "").strip().upper() not in {
+                PLAN_SOURCE_UNI_PROMOTION,
+                PLAN_SOURCE_UNI_CUBIC,
+                PLAN_SOURCE_UNI_REPORT,
+            }:
                 continue
             if not self._plan_row_has_material_activity(plan_row):
                 continue
@@ -13934,6 +14231,32 @@ class DashboardService:
             if text:
                 target[field] = text
 
+    @classmethod
+    def _merge_material_preview_candidate(cls, target: dict[str, str], row: dict[str, Any]) -> None:
+        video_id = str(row.get("video_id") or "").strip()
+        if video_id and not str(target.get("video_id") or "").strip():
+            target["video_id"] = video_id
+
+        aweme_item_id = str(row.get("aweme_item_id") or "").strip()
+        if aweme_item_id and not str(target.get("aweme_item_id") or "").strip():
+            target["aweme_item_id"] = aweme_item_id
+
+        candidate_cover_url = cls._normalize_media_url(row.get("cover_url"))
+        current_cover_url = cls._normalize_media_url(target.get("cover_url"))
+        if cls._should_prefer_cover_url(candidate_cover_url, current_cover_url):
+            target["cover_url"] = candidate_cover_url
+
+        candidate_video_url = cls._normalize_media_url(row.get("video_url"))
+        current_video_url = cls._normalize_media_url(target.get("video_url"))
+        if candidate_video_url and (
+            not current_video_url
+            or (
+                cls._is_public_preview_video_url(candidate_video_url)
+                and not cls._is_public_preview_video_url(current_video_url)
+            )
+        ):
+            target["video_url"] = candidate_video_url
+
     @staticmethod
     def _material_preview_available(preview: dict[str, str]) -> bool:
         return any(
@@ -13941,11 +14264,87 @@ class DashboardService:
             for field in ("cover_url", "aweme_item_id", "video_url")
         )
 
-    def _latest_material_preview_map(self, conn: Any, material_keys: list[str]) -> dict[str, dict[str, str]]:
+    def _material_profile_preview_maps(
+        self,
+        conn: Any,
+        items: list[dict[str, Any]],
+        *,
+        all_customer_centers: bool = False,
+    ) -> dict[str, dict[str, dict[str, str]]]:
+        identifier_sets = {
+            "material_key": {
+                str(item.get("material_key") or "").strip()
+                for item in items
+                if str(item.get("material_key") or "").strip()
+            },
+            "material_id": {
+                str(item.get("material_id") or "").strip()
+                for item in items
+                if str(item.get("material_id") or "").strip()
+            },
+            "video_id": {
+                str(item.get("video_id") or "").strip()
+                for item in items
+                if str(item.get("video_id") or "").strip()
+            },
+        }
+        preview_maps: dict[str, dict[str, dict[str, str]]] = {
+            "material_key": {},
+            "material_id": {},
+            "video_id": {},
+        }
+        if not any(identifier_sets.values()):
+            return preview_maps
+
+        where_prefix = "COALESCE(customer_center_id, '') <> ''" if all_customer_centers else "customer_center_id = ?"
+        params_prefix: list[Any] = [] if all_customer_centers else [self._current_customer_center_id()]
+        for identifier_name, values in identifier_sets.items():
+            if not values:
+                continue
+            for batch in self._chunked_material_keys(sorted(values), 400):
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        material_key,
+                        material_id,
+                        video_id,
+                        cover_url,
+                        aweme_item_id,
+                        video_url,
+                        updated_at
+                    FROM material_profile
+                    WHERE {where_prefix}
+                      AND {identifier_name} IN ({placeholders})
+                    ORDER BY updated_at DESC, material_key ASC
+                    """,
+                    [*params_prefix, *batch],
+                ).fetchall()
+                for raw_row in rows:
+                    row = dict(raw_row)
+                    identifier_value = str(row.get(identifier_name) or "").strip()
+                    if not identifier_value:
+                        continue
+                    preview = preview_maps[identifier_name].setdefault(
+                        identifier_value,
+                        self._empty_material_preview_fields(),
+                    )
+                    self._merge_material_preview_candidate(preview, row)
+        return preview_maps
+
+    def _latest_material_preview_map(
+        self,
+        conn: Any,
+        material_keys: list[str],
+        *,
+        all_customer_centers: bool = False,
+    ) -> dict[str, dict[str, str]]:
         requested_keys = {str(item or "").strip() for item in material_keys if str(item or "").strip()}
         if not requested_keys:
             return {}
         preview_map: dict[str, dict[str, str]] = {}
+        where_prefix = "COALESCE(customer_center_id, '') <> ''" if all_customer_centers else "customer_center_id = ?"
+        params_prefix: list[Any] = [] if all_customer_centers else [self._current_customer_center_id()]
         for table_name in ("material_rollups", "material_snapshots"):
             for batch in self._chunked_material_keys(sorted(requested_keys), 400):
                 placeholders = ",".join("?" for _ in batch)
@@ -13953,11 +14352,16 @@ class DashboardService:
                     f"""
                     SELECT material_key, video_id, cover_url, aweme_item_id, video_url
                     FROM {table_name}
-                    WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM {table_name})
+                    WHERE snapshot_time = (
+                        SELECT MAX(snapshot_time)
+                        FROM {table_name}
+                        WHERE {where_prefix}
+                    )
+                      AND {where_prefix}
                       AND material_key IN ({placeholders})
                     ORDER BY material_key ASC
                     """,
-                    batch,
+                    [*params_prefix, *params_prefix, *batch],
                 ).fetchall()
                 for raw_row in rows:
                     row = dict(raw_row)
@@ -13972,18 +14376,40 @@ class DashboardService:
             if self._material_preview_available(value) or str(value.get("video_id") or "").strip()
         }
 
-    def _apply_latest_material_previews(self, conn: Any, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _apply_latest_material_previews(
+        self,
+        conn: Any,
+        items: list[dict[str, Any]],
+        *,
+        all_customer_centers: bool = False,
+    ) -> list[dict[str, Any]]:
         if not items:
             return items
-        preview_map = self._latest_material_preview_map(
+        profile_preview_maps = self._material_profile_preview_maps(
+            conn,
+            items,
+            all_customer_centers=all_customer_centers,
+        )
+        fallback_preview_map = self._latest_material_preview_map(
             conn,
             [str(item.get("material_key") or "").strip() for item in items],
+            all_customer_centers=all_customer_centers,
         )
-        if not preview_map:
+        if not any(profile_preview_maps.values()) and not fallback_preview_map:
             return items
         for item in items:
-            preview = preview_map.get(str(item.get("material_key") or "").strip())
-            if not preview:
+            preview = self._empty_material_preview_fields()
+            for identifier_name in ("material_id", "video_id", "material_key"):
+                identifier_value = str(item.get(identifier_name) or "").strip()
+                if not identifier_value:
+                    continue
+                candidate = profile_preview_maps.get(identifier_name, {}).get(identifier_value)
+                if candidate:
+                    self._merge_material_preview_candidate(preview, candidate)
+            fallback_preview = fallback_preview_map.get(str(item.get("material_key") or "").strip())
+            if fallback_preview:
+                self._merge_material_preview_candidate(preview, fallback_preview)
+            if not self._material_preview_available(preview) and not str(preview.get("video_id") or "").strip():
                 continue
             for field in ("video_id", "cover_url", "aweme_item_id", "video_url"):
                 text = str(preview.get(field) or "").strip()
@@ -15175,115 +15601,6 @@ class DashboardService:
                 merge_context(fallback[ad_id], context)
         return exact, fallback
 
-    def _comment_material_context_maps(
-        self,
-        conn: Any,
-        advertiser_ids: set[int],
-        material_ids: set[str],
-        item_ids: set[str],
-    ) -> dict[str, dict[Any, dict[str, str]]]:
-        result: dict[str, dict[Any, dict[str, str]]] = {
-            "exact_item": {},
-            "fallback_item": {},
-            "exact_material": {},
-            "fallback_material": {},
-        }
-        normalized_material_ids = sorted(str(item).strip() for item in material_ids if str(item).strip())
-        normalized_item_ids = sorted(str(item).strip() for item in item_ids if str(item).strip())
-        if not advertiser_ids or (not normalized_material_ids and not normalized_item_ids):
-            return result
-
-        advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
-        source_queries: list[str] = []
-        params: list[Any] = []
-
-        def append_source(table_name: str, priority: int, has_top_anchor: bool) -> None:
-            match_clauses: list[str] = []
-            source_params: list[Any] = [self._current_customer_center_id(), *sorted(advertiser_ids)]
-            if normalized_material_ids:
-                material_placeholders = ",".join("?" for _ in normalized_material_ids)
-                match_clauses.append(f"COALESCE(mr.material_id, '') IN ({material_placeholders})")
-                source_params.extend(normalized_material_ids)
-            if normalized_item_ids:
-                item_placeholders = ",".join("?" for _ in normalized_item_ids)
-                match_clauses.append(
-                    f"(COALESCE(mr.aweme_item_id, '') IN ({item_placeholders}) OR COALESCE(mr.video_id, '') IN ({item_placeholders}))"
-                )
-                source_params.extend(normalized_item_ids)
-                source_params.extend(normalized_item_ids)
-            top_anchor_expr = "NULLIF(mr.top_anchor_name, '')" if has_top_anchor else "NULL"
-            source_queries.append(
-                f"""
-                SELECT
-                    {priority} AS priority,
-                    mr.snapshot_time,
-                    mr.advertiser_id,
-                    mr.ad_id,
-                    mr.ad_name,
-                    mr.material_id,
-                    mr.material_name,
-                    mr.video_id,
-                    mr.aweme_item_id,
-                    COALESCE({top_anchor_expr}, NULLIF(pc.anchor_name, ''), '') AS comment_anchor_name,
-                    COALESCE(NULLIF(pc.plan_source, ''), '') AS plan_source
-                FROM {table_name} mr
-                LEFT JOIN plan_current pc
-                  ON pc.customer_center_id = mr.customer_center_id
-                 AND pc.advertiser_id = mr.advertiser_id
-                 AND pc.ad_id = mr.ad_id
-                WHERE mr.customer_center_id = ?
-                  AND mr.advertiser_id IN ({advertiser_placeholders})
-                  AND ({' OR '.join(match_clauses)})
-                """
-            )
-            params.extend(source_params)
-
-        append_source("material_relation_current", 0, True)
-        append_source("material_relation_daily", 1, True)
-        append_source("material_snapshots", 2, False)
-
-        rows = conn.execute(
-            f"""
-            {' UNION ALL '.join(source_queries)}
-            ORDER BY priority ASC, snapshot_time DESC
-            """,
-            params,
-        ).fetchall()
-
-        def merge_context(target: dict[str, str], source: dict[str, str]) -> None:
-            for key, value in source.items():
-                if value and not target.get(key):
-                    target[key] = value
-
-        def store(mapping: dict[Any, dict[str, str]], key: Any, context: dict[str, str]) -> None:
-            if key in mapping:
-                merge_context(mapping[key], context)
-            else:
-                mapping[key] = dict(context)
-
-        for row in rows:
-            advertiser_id = int(row["advertiser_id"] or 0)
-            ad_id = int(row["ad_id"] or 0)
-            material_id = str(row["material_id"] or "").strip()
-            aweme_item_id = str(row["aweme_item_id"] or "").strip()
-            video_id = str(row["video_id"] or "").strip()
-            context = {
-                "promotion_id": str(ad_id) if ad_id else "",
-                "promotion_name": str(row["ad_name"] or "").strip(),
-                "material_name": str(row["material_name"] or "").strip(),
-                "comment_anchor_name": str(row["comment_anchor_name"] or "").strip(),
-                "plan_source": str(row["plan_source"] or "").strip(),
-            }
-            if material_id:
-                store(result["exact_material"], (advertiser_id, material_id), context)
-                store(result["fallback_material"], material_id, context)
-            for item_id in (aweme_item_id, video_id):
-                if not item_id:
-                    continue
-                store(result["exact_item"], (advertiser_id, item_id), context)
-                store(result["fallback_item"], item_id, context)
-        return result
-
     def _comment_material_name_maps(
         self,
         conn: Any,
@@ -15340,6 +15657,263 @@ class DashboardService:
             exact.setdefault((advertiser_id, material_id), material_name)
             fallback.setdefault(material_id, material_name)
         return exact, fallback
+
+    def _comment_material_context_maps(
+        self,
+        conn: Any,
+        advertiser_ids: set[int],
+        material_ids: set[str],
+        item_ids: set[str],
+        start_date: str,
+        end_date: str,
+    ) -> tuple[
+        dict[tuple[int, str], dict[str, str]],
+        dict[tuple[int, str], dict[str, str]],
+        dict[str, dict[str, str]],
+        dict[str, dict[str, str]],
+    ]:
+        normalized_material_ids = sorted(str(item).strip() for item in material_ids if str(item).strip())
+        normalized_item_ids = sorted(str(item).strip() for item in item_ids if str(item).strip())
+        if not advertiser_ids or (not normalized_material_ids and not normalized_item_ids):
+            return {}, {}, {}, {}
+
+        advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
+        sorted_advertiser_ids = sorted(advertiser_ids)
+
+        def build_lookup_conditions(alias: str) -> list[tuple[str, list[Any]]]:
+            conditions: list[tuple[str, list[Any]]] = []
+            if normalized_material_ids:
+                material_placeholders = ",".join("?" for _ in normalized_material_ids)
+                conditions.append((f"{alias}.material_id IN ({material_placeholders})", list(normalized_material_ids)))
+                conditions.append((f"{alias}.material_key IN ({material_placeholders})", list(normalized_material_ids)))
+            if normalized_item_ids:
+                item_placeholders = ",".join("?" for _ in normalized_item_ids)
+                conditions.append((f"{alias}.aweme_item_id IN ({item_placeholders})", list(normalized_item_ids)))
+            return conditions
+
+        relation_sql_parts: list[str] = []
+        relation_params: list[Any] = []
+        for match_sql, match_params in build_lookup_conditions("mrc"):
+            relation_sql_parts.append(
+                f"""
+            SELECT
+                0 AS priority,
+                mrc.snapshot_time,
+                mrc.advertiser_id,
+                mrc.ad_id,
+                mrc.ad_name,
+                mrc.material_key,
+                mrc.material_id,
+                mrc.aweme_item_id,
+                mrc.material_name,
+                COALESCE(NULLIF(mrc.top_anchor_name, ''), NULLIF(pc.anchor_name, ''), '') AS anchor_name,
+                COALESCE(NULLIF(pc.plan_source, ''), '') AS plan_source,
+                mrc.stat_cost
+            FROM material_relation_current mrc
+            LEFT JOIN plan_current pc
+              ON pc.customer_center_id = mrc.customer_center_id
+             AND pc.advertiser_id = mrc.advertiser_id
+             AND pc.ad_id = mrc.ad_id
+            WHERE mrc.customer_center_id = ?
+              AND mrc.advertiser_id IN ({advertiser_placeholders})
+              AND {match_sql}
+                """
+            )
+            relation_params.extend([self._current_customer_center_id(), *sorted_advertiser_ids, *match_params])
+        for match_sql, match_params in build_lookup_conditions("mrd"):
+            relation_sql_parts.append(
+                f"""
+            SELECT
+                1 AS priority,
+                mrd.snapshot_time,
+                mrd.advertiser_id,
+                mrd.ad_id,
+                mrd.ad_name,
+                mrd.material_key,
+                mrd.material_id,
+                mrd.aweme_item_id,
+                mrd.material_name,
+                COALESCE(NULLIF(mrd.top_anchor_name, ''), NULLIF(pd.anchor_name, ''), '') AS anchor_name,
+                COALESCE(NULLIF(pd.plan_source, ''), '') AS plan_source,
+                mrd.stat_cost
+            FROM material_relation_daily mrd
+            LEFT JOIN plan_daily pd
+              ON pd.customer_center_id = mrd.customer_center_id
+             AND pd.biz_date = mrd.biz_date
+             AND pd.advertiser_id = mrd.advertiser_id
+             AND pd.ad_id = mrd.ad_id
+            WHERE mrd.customer_center_id = ?
+              AND mrd.biz_date >= ?
+              AND mrd.biz_date <= ?
+              AND mrd.advertiser_id IN ({advertiser_placeholders})
+              AND {match_sql}
+                """
+            )
+            relation_params.extend(
+                [
+                    self._current_customer_center_id(),
+                    str(start_date).strip(),
+                    str(end_date).strip(),
+                    *sorted_advertiser_ids,
+                    *match_params,
+                ]
+            )
+        rows = conn.execute(
+            f"""
+            {" UNION ALL ".join(relation_sql_parts)}
+            ORDER BY priority ASC, snapshot_time DESC, stat_cost DESC
+            """,
+            relation_params,
+        ).fetchall()
+        exact_by_item: dict[tuple[int, str], dict[str, str]] = {}
+        exact_by_material: dict[tuple[int, str], dict[str, str]] = {}
+        fallback_by_item: dict[str, dict[str, str]] = {}
+        fallback_by_material: dict[str, dict[str, str]] = {}
+
+        def merge_context(target: dict[str, str], source: dict[str, str]) -> None:
+            for key, value in source.items():
+                if value and not target.get(key):
+                    target[key] = value
+
+        def put_context(target: dict[Any, dict[str, str]], key: Any, context: dict[str, str]) -> None:
+            if key not in target:
+                target[key] = dict(context)
+                return
+            merge_context(target[key], context)
+
+        for raw_row in rows:
+            row = dict(raw_row)
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            ad_id = int(row.get("ad_id", 0) or 0)
+            ad_name = str(row.get("ad_name") or ad_id or "").strip()
+            material_id = str(row.get("material_id") or "").strip()
+            material_key = str(row.get("material_key") or "").strip()
+            aweme_item_id = str(row.get("aweme_item_id") or "").strip()
+            context = {
+                "promotion_id": str(ad_id) if ad_id else "",
+                "promotion_name": ad_name,
+                "comment_anchor_name": str(row.get("anchor_name") or "").strip(),
+                "plan_source": str(row.get("plan_source") or "").strip(),
+                "material_name": str(row.get("material_name") or "").strip(),
+            }
+            if aweme_item_id:
+                put_context(exact_by_item, (advertiser_id, aweme_item_id), context)
+                put_context(fallback_by_item, aweme_item_id, context)
+            for material_token in {material_id, material_key}:
+                material_token = str(material_token or "").strip()
+                if not material_token:
+                    continue
+                put_context(exact_by_material, (advertiser_id, material_token), context)
+                put_context(fallback_by_material, material_token, context)
+
+        aggregate_sql_parts: list[str] = []
+        aggregate_params: list[Any] = []
+        for match_sql, match_params in build_lookup_conditions("mc"):
+            aggregate_sql_parts.append(
+                f"""
+            SELECT
+                2 AS priority,
+                mc.snapshot_time,
+                mc.material_key,
+                mc.material_id,
+                mc.aweme_item_id,
+                mc.material_name,
+                mc.top_plan_name,
+                mc.top_anchor_name,
+                mc.plan_ids_json,
+                mc.advertiser_ids_json,
+                mc.stat_cost
+            FROM material_current mc
+            WHERE mc.customer_center_id = ?
+              AND {match_sql}
+                """
+            )
+            aggregate_params.extend([self._current_customer_center_id(), *match_params])
+        for match_sql, match_params in build_lookup_conditions("md"):
+            aggregate_sql_parts.append(
+                f"""
+            SELECT
+                3 AS priority,
+                md.snapshot_time,
+                md.material_key,
+                md.material_id,
+                md.aweme_item_id,
+                md.material_name,
+                md.top_plan_name,
+                md.top_anchor_name,
+                md.plan_ids_json,
+                md.advertiser_ids_json,
+                md.stat_cost
+            FROM material_daily md
+            WHERE md.customer_center_id = ?
+              AND md.biz_date >= ?
+              AND md.biz_date <= ?
+              AND {match_sql}
+                """
+            )
+            aggregate_params.extend(
+                [
+                    self._current_customer_center_id(),
+                    str(start_date).strip(),
+                    str(end_date).strip(),
+                    *match_params,
+                ]
+            )
+        aggregate_rows = conn.execute(
+            f"""
+            {" UNION ALL ".join(aggregate_sql_parts)}
+            ORDER BY priority ASC, snapshot_time DESC, stat_cost DESC
+            """,
+            aggregate_params,
+        ).fetchall()
+
+        def parse_int_list(value: Any) -> list[int]:
+            try:
+                loaded = json.loads(str(value or "[]"))
+            except Exception:  # noqa: BLE001
+                return []
+            if not isinstance(loaded, list):
+                return []
+            result: list[int] = []
+            for item in loaded:
+                try:
+                    result.append(int(item))
+                except (TypeError, ValueError):
+                    continue
+            return result
+
+        for raw_row in aggregate_rows:
+            row = dict(raw_row)
+            row_advertiser_ids = [item for item in parse_int_list(row.get("advertiser_ids_json")) if item in advertiser_ids]
+            if not row_advertiser_ids:
+                continue
+            plan_ids = parse_int_list(row.get("plan_ids_json"))
+            ad_id = plan_ids[0] if plan_ids else 0
+            ad_name = str(row.get("top_plan_name") or ad_id or "").strip()
+            material_id = str(row.get("material_id") or "").strip()
+            material_key = str(row.get("material_key") or "").strip()
+            aweme_item_id = str(row.get("aweme_item_id") or "").strip()
+            context = {
+                "promotion_id": str(ad_id) if ad_id else "",
+                "promotion_name": ad_name,
+                "comment_anchor_name": str(row.get("top_anchor_name") or "").strip(),
+                "plan_source": "",
+                "material_name": str(row.get("material_name") or "").strip(),
+            }
+            if aweme_item_id:
+                put_context(fallback_by_item, aweme_item_id, context)
+            for material_token in {material_id, material_key}:
+                material_token = str(material_token or "").strip()
+                if material_token:
+                    put_context(fallback_by_material, material_token, context)
+            for advertiser_id in row_advertiser_ids:
+                if aweme_item_id:
+                    put_context(exact_by_item, (advertiser_id, aweme_item_id), context)
+                for material_token in {material_id, material_key}:
+                    material_token = str(material_token or "").strip()
+                    if material_token:
+                        put_context(exact_by_material, (advertiser_id, material_token), context)
+        return exact_by_item, exact_by_material, fallback_by_item, fallback_by_material
 
     @classmethod
     def _comment_record_from_item(
@@ -16454,6 +17028,10 @@ class DashboardService:
         promotion_ids: set[int] = set()
         material_ids: set[str] = set()
         item_ids: set[str] = set()
+        material_context_by_item: dict[tuple[int, str], dict[str, str]] = {}
+        material_context_by_material: dict[tuple[int, str], dict[str, str]] = {}
+        fallback_material_context_by_item: dict[str, dict[str, str]] = {}
+        fallback_material_context_by_material: dict[str, dict[str, str]] = {}
         with self.db() as conn:
             stored_rows = self._stored_comment_records(conn, account_ids, comment_start_date, comment_end_date)
             items = [self._comment_item_from_record(row) for row in stored_rows]
@@ -16474,25 +17052,28 @@ class DashboardService:
                 if str(item.get("item_id") or "").strip()
             }
             plan_map, fallback_plan_map = self._comment_plan_context_maps(conn, advertiser_ids, promotion_ids)
-            material_context_maps = self._comment_material_context_maps(conn, advertiser_ids, material_ids, item_ids)
             material_map, fallback_material_map = self._comment_material_name_maps(conn, advertiser_ids, material_ids)
+            context_day_count = max((end_dt.date() - start_dt.date()).days + 1, 1)
+            if context_day_count <= COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS:
+                (
+                    material_context_by_item,
+                    material_context_by_material,
+                    fallback_material_context_by_item,
+                    fallback_material_context_by_material,
+                ) = self._comment_material_context_maps(
+                    conn,
+                    advertiser_ids,
+                    material_ids,
+                    item_ids,
+                    comment_start_date,
+                    comment_end_date,
+                )
 
         for item in items:
             advertiser_id_value = int(item.get("advertiser_id", 0) or 0)
             promotion_text = str(item.get("promotion_id") or "").strip()
             material_text = str(item.get("material_id") or "").strip()
             item_text = str(item.get("item_id") or "").strip()
-            material_context: dict[str, str] = {}
-            if item_text:
-                material_context = material_context_maps["exact_item"].get(
-                    (advertiser_id_value, item_text),
-                    {},
-                ) or material_context_maps["fallback_item"].get(item_text, {})
-            if not material_context and material_text:
-                material_context = material_context_maps["exact_material"].get(
-                    (advertiser_id_value, material_text),
-                    {},
-                ) or material_context_maps["fallback_material"].get(material_text, {})
             plan_context: dict[str, str] = {}
             if promotion_text.isdigit():
                 promotion_id_value = int(promotion_text)
@@ -16500,24 +17081,34 @@ class DashboardService:
                     promotion_id_value,
                     {},
                 )
-            if not promotion_text and str(material_context.get("promotion_id") or "").strip():
-                promotion_text = str(material_context.get("promotion_id") or "").strip()
+            material_context: dict[str, str] = {}
+            if item_text:
+                material_context = material_context_by_item.get(
+                    (advertiser_id_value, item_text),
+                    {},
+                ) or fallback_material_context_by_item.get(item_text, {})
+            if not material_context and material_text:
+                material_context = material_context_by_material.get(
+                    (advertiser_id_value, material_text),
+                    {},
+                ) or fallback_material_context_by_material.get(material_text, {})
+            if not plan_context:
+                plan_context = dict(material_context)
+            elif material_context:
+                for key, value in material_context.items():
+                    if value and not plan_context.get(key):
+                        plan_context[key] = value
+            inferred_promotion_id = str(plan_context.get("promotion_id") or "").strip()
+            if not promotion_text and inferred_promotion_id:
+                promotion_text = inferred_promotion_id
                 item["promotion_id"] = promotion_text
-            promotion_name = str(
-                plan_context.get("promotion_name")
-                or material_context.get("promotion_name")
-                or "",
-            ).strip()
+            promotion_name = str(plan_context.get("promotion_name") or "").strip()
             material_name = material_map.get((advertiser_id_value, material_text), "") or fallback_material_map.get(
                 material_text,
                 "",
-            ) or str(material_context.get("material_name") or "").strip()
-            comment_anchor_name = str(
-                plan_context.get("comment_anchor_name")
-                or material_context.get("comment_anchor_name")
-                or "",
-            ).strip()
-            plan_source = str(plan_context.get("plan_source") or material_context.get("plan_source") or "").strip()
+            ) or str(plan_context.get("material_name") or "").strip()
+            comment_anchor_name = str(plan_context.get("comment_anchor_name") or "").strip()
+            plan_source = str(plan_context.get("plan_source") or "").strip()
             item["promotion_name"] = promotion_name
             item["promotion_display_name"] = promotion_name or (f"计划 {promotion_text}" if promotion_text else "-")
             item["plan_source"] = plan_source
@@ -16635,10 +17226,40 @@ class DashboardService:
         start_date: str = "",
         end_date: str = "",
         query: str = "",
+        page: int = 1,
+        page_size: int = 500,
     ) -> dict[str, Any]:
         user = self.get_user_by_id(user_id, include_disabled=True)
         if not user or str(user.get("role") or "") != ROLE_OPERATOR:
             return {"items": [], "range_key": range_key, "query": str(query or "").strip()}
+        indexed_payload = self._operator_material_index_page_payload(
+            int(user_id or 0),
+            range_key=range_key,
+            start_date=start_date,
+            end_date=end_date,
+            page=page,
+            page_size=page_size,
+            sort_key="stat_cost",
+            sort_dir="desc",
+            search=query,
+            include_disabled_user=True,
+        )
+        if indexed_payload is not None:
+            return {
+                "user": user,
+                "items": list(indexed_payload.get("items") or []),
+                "range_key": indexed_payload.get("range_key", range_key),
+                "range_label": indexed_payload.get("range_label", RANGE_LABEL_MAP.get(range_key, "today")),
+                "query": str(query or "").strip(),
+                "snapshot_time": indexed_payload.get("snapshot_time", ""),
+                "snapshot_count": int(indexed_payload.get("snapshot_count") or 0),
+                "customer_center_count": int(indexed_payload.get("customer_center_count") or 0),
+                "pagination": dict(indexed_payload.get("pagination") or {}),
+                "materials_aggregate": dict(indexed_payload.get("materials_aggregate") or {}),
+                "ranking_index_used": bool(indexed_payload.get("ranking_index_used")),
+                "ranking_index_range_key": str(indexed_payload.get("ranking_index_range_key") or ""),
+                "ranking_index_missing": bool(indexed_payload.get("ranking_index_missing")),
+            }
         operators, keywords = self._operator_config(include_disabled=True, only_user_id=user_id)
         payload = self._cross_customer_center_material_payload(range_key, start_date, end_date, "", None)
         items = self._filter_material_items_for_operator(payload.get("items", []), user_id, operators, keywords)
@@ -18236,7 +18857,7 @@ class DashboardService:
                         continue
                     changed_fields_by_account[advertiser_id] = changed_fields
                     if not existing_row and not self._account_summary_has_performance(summary):
-                        direct_summaries.append(summary)
+                        plan_refresh_accounts.append(account)
                         continue
                     plan_refresh_accounts.append(account)
 
@@ -18853,6 +19474,7 @@ class DashboardService:
                             material_row_count=0,
                             error_items=[],
                         )
+                        self._invalidate_material_ranking_indexes_for_day(conn, target_date)
                     refreshed += 1
                     stats["refreshed_days"] += 1
                     target_result["status"] = "completed"
@@ -18910,12 +19532,24 @@ class DashboardService:
                                 for error_item in (payload.get("errors") or [])
                             ]
                         )
-                        collected_material_rows.extend(list(payload.get("material_rows") or []))
                         collected_video_flag_rows.extend(list(payload.get("video_flag_rows") or []))
-                        material_row_count = len(collected_material_rows)
                         report_row_count = len(payload.get("material_report_rows") or [])
-                        material_source_rows = self._material_source_rows_from_extended_payload(payload)
-                        material_rollup_rows = self._material_rollup_rows_from_extended_payload(payload)
+                        with self.db() as conn:
+                            material_source_rows = self._normalized_material_source_rows_from_extended_payload(
+                                conn,
+                                customer_center_id,
+                                payload,
+                                use_current=False,
+                            )
+                        collected_material_rows.extend(
+                            self._material_snapshot_tuple_from_source_row(row)
+                            for row in material_source_rows
+                        )
+                        material_row_count = len(collected_material_rows)
+                        material_rollup_rows = self._material_rollup_rows_from_extended_payload(
+                            payload,
+                            material_source_rows=material_source_rows,
+                        )
                         material_relation_rows = self._build_material_relation_read_rows(
                             str(payload.get("snapshot_time") or ""),
                             str(payload.get("window_start") or ""),
@@ -18992,12 +19626,24 @@ class DashboardService:
                             ]
                             aggregate_errors.extend(batch_errors)
                             batch_error_samples = batch_errors[:3]
-                            collected_material_rows.extend(list(payload.get("material_rows") or []))
                             collected_video_flag_rows.extend(list(payload.get("video_flag_rows") or []))
-                            material_row_count += len(payload.get("material_rows") or [])
                             report_row_count += len(payload.get("material_report_rows") or [])
-                            material_source_rows = self._material_source_rows_from_extended_payload(payload)
-                            material_rollup_rows = self._material_rollup_rows_from_extended_payload(payload)
+                            with self.db() as conn:
+                                material_source_rows = self._normalized_material_source_rows_from_extended_payload(
+                                    conn,
+                                    customer_center_id,
+                                    payload,
+                                    use_current=False,
+                                )
+                            collected_material_rows.extend(
+                                self._material_snapshot_tuple_from_source_row(row)
+                                for row in material_source_rows
+                            )
+                            material_row_count += len(material_source_rows)
+                            material_rollup_rows = self._material_rollup_rows_from_extended_payload(
+                                payload,
+                                material_source_rows=material_source_rows,
+                            )
                             material_relation_rows = self._build_material_relation_read_rows(
                                 str(payload.get("snapshot_time") or ""),
                                 str(payload.get("window_start") or ""),
@@ -19153,6 +19799,7 @@ class DashboardService:
                                 material_row_count=material_row_count,
                                 error_items=aggregate_errors,
                             )
+                            self._invalidate_material_ranking_indexes_for_day(conn, target_date)
                             write_applied = True
                 if write_applied:
                     refreshed += 1
@@ -20924,7 +21571,7 @@ class DashboardService:
                 "material_type": material_type,
                 "start_date": start_date,
                 "end_date": end_date,
-                "material_status": "ALL",
+                "material_status": MATERIAL_PLAN_MATERIAL_STATUS,
             }
             if material_type == "VIDEO":
                 filtering["video_type"] = "ALL"
@@ -21143,7 +21790,7 @@ class DashboardService:
                 "material_type": material_type,
                 "start_date": start_date,
                 "end_date": end_date,
-                "material_status": "ALL",
+                "material_status": MATERIAL_PLAN_MATERIAL_STATUS,
             }
             if material_type == "VIDEO":
                 filtering["video_type"] = "ALL"
@@ -22878,6 +23525,7 @@ class DashboardService:
             material_source_rows: list[dict[str, Any]] = []
             for row in payload.get("material_rows") or []:
                 advertiser_id = int(row[3])
+                ad_id = int(row[5] or 0)
                 material_key = str(row[8] or "").strip()
                 material_id = str(row[9] or "").strip()
                 metadata = metadata_by_key.get(material_key, {})
@@ -22888,7 +23536,7 @@ class DashboardService:
                         "window_end": row[2],
                         "advertiser_id": advertiser_id,
                         "advertiser_name": row[4],
-                        "ad_id": int(row[5]),
+                        "ad_id": ad_id,
                         "ad_name": row[6],
                         "material_type": row[7],
                         "material_key": material_key,
@@ -22912,10 +23560,8 @@ class DashboardService:
                         "top_anchor_name": str(metadata.get("top_anchor_name") or "").strip(),
                         "product_info_text": str(metadata.get("product_info_text") or "").strip(),
                         "product_names": self._json_text_list(metadata.get("product_names_json")),
-                        "plan_ids": sorted(self._json_int_set(metadata.get("plan_ids_json"))),
-                        "advertiser_ids": sorted(
-                            self._json_int_set(metadata.get("advertiser_ids_json")) or ({advertiser_id} if advertiser_id > 0 else set())
-                        ),
+                        "plan_ids": [ad_id] if ad_id > 0 else [],
+                        "advertiser_ids": [advertiser_id] if advertiser_id > 0 else [],
                         "raw_json": row[25],
                         "is_original": (
                             (advertiser_id, material_id) in original_material_keys
@@ -23038,6 +23684,7 @@ class DashboardService:
             material_source_rows: list[dict[str, Any]] = []
             for row in payload["material_rows"]:
                 advertiser_id = int(row[3])
+                ad_id = int(row[5] or 0)
                 material_key = str(row[8] or "").strip()
                 material_id = str(row[9] or "").strip()
                 metadata = metadata_by_key.get(material_key, {})
@@ -23048,7 +23695,7 @@ class DashboardService:
                         "window_end": row[2],
                         "advertiser_id": advertiser_id,
                         "advertiser_name": row[4],
-                        "ad_id": int(row[5]),
+                        "ad_id": ad_id,
                         "ad_name": row[6],
                         "material_type": row[7],
                         "material_key": material_key,
@@ -23072,10 +23719,8 @@ class DashboardService:
                         "top_anchor_name": str(metadata.get("top_anchor_name") or "").strip(),
                         "product_info_text": str(metadata.get("product_info_text") or "").strip(),
                         "product_names": self._json_text_list(metadata.get("product_names_json")),
-                        "plan_ids": sorted(self._json_int_set(metadata.get("plan_ids_json"))),
-                        "advertiser_ids": sorted(
-                            self._json_int_set(metadata.get("advertiser_ids_json")) or ({advertiser_id} if advertiser_id > 0 else set())
-                        ),
+                        "plan_ids": [ad_id] if ad_id > 0 else [],
+                        "advertiser_ids": [advertiser_id] if advertiser_id > 0 else [],
                         "raw_json": row[25],
                         "is_original": (
                             (advertiser_id, material_id) in original_material_keys
@@ -23443,6 +24088,7 @@ class DashboardService:
         material_source_rows: list[dict[str, Any]] = []
         for row in payload.get("material_rows") or []:
             advertiser_id = int(row[3])
+            ad_id = int(row[5])
             material_id = str(row[9] or "")
             material_source_rows.append(
                 {
@@ -23451,7 +24097,7 @@ class DashboardService:
                     "window_end": row[2],
                     "advertiser_id": advertiser_id,
                     "advertiser_name": row[4],
-                    "ad_id": int(row[5]),
+                    "ad_id": ad_id,
                     "ad_name": row[6],
                     "material_type": row[7],
                     "material_key": row[8],
@@ -23477,8 +24123,33 @@ class DashboardService:
             )
         return material_source_rows
 
-    def _material_rollup_rows_from_extended_payload(self, payload: dict[str, Any]) -> list[tuple[Any, ...]]:
+    def _normalized_material_source_rows_from_extended_payload(
+        self,
+        conn: Any,
+        customer_center_id: str,
+        payload: dict[str, Any],
+        *,
+        use_current: bool = False,
+    ) -> list[dict[str, Any]]:
         material_source_rows = self._material_source_rows_from_extended_payload(payload)
+        if not material_source_rows:
+            return []
+        return self._normalize_material_source_rows_to_plan_metrics(
+            conn,
+            customer_center_id,
+            material_source_rows,
+            snapshot_time=str(payload.get("snapshot_time") or ""),
+            use_current=use_current,
+        )
+
+    def _material_rollup_rows_from_extended_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        material_source_rows: list[dict[str, Any]] | None = None,
+    ) -> list[tuple[Any, ...]]:
+        if material_source_rows is None:
+            material_source_rows = self._material_source_rows_from_extended_payload(payload)
         if not material_source_rows:
             return []
         material_groups = self._group_material_rows(material_source_rows)
@@ -25150,6 +25821,295 @@ class DashboardService:
             payload["meta"] = meta
         return payload
 
+    def _material_library_page_payload(
+        self,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        *,
+        allowed_advertiser_ids: set[int] | None = None,
+        all_customer_centers: bool = False,
+        page: int = 1,
+        page_size: int = 0,
+        sort_key: str = "",
+        sort_dir: str = "desc",
+        search: str = "",
+    ) -> dict[str, Any]:
+        normalized = str(range_key or "day").strip().lower()
+        if normalized not in MATERIAL_RANGES:
+            raise ValueError("range must be one of day/yesterday/week/month/all/custom")
+        config = self.read_config()
+        tz_name = str(config.get("timezone") or TIMEZONE)
+        if normalized == "custom":
+            start_dt, end_dt, range_label = build_material_custom_window(start_date, end_date, tz_name)
+        elif normalized == "all":
+            start_dt, end_dt, range_label = build_all_material_window(tz_name)
+        else:
+            start_dt, end_dt, range_label = build_performance_window(normalized, tz_name)
+        tz = ZoneInfo(str(tz_name or TIMEZONE))
+        start_text = start_dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+        end_text = end_dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+        include_missing = normalized == "all"
+        normalized_page = self._query_page_value(page)
+        normalized_page_size = self._query_page_size_value(page_size, 20)
+        offset = max(normalized_page - 1, 0) * normalized_page_size
+        normalized_sort_dir = self._query_sort_dir(sort_dir)
+        normalized_sort_key = str(sort_key or "").strip() or "create_time"
+        sort_expr_by_key = {
+            "create_time": "effective_create_time",
+            "material_name": "LOWER(COALESCE(material_name, ''))",
+            "material_type": "LOWER(COALESCE(material_type, ''))",
+            "top_account_name": "LOWER(COALESCE(top_account_name, ''))",
+            "top_plan_name": "LOWER(COALESCE(top_plan_name, ''))",
+            "top_anchor_name": "LOWER(COALESCE(top_anchor_name, ''))",
+            "plan_count": "plan_count",
+            "advertiser_count": "advertiser_count",
+            "updated_at": "updated_at",
+        }
+        sort_expr = sort_expr_by_key.get(normalized_sort_key)
+        if not sort_expr:
+            normalized_sort_key = "create_time"
+            sort_expr = sort_expr_by_key[normalized_sort_key]
+        customer_filter = "COALESCE(mp.customer_center_id, '') <> ''" if all_customer_centers else "mp.customer_center_id = ?"
+        params: list[Any] = [] if all_customer_centers else [self._current_customer_center_id()]
+        allowed = None if allowed_advertiser_ids is None else sorted(int(item) for item in allowed_advertiser_ids if int(item or 0))
+        if allowed_advertiser_ids is not None and not allowed:
+            return {
+                "snapshot_time": "",
+                "items": [],
+                "meta": self._material_meta_from_rows([], "", material_count=0),
+                "snapshot_count": 0,
+                "range_key": normalized,
+                "range_label": range_label,
+                "material_mode": MATERIAL_VIEW_LIBRARY,
+                "query_start_date": start_dt.strftime("%Y-%m-%d"),
+                "query_end_date": end_dt.strftime("%Y-%m-%d"),
+                "materials_aggregate": self._material_aggregate_row([], material_mode=MATERIAL_VIEW_LIBRARY),
+                "pagination": {
+                    "page": normalized_page,
+                    "page_size": normalized_page_size,
+                    "total": 0,
+                    "total_pages": 1,
+                    "sort_key": normalized_sort_key,
+                    "sort_dir": normalized_sort_dir,
+                    "search": str(search or "").strip(),
+                },
+                "freshness": self._build_freshness_payload(source="material_profile_library_page"),
+            }
+        filter_clauses = [customer_filter]
+        if not include_missing:
+            filter_clauses.append("effective_create_time >= ?")
+            filter_clauses.append("effective_create_time <= ?")
+            params.extend([start_text, end_text])
+        if allowed:
+            filter_clauses.append(
+                f"""
+                EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements_text(COALESCE(NULLIF(advertiser_ids_json, ''), '[]')::jsonb) AS adv(value)
+                    WHERE CAST(adv.value AS BIGINT) IN ({','.join('?' for _ in allowed)})
+                )
+                """
+            )
+            params.extend(allowed)
+        search_text = self._query_text(search)
+        if search_text:
+            escaped = search_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like_value = f"%{escaped}%"
+            filter_clauses.append(
+                """
+                LOWER(CONCAT_WS(
+                    ' ',
+                    COALESCE(material_key, ''),
+                    COALESCE(material_id, ''),
+                    COALESCE(material_name, ''),
+                    COALESCE(video_id, ''),
+                    COALESCE(product_info_text, ''),
+                    COALESCE(top_anchor_name, ''),
+                    COALESCE(top_plan_name, ''),
+                    COALESCE(top_account_name, ''),
+                    COALESCE(aweme_item_id, ''),
+                    COALESCE(material_type, ''),
+                    COALESCE(product_names_json, '')
+                )) LIKE ? ESCAPE '\\'
+                """
+            )
+            params.append(like_value)
+        first_seen_scope = "COALESCE(customer_center_id, '') <> ''" if all_customer_centers else "customer_center_id = ?"
+        first_seen_params: list[Any] = [] if all_customer_centers else [self._current_customer_center_id()]
+        filtered_clauses = (
+            filter_clauses[1:]
+            if filter_clauses and filter_clauses[0] == customer_filter
+            else filter_clauses
+        )
+        filtered_where_sql = " AND ".join(filtered_clauses) or "1=1"
+        base_cte = f"""
+            WITH first_seen AS (
+                SELECT customer_center_id, material_key, MIN(NULLIF(first_seen_at, '')) AS first_seen_at
+                FROM material_relation_edges
+                WHERE {first_seen_scope}
+                GROUP BY customer_center_id, material_key
+            ),
+            source AS (
+                SELECT
+                    mp.customer_center_id,
+                    mp.material_key,
+                    mp.material_id,
+                    mp.material_name,
+                    COALESCE(NULLIF(mp.create_time, ''), first_seen.first_seen_at, '') AS effective_create_time,
+                    mp.create_time AS stored_create_time,
+                    first_seen.first_seen_at,
+                    mp.material_type,
+                    mp.video_id,
+                    mp.cover_url,
+                    mp.aweme_item_id,
+                    mp.video_url,
+                    mp.is_original,
+                    mp.top_plan_name,
+                    mp.top_account_name,
+                    mp.top_anchor_name,
+                    mp.product_info_text,
+                    mp.product_names_json,
+                    COALESCE(NULLIF(mp.plan_ids_json, ''), '[]') AS plan_ids_json,
+                    COALESCE(NULLIF(mp.advertiser_ids_json, ''), '[]') AS advertiser_ids_json,
+                    CAST(COALESCE(mp.plan_count, 0) AS INTEGER) AS plan_count,
+                    CAST(COALESCE(mp.advertiser_count, 0) AS INTEGER) AS advertiser_count,
+                    COALESCE(NULLIF(mp.updated_at, ''), '') AS updated_at,
+                    CASE WHEN COALESCE(mp.create_time, '') = '' AND COALESCE(first_seen.first_seen_at, '') <> '' THEN 1 ELSE 0 END AS create_time_fallback
+                FROM material_profile mp
+                LEFT JOIN first_seen
+                  ON first_seen.customer_center_id = mp.customer_center_id
+                 AND first_seen.material_key = mp.material_key
+                WHERE {customer_filter}
+            ),
+            filtered AS (
+                SELECT *
+                FROM source
+                WHERE {filtered_where_sql}
+            )
+        """
+        summary_params = [*first_seen_params, *params]
+        page_params = [*first_seen_params, *params, normalized_page_size, offset]
+        order_sql = f"{sort_expr} {normalized_sort_dir.upper()} NULLS LAST, material_key ASC"
+        with self.db() as conn:
+            summary_row = dict(
+                conn.execute(
+                    f"""
+                    {base_cte},
+                    material_plan_ids AS (
+                        SELECT DISTINCT CAST(plan_item.value AS BIGINT) AS plan_id
+                        FROM filtered
+                        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(NULLIF(plan_ids_json, ''), '[]')::jsonb) AS plan_item(value)
+                    ),
+                    material_advertiser_ids AS (
+                        SELECT DISTINCT CAST(adv_item.value AS BIGINT) AS advertiser_id
+                        FROM filtered
+                        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(NULLIF(advertiser_ids_json, ''), '[]')::jsonb) AS adv_item(value)
+                    )
+                    SELECT
+                        COUNT(*) AS total_count,
+                        COALESCE(MAX(updated_at), '') AS latest_snapshot_time,
+                        COALESCE((SELECT COUNT(DISTINCT plan_id) FROM material_plan_ids), 0) AS aggregate_plan_count,
+                        COALESCE((SELECT COUNT(DISTINCT advertiser_id) FROM material_advertiser_ids), 0) AS aggregate_advertiser_count,
+                        COALESCE(SUM(CASE WHEN COALESCE(effective_create_time, '') = '' THEN 1 ELSE 0 END), 0) AS create_time_missing_count,
+                        COALESCE(SUM(create_time_fallback), 0) AS create_time_fallback_count
+                    FROM filtered
+                    """,
+                    summary_params,
+                ).fetchone()
+                or {}
+            )
+            total_count = int(summary_row.get("total_count", 0) or 0)
+            page_rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    {base_cte}
+                    SELECT *
+                    FROM filtered
+                    ORDER BY {order_sql}
+                    LIMIT ? OFFSET ?
+                    """,
+                    page_params,
+                ).fetchall()
+            ]
+            latest_snapshot_time = str(summary_row.get("latest_snapshot_time") or "")
+            seeded_rows = [
+                self._material_profile_seed_row(
+                    {
+                        **row,
+                        "create_time": row.get("effective_create_time") or "",
+                        "_create_time_fallback": bool(row.get("create_time_fallback")),
+                    },
+                    snapshot_time=latest_snapshot_time,
+                    window_start=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    window_end=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                for row in page_rows
+            ]
+            page_items = self._aggregate_material_rollups(seeded_rows)
+            if page_items:
+                page_items = self._apply_material_relation_context(conn, page_items)
+                page_items = self._apply_latest_material_previews(conn, page_items)
+            page_items = self._sanitize_material_preview_fields_for_payload(page_items)
+        total_pages = max(1, (total_count + normalized_page_size - 1) // normalized_page_size)
+        pagination = {
+            "page": min(normalized_page, total_pages),
+            "page_size": normalized_page_size,
+            "total": total_count,
+            "total_pages": total_pages,
+            "sort_key": normalized_sort_key,
+            "sort_dir": normalized_sort_dir,
+            "search": str(search or "").strip(),
+        }
+        materials_aggregate = {
+            "material_mode": MATERIAL_VIEW_LIBRARY,
+            "material_count": total_count,
+            "stat_cost": 0.0,
+            "pay_amount": 0.0,
+            "total_pay_amount": 0.0,
+            "settled_pay_amount": 0.0,
+            "order_count": 0,
+            "settled_order_count": 0,
+            "overall_show_count": 0,
+            "overall_click_count": 0,
+            "overall_ctr": 0.0,
+            "roi": 0.0,
+            "settled_roi": 0.0,
+            "plan_count": int(summary_row.get("aggregate_plan_count", 0) or 0),
+            "advertiser_count": int(summary_row.get("aggregate_advertiser_count", 0) or 0),
+            "summary_text": f"共 {total_count} 条素材资产",
+        }
+        meta = self._material_meta_from_rows(page_items, latest_snapshot_time, material_count=total_count)
+        if int(summary_row.get("create_time_fallback_count", 0) or 0) > 0:
+            meta["create_time_fallback"] = True
+        meta["create_time_missing_count"] = int(summary_row.get("create_time_missing_count", 0) or 0)
+        payload = {
+            "snapshot_time": latest_snapshot_time,
+            "items": page_items,
+            "meta": meta,
+            "snapshot_count": 1 if latest_snapshot_time else 0,
+            "range_key": normalized,
+            "range_label": range_label,
+            "material_mode": MATERIAL_VIEW_LIBRARY,
+            "query_start_date": start_dt.strftime("%Y-%m-%d"),
+            "query_end_date": end_dt.strftime("%Y-%m-%d"),
+            "metrics_semantics": {
+                "money_scope": "material_profile_library",
+                "reconcilable_to_account_summary": False,
+                "notice": "资产库口径用于素材档案展示，不承诺与账户总表核平。",
+            },
+            "materialTodayStatus": self._material_today_hot_status(all_customer_centers=all_customer_centers),
+            "materials_aggregate": materials_aggregate,
+            "pagination": pagination,
+        }
+        return self._attach_freshness(
+            payload,
+            data_time=latest_snapshot_time,
+            synced_at=latest_snapshot_time,
+            source="material_profile_library_page",
+        )
+
     def _material_relation_rows_for_exact_snapshot(
         self,
         conn: Any,
@@ -26258,6 +27218,37 @@ class DashboardService:
                 tz_name=tz_name,
                 all_customer_centers=True,
             )
+        indexed_sort_key = self._material_performance_sort_sql(sort_key, sort_dir)[1]
+        if indexed_sort_key in {
+            "overall_ctr",
+            "stat_cost",
+            "pay_amount",
+            "total_pay_amount",
+            "settled_pay_amount",
+            "roi",
+            "settled_roi",
+            "pay_order_cost",
+            "settled_amount_rate",
+            "refund_rate_1h",
+            "order_count",
+            "settled_order_count",
+            "plan_count",
+            "advertiser_count",
+        }:
+            indexed_payload = self._operator_material_index_page_payload(
+                user_id,
+                range_key=range_key,
+                start_date=start_date,
+                end_date=end_date,
+                page=page,
+                page_size=page_size,
+                sort_key=sort_key,
+                sort_dir=sort_dir,
+                search=search,
+                force_refresh=force_refresh,
+            )
+            if indexed_payload is not None:
+                return indexed_payload
         return self._material_performance_page_payload(
             range_key=range_key,
             start_date=start_date,
@@ -26271,8 +27262,8 @@ class DashboardService:
             search=search,
             force_refresh=force_refresh,
             material_name_keywords=keyword_texts,
-            cache_key_suffix=f"operator-material:{user_id}:{keyword_signature}:nonzero",
-            require_nonzero_metrics=True,
+            cache_key_suffix=f"operator-material:{user_id}:{keyword_signature}:zero-tail",
+            rank_zero_metrics_last=True,
         )
 
     def material_rankings_page_for_user(
@@ -26322,6 +27313,15 @@ class DashboardService:
             "pay_amount",
             "order_count",
         }
+        if (
+            normalized_mode == MATERIAL_VIEW_PERFORMANCE
+            and role != ROLE_OPERATOR
+            and not normalized_snapshot
+            and not search_text
+            and normalized_sort_key not in indexed_sort_keys
+        ):
+            sort_key = "stat_cost"
+            normalized_sort_key = "stat_cost"
         if normalized_mode == MATERIAL_VIEW_PERFORMANCE and role == ROLE_OPERATOR and not normalized_snapshot:
             return self._operator_material_performance_page_payload(
                 user,
@@ -26355,6 +27355,21 @@ class DashboardService:
                 sort_dir=sort_dir,
                 search=search,
                 force_refresh=force_refresh,
+                rank_zero_metrics_last=True,
+            )
+
+        if normalized_mode == MATERIAL_VIEW_LIBRARY and not normalized_snapshot:
+            return self._material_library_page_payload(
+                range_key=range_key,
+                start_date=start_date,
+                end_date=end_date,
+                allowed_advertiser_ids=allowed_advertiser_ids,
+                all_customer_centers=self._display_scope_uses_all_customer_centers(display_scope),
+                page=page,
+                page_size=page_size,
+                sort_key=sort_key,
+                sort_dir=sort_dir,
+                search=search,
             )
 
         payload = self.material_rankings_for_user(
@@ -26438,6 +27453,10 @@ class DashboardService:
             "refund_amount_1h",
         )
         return "(" + " OR ".join(f"COALESCE({prefix}{field}, 0) <> 0" for field in metric_fields) + ")"
+
+    @staticmethod
+    def _material_performance_zero_bucket_sql(alias: str = "") -> str:
+        return material_ranking_index.zero_bucket_sql(alias)
 
     def _empty_material_performance_page_payload(
         self,
@@ -26582,6 +27601,91 @@ class DashboardService:
             sort_dirs=sort_dirs,
         )
 
+    def _material_ranking_index_build_key(
+        self,
+        *,
+        start_day: str,
+        end_day: str,
+        range_key: str,
+        all_customer_centers: bool,
+    ) -> str:
+        return "|".join(
+            [
+                material_ranking_index.scope_key(self, all_customer_centers=all_customer_centers),
+                str(range_key or "").strip(),
+                str(start_day or "").strip(),
+                str(end_day or "").strip(),
+            ]
+        )
+
+    @staticmethod
+    def _material_ranking_index_lock_name(build_key: str) -> str:
+        lock_name = hashlib.sha1(str(build_key or "").encode("utf-8")).hexdigest()[:24]
+        return f"material-ranking-index:{lock_name}"
+
+    def _queue_material_ranking_index_for_request(
+        self,
+        *,
+        start_day: str,
+        end_day: str,
+        range_key: str,
+        all_customer_centers: bool,
+        cache_namespace: str,
+    ) -> bool:
+        build_key = self._material_ranking_index_build_key(
+            start_day=start_day,
+            end_day=end_day,
+            range_key=range_key,
+            all_customer_centers=all_customer_centers,
+        )
+        now_value = time.time()
+        with self._material_ranking_index_build_lock:
+            previous = float(self._material_ranking_index_build_marks.get(build_key, 0.0) or 0.0)
+            if now_value - previous < 300:
+                return False
+            self._material_ranking_index_build_marks[build_key] = now_value
+            if len(self._material_ranking_index_build_marks) > 256:
+                cutoff = now_value - 3600
+                self._material_ranking_index_build_marks = {
+                    key: value
+                    for key, value in self._material_ranking_index_build_marks.items()
+                    if float(value or 0.0) >= cutoff
+                }
+
+        def build_index() -> None:
+            try:
+                with self._distributed_runtime_lock(
+                    self._material_ranking_index_lock_name(build_key),
+                    timeout_seconds=900,
+                    blocking_timeout_seconds=0,
+                ) as acquired:
+                    if not acquired:
+                        return
+                    result = self.refresh_material_ranking_index_for_window(
+                        start_day=start_day,
+                        end_day=end_day,
+                        range_key=range_key,
+                        all_customer_centers=all_customer_centers,
+                        sort_keys=material_ranking_index.SORT_KEYS,
+                        sort_dirs=("desc", "asc"),
+                    )
+                if result.get("ok"):
+                    self._invalidate_cache_namespaces(cache_namespace)
+            except Exception:
+                LOGGER.exception(
+                    "material ranking index build failed for %s %s-%s",
+                    range_key,
+                    start_day,
+                    end_day,
+                )
+
+        threading.Thread(
+            target=build_index,
+            daemon=True,
+            name=f"material-ranking-index-{range_key}",
+        ).start()
+        return True
+
     def rebuild_material_ranking_indexes(
         self,
         *,
@@ -26611,6 +27715,7 @@ class DashboardService:
         material_name_keywords: list[str] | None = None,
         cache_key_suffix: str = "",
         require_nonzero_metrics: bool = False,
+        rank_zero_metrics_last: bool = False,
     ) -> dict[str, Any]:
         normalized = str(range_key or "day").strip().lower()
         if normalized not in MATERIAL_RANGES:
@@ -26635,6 +27740,7 @@ class DashboardService:
             if str(item or "").strip()
         ]
         material_name_patterns = [self._sql_like_pattern(item) for item in material_keywords]
+        filter_nonzero_metrics = bool(require_nonzero_metrics and not rank_zero_metrics_last)
         cache_customer_center_id = "__all_customer_centers__" if all_customer_centers else self._current_customer_center_id()
         base_cache_key = build_material_cache_key(
             normalized,
@@ -26657,6 +27763,7 @@ class DashboardService:
         query_cache_key = (
             f"{base_cache_key}:sql-metric-page:"
             f"{normalized_page}:{normalized_page_size}:{normalized_sort_key}:{normalized_sort_dir}:"
+            f"{'zero-tail' if rank_zero_metrics_last else ('nonzero-only' if filter_nonzero_metrics else 'default')}:"
             f"{hashlib.sha1(search_text.encode('utf-8')).hexdigest()[:16]}"
         )
 
@@ -26774,7 +27881,7 @@ class DashboardService:
                         """
                     )
                     source_params.extend(allowed)
-                if require_nonzero_metrics:
+                if filter_nonzero_metrics:
                     daily_where.append(self._material_performance_nonzero_sql("md"))
                 if material_name_patterns:
                     daily_where.append(
@@ -26845,7 +27952,7 @@ class DashboardService:
                         """
                     )
                     source_params.extend(allowed)
-                if require_nonzero_metrics:
+                if filter_nonzero_metrics:
                     current_where.append(self._material_performance_nonzero_sql("mc"))
                 if material_name_patterns:
                     current_where.append(
@@ -26902,42 +28009,116 @@ class DashboardService:
             if not source_queries:
                 return empty_payload()
 
-            index_range_key = material_ranking_index.index_range_key(normalized, start_day, end_day)
+            uses_day_rollup_index = start_day != end_day
+            index_range_key = (
+                ""
+                if uses_day_rollup_index
+                else material_ranking_index.index_range_key(normalized, start_day, end_day)
+            )
             can_use_ranking_index = (
-                bool(index_range_key)
+                (uses_day_rollup_index or bool(index_range_key))
                 and allowed_advertiser_ids is None
-                and not search_text
                 and not material_name_patterns
-                and not require_nonzero_metrics
+                and rank_zero_metrics_last
                 and normalized_sort_key in material_ranking_index.SORT_KEYS
+                and (not search_text or uses_day_rollup_index)
             )
             if can_use_ranking_index:
-                with self.db() as index_conn:
-                    indexed_payload = material_ranking_index.payload_from_index(
-                        self,
-                        index_conn,
-                        source_queries=source_queries,
-                        source_params=source_params,
-                        scope_key_value=material_ranking_index.scope_key(
+                scope_key_value = material_ranking_index.scope_key(
+                    self,
+                    all_customer_centers=all_customer_centers,
+                )
+                if uses_day_rollup_index:
+                    with self.db() as index_conn:
+                        indexed_payload = material_ranking_index.payload_from_day_rollup_index(
                             self,
+                            index_conn,
+                            source_queries=source_queries,
+                            source_params=source_params,
+                            scope_key_value=scope_key_value,
+                            start_day=start_day,
+                            end_day=end_day,
+                            normalized=normalized,
+                            range_label=range_label,
+                            start_dt=start_dt,
+                            end_dt=end_dt,
+                            tz_name=tz_name,
+                            page=normalized_page,
+                            page_size=normalized_page_size,
+                            sort_key=normalized_sort_key,
+                            sort_dir=normalized_sort_dir,
                             all_customer_centers=all_customer_centers,
-                        ),
-                        index_range_key_value=index_range_key,
+                            search_text=search_text,
+                        )
+                    if indexed_payload is not None:
+                        return indexed_payload
+                    if search_text:
+                        payload = empty_payload()
+                        payload["materials_aggregate"] = {
+                            "material_mode": MATERIAL_VIEW_PERFORMANCE,
+                            "material_count": 0,
+                            "stat_cost": 0.0,
+                            "pay_amount": 0.0,
+                            "total_pay_amount": 0.0,
+                            "settled_pay_amount": 0.0,
+                            "order_count": 0,
+                            "settled_order_count": 0,
+                            "overall_show_count": 0,
+                            "overall_click_count": 0,
+                            "overall_ctr": 0.0,
+                            "roi": 0.0,
+                            "settled_roi": 0.0,
+                            "pay_order_cost": 0.0,
+                            "settled_amount_rate": 0.0,
+                            "refund_amount_1h": 0.0,
+                            "refund_rate_1h": 0.0,
+                            "plan_count": 0,
+                            "advertiser_count": 0,
+                            "summary_text": "total 0 materials",
+                        }
+                        payload["ranking_index_used"] = False
+                        payload["ranking_index_range_key"] = "day_prefix"
+                        payload["ranking_index_day_prefix_used"] = False
+                        payload["ranking_index_day_rollup_used"] = False
+                        payload["ranking_index_search_guard_used"] = True
+                        payload["freshness"] = self._build_freshness_payload(
+                            data_time="",
+                            synced_at="",
+                            source="material_ranking_search_guard",
+                            partial=False,
+                        )
+                        return payload
+                else:
+                    with self.db() as index_conn:
+                        indexed_payload = material_ranking_index.payload_from_index(
+                            self,
+                            index_conn,
+                            source_queries=source_queries,
+                            source_params=source_params,
+                            scope_key_value=scope_key_value,
+                            index_range_key_value=index_range_key,
+                            start_day=start_day,
+                            end_day=end_day,
+                            normalized=normalized,
+                            range_label=range_label,
+                            start_dt=start_dt,
+                            end_dt=end_dt,
+                            tz_name=tz_name,
+                            page=normalized_page,
+                            page_size=normalized_page_size,
+                            sort_key=normalized_sort_key,
+                            sort_dir=normalized_sort_dir,
+                            all_customer_centers=all_customer_centers,
+                        )
+                    if indexed_payload is not None:
+                        return indexed_payload
+                    self._queue_material_ranking_index_for_request(
                         start_day=start_day,
                         end_day=end_day,
-                        normalized=normalized,
-                        range_label=range_label,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                        tz_name=tz_name,
-                        page=normalized_page,
-                        page_size=normalized_page_size,
-                        sort_key=normalized_sort_key,
-                        sort_dir=normalized_sort_dir,
+                        range_key=index_range_key,
                         all_customer_centers=all_customer_centers,
+                        cache_namespace=cache_namespace,
                     )
-                if indexed_payload is not None:
-                    return indexed_payload
 
             escaped_search = search_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             search_like = f"%{escaped_search}%"
@@ -26961,6 +28142,7 @@ class DashboardService:
                 """
                 aggregated_source_filter = "WHERE source.material_key IN (SELECT material_key FROM matching_materials)"
 
+            zero_bucket_sort_prefix = "prepared.zero_bucket ASC, " if rank_zero_metrics_last else ""
             page_sql = f"""
             WITH source AS (
                 {' UNION ALL '.join(source_queries)}
@@ -27030,6 +28212,12 @@ class DashboardService:
                 {aggregated_source_filter}
                 GROUP BY source.material_key
             ),
+            prepared AS (
+                SELECT
+                    aggregated.*,
+                    {self._material_performance_zero_bucket_sql("aggregated")} AS zero_bucket
+                FROM aggregated
+            ),
             summary AS (
                 SELECT
                     COUNT(*) AS total_count,
@@ -27044,7 +28232,7 @@ class DashboardService:
                     CAST(ROUND(COALESCE(SUM(refund_amount_1h), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS aggregate_refund_amount_1h,
                     COALESCE((SELECT COUNT(DISTINCT plan_id) FROM material_plan_ids), 0) AS aggregate_plan_count,
                     COALESCE((SELECT COUNT(DISTINCT advertiser_id) FROM material_advertiser_ids), 0) AS aggregate_advertiser_count
-                FROM aggregated
+                FROM prepared
             ),
             source_meta AS (
                 SELECT
@@ -27056,8 +28244,8 @@ class DashboardService:
             paged AS (
                 SELECT *
                 FROM (
-                    SELECT aggregated.material_key, ROW_NUMBER() OVER (ORDER BY {sort_sql}) AS __page_order
-                    FROM aggregated
+                    SELECT prepared.material_key, ROW_NUMBER() OVER (ORDER BY {zero_bucket_sort_prefix}{sort_sql}) AS __page_order
+                    FROM prepared
                 ) ranked
                 WHERE ranked.__page_order > ?
                   AND ranked.__page_order <= ?
@@ -28059,8 +29247,8 @@ class DashboardService:
             sort_dir=sort_dir,
             search=search,
             force_refresh=force_refresh,
-            cache_key_suffix="team-materials:nonzero",
-            require_nonzero_metrics=True,
+            cache_key_suffix="team-materials:zero-tail",
+            rank_zero_metrics_last=True,
         )
 
     def team_material_rankings_for_user(
@@ -28308,6 +29496,811 @@ class DashboardService:
         escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         return f"%{escaped}%"
 
+    @staticmethod
+    def _material_profile_search_expr(alias: str = "p") -> str:
+        prefix = str(alias or "").strip()
+        if prefix and not prefix.endswith("."):
+            prefix = f"{prefix}."
+        return f"""
+            LOWER(
+                COALESCE({prefix}material_key, '') || ' ' ||
+                COALESCE({prefix}material_id, '') || ' ' ||
+                COALESCE({prefix}material_name, '') || ' ' ||
+                COALESCE({prefix}video_id, '') || ' ' ||
+                COALESCE({prefix}product_info_text, '') || ' ' ||
+                COALESCE({prefix}top_anchor_name, '') || ' ' ||
+                COALESCE({prefix}top_plan_name, '') || ' ' ||
+                COALESCE({prefix}top_account_name, '') || ' ' ||
+                COALESCE({prefix}aweme_item_id, '') || ' ' ||
+                COALESCE({prefix}material_type, '') || ' ' ||
+                COALESCE({prefix}product_names_json, '')
+            )
+        """
+
+    def _material_index_window_context(
+        self,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> dict[str, Any]:
+        normalized = str(range_key or "day").strip().lower()
+        if normalized not in MATERIAL_RANGES and normalized not in PERFORMANCE_RANGES:
+            raise ValueError("range must be one of day/yesterday/week/month/all/custom")
+        config = self.read_config()
+        tz_name = str(config.get("timezone") or TIMEZONE)
+        if normalized == "custom":
+            start_dt, end_dt, range_label = build_material_custom_window(start_date, end_date, tz_name)
+        elif normalized == "all":
+            start_dt, end_dt, range_label = build_all_material_window(tz_name)
+        else:
+            start_dt, end_dt, range_label = build_performance_window(normalized, tz_name)
+        tz = ZoneInfo(str(tz_name or TIMEZONE))
+        return {
+            "range_key": normalized,
+            "range_label": range_label,
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "start_day": start_dt.astimezone(tz).strftime("%Y-%m-%d"),
+            "end_day": end_dt.astimezone(tz).strftime("%Y-%m-%d"),
+            "tz_name": tz_name,
+        }
+
+    @staticmethod
+    def _material_prefix_start_day(start_day: str) -> str:
+        return (datetime.strptime(str(start_day or "")[:10], "%Y-%m-%d").date() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def _material_prefix_window_ready(
+        self,
+        conn: Any,
+        *,
+        scope_key_value: str,
+        start_day: str,
+        end_day: str,
+    ) -> tuple[bool, str, int]:
+        prefix_start_day = self._material_prefix_start_day(start_day)
+        day_count = (
+            datetime.strptime(end_day, "%Y-%m-%d").date()
+            - datetime.strptime(start_day, "%Y-%m-%d").date()
+        ).days + 1
+        prefix_table = conn.execute("SELECT to_regclass('public.material_ranking_day_prefix') AS name").fetchone()
+        if not (prefix_table or {}).get("name"):
+            return False, prefix_start_day, day_count
+        state = conn.execute(
+            """
+            SELECT
+                EXISTS(
+                    SELECT 1
+                    FROM material_ranking_day_prefix
+                    WHERE scope_key = ? AND day_key = ?
+                    LIMIT 1
+                ) AS has_end_day,
+                EXISTS(
+                    SELECT 1
+                    FROM material_ranking_day_prefix
+                    WHERE scope_key = ? AND day_key = ?
+                    LIMIT 1
+                ) AS has_start_day,
+                (SELECT MIN(day_key) FROM material_ranking_day_prefix WHERE scope_key = ?) AS min_day
+            """,
+            [scope_key_value, end_day, scope_key_value, prefix_start_day, scope_key_value],
+        ).fetchone()
+        min_day = str((state or {}).get("min_day") or "").strip()
+        ready = bool((state or {}).get("has_end_day")) and (
+            bool((state or {}).get("has_start_day")) or (bool(min_day) and prefix_start_day < min_day)
+        )
+        return ready, prefix_start_day, day_count
+
+    def _operator_keyword_index_config(
+        self,
+        *,
+        include_disabled: bool = False,
+        only_user_id: int | None = None,
+    ) -> tuple[dict[int, dict[str, Any]], list[tuple[int, str, str]], dict[int, set[str]]]:
+        operators, keywords = self._operator_config(include_disabled=include_disabled, only_user_id=only_user_id)
+        configured_keywords: dict[int, set[str]] = {}
+        values: list[tuple[int, str, str]] = []
+        seen: set[tuple[int, str]] = set()
+        for row in keywords:
+            operator_id = int(row.get("user_id", 0) or 0)
+            if operator_id not in operators:
+                continue
+            keyword = str(row.get("keyword") or "").strip()
+            if not keyword:
+                continue
+            dedupe_key = (operator_id, keyword.casefold())
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            configured_keywords.setdefault(operator_id, set()).add(keyword)
+            values.append((operator_id, keyword, self._sql_like_pattern(keyword)))
+        operators = {
+            operator_id: operator
+            for operator_id, operator in operators.items()
+            if configured_keywords.get(operator_id)
+        }
+        values = [item for item in values if item[0] in operators]
+        configured_keywords = {
+            operator_id: configured_keywords[operator_id]
+            for operator_id in operators
+            if configured_keywords.get(operator_id)
+        }
+        return operators, values, configured_keywords
+
+    @staticmethod
+    def _values_sql(rows: list[tuple[Any, ...]]) -> str:
+        if not rows:
+            return ""
+        width = len(rows[0])
+        return ", ".join("(" + ", ".join("?" for _ in range(width)) + ")" for _ in rows)
+
+    @staticmethod
+    def _flatten_values(rows: list[tuple[Any, ...]]) -> list[Any]:
+        return [value for row in rows for value in row]
+
+    def _material_operator_rankings_from_index(
+        self,
+        *,
+        range_key: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        all_customer_centers: bool = True,
+    ) -> list[dict[str, Any]] | None:
+        operators, keyword_values, configured_keywords = self._operator_keyword_index_config()
+        if not operators:
+            return []
+        context = self._material_index_window_context(range_key, start_date, end_date)
+        scope_key_value = material_ranking_index.scope_key(self, all_customer_centers=all_customer_centers)
+        operator_rows = [
+            (
+                int(operator_id),
+                str(operator.get("username") or "").strip(),
+                str(operator.get("display_name") or operator.get("username") or "").strip(),
+                len(configured_keywords.get(operator_id) or []),
+            )
+            for operator_id, operator in sorted(operators.items())
+        ]
+        operator_values_sql = self._values_sql(operator_rows)
+        keyword_values_sql = self._values_sql(keyword_values)
+        if not operator_values_sql or not keyword_values_sql:
+            return []
+        profile_scope_sql = "COALESCE(p.customer_center_id, '') <> ''" if all_customer_centers else "p.customer_center_id = ?"
+        profile_scope_params: list[Any] = [] if all_customer_centers else [self._current_customer_center_id()]
+        profile_expr = self._material_profile_search_expr("p")
+        with self.db() as conn:
+            ready, prefix_start_day, _day_count = self._material_prefix_window_ready(
+                conn,
+                scope_key_value=scope_key_value,
+                start_day=context["start_day"],
+                end_day=context["end_day"],
+            )
+            if not ready:
+                return None
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    WITH operator_rows(user_id, username, display_name, keyword_count) AS (
+                        VALUES {operator_values_sql}
+                    ),
+                    operator_keywords(user_id, keyword, pattern) AS (
+                        VALUES {keyword_values_sql}
+                    ),
+                    end_rows AS (
+                        SELECT *
+                        FROM material_ranking_day_prefix
+                        WHERE scope_key = ? AND day_key = ?
+                    ),
+                    start_rows AS (
+                        SELECT *
+                        FROM material_ranking_day_prefix
+                        WHERE scope_key = ? AND day_key = ?
+                    ),
+                    metrics AS (
+                        SELECT
+                            e.material_key,
+                            e.snapshot_time,
+                            CAST(e.active_day_count - COALESCE(s.active_day_count, 0) AS INTEGER) AS active_day_count,
+                            CAST(ROUND((e.stat_cost - COALESCE(s.stat_cost, 0))::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
+                            CAST(ROUND((e.pay_amount - COALESCE(s.pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
+                            CAST(ROUND((e.total_pay_amount - COALESCE(s.total_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
+                            CAST(ROUND((e.settled_pay_amount - COALESCE(s.settled_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
+                            CAST(e.order_count - COALESCE(s.order_count, 0) AS INTEGER) AS order_count,
+                            CAST(e.settled_order_count - COALESCE(s.settled_order_count, 0) AS INTEGER) AS settled_order_count,
+                            CAST(e.plan_count - COALESCE(s.plan_count, 0) AS INTEGER) AS plan_count,
+                            CAST(e.advertiser_count - COALESCE(s.advertiser_count, 0) AS INTEGER) AS advertiser_count
+                        FROM end_rows e
+                        LEFT JOIN start_rows s
+                          ON s.scope_key = e.scope_key
+                         AND s.material_key = e.material_key
+                    ),
+                    matched_material_keywords AS (
+                        SELECT DISTINCT ok.user_id, ok.keyword, p.material_key
+                        FROM operator_keywords ok
+                        JOIN material_profile p
+                          ON {profile_scope_sql}
+                         AND {profile_expr} LIKE ok.pattern ESCAPE '\\'
+                        JOIN metrics m
+                          ON m.material_key = p.material_key
+                         AND m.active_day_count > 0
+                    ),
+                    matched_materials AS (
+                        SELECT user_id, material_key, COUNT(DISTINCT keyword) AS matched_keyword_count
+                        FROM matched_material_keywords
+                        GROUP BY user_id, material_key
+                    ),
+                    profile_one AS (
+                        SELECT DISTINCT ON (p.material_key)
+                            p.material_key,
+                            p.material_name,
+                            p.top_account_name
+                        FROM material_profile p
+                        JOIN matched_materials mm ON mm.material_key = p.material_key
+                        WHERE {profile_scope_sql}
+                        ORDER BY p.material_key, p.updated_at DESC
+                    ),
+                    operator_materials AS (
+                        SELECT
+                            mm.user_id,
+                            mm.matched_keyword_count,
+                            m.*,
+                            COALESCE(po.material_name, '') AS material_name,
+                            COALESCE(po.top_account_name, '') AS top_account_name
+                        FROM matched_materials mm
+                        JOIN metrics m ON m.material_key = mm.material_key
+                        LEFT JOIN profile_one po ON po.material_key = mm.material_key
+                    ),
+                    rollup AS (
+                        SELECT
+                            user_id,
+                            CAST(ROUND(COALESCE(SUM(stat_cost), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
+                            CAST(ROUND(COALESCE(SUM(pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
+                            CAST(ROUND(COALESCE(SUM(total_pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
+                            CAST(ROUND(COALESCE(SUM(settled_pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
+                            CAST(COALESCE(SUM(order_count), 0) AS INTEGER) AS order_count,
+                            CAST(COALESCE(SUM(settled_order_count), 0) AS INTEGER) AS settled_order_count,
+                            CAST(COALESCE(SUM(plan_count), 0) AS INTEGER) AS plan_count,
+                            CAST(COALESCE(SUM(advertiser_count), 0) AS INTEGER) AS advertiser_count,
+                            CAST(COUNT(DISTINCT material_key) AS INTEGER) AS material_count,
+                            CAST(COALESCE(SUM(matched_keyword_count), 0) AS INTEGER) AS matched_keyword_count
+                        FROM operator_materials
+                        GROUP BY user_id
+                    ),
+                    top_material AS (
+                        SELECT *
+                        FROM (
+                            SELECT
+                                user_id,
+                                material_name,
+                                top_account_name,
+                                stat_cost,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY user_id
+                                    ORDER BY stat_cost DESC, material_key ASC
+                                ) AS rn
+                            FROM operator_materials
+                        ) ranked
+                        WHERE rn = 1
+                    )
+                    SELECT
+                        o.user_id AS operator_id,
+                        o.display_name AS operator_name,
+                        o.username AS operator_username,
+                        CAST(ROUND(COALESCE(r.stat_cost, 0.0)::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
+                        CAST(ROUND(COALESCE(r.pay_amount, 0.0)::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
+                        CAST(ROUND(COALESCE(r.total_pay_amount, 0.0)::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
+                        CAST(ROUND(COALESCE(r.settled_pay_amount, 0.0)::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
+                        CAST(COALESCE(r.order_count, 0) AS INTEGER) AS order_count,
+                        CAST(COALESCE(r.settled_order_count, 0) AS INTEGER) AS settled_order_count,
+                        CAST(COALESCE(r.plan_count, 0) AS INTEGER) AS plan_count,
+                        CAST(COALESCE(r.advertiser_count, 0) AS INTEGER) AS advertiser_count,
+                        CAST(COALESCE(r.material_count, 0) AS INTEGER) AS material_count,
+                        o.keyword_count,
+                        CAST(COALESCE(r.matched_keyword_count, 0) AS INTEGER) AS matched_keyword_count,
+                        COALESCE(t.material_name, '') AS top_material_name,
+                        COALESCE(t.top_account_name, '') AS top_account_name
+                    FROM operator_rows o
+                    LEFT JOIN rollup r ON r.user_id = o.user_id
+                    LEFT JOIN top_material t ON t.user_id = o.user_id
+                    ORDER BY stat_cost DESC, pay_amount DESC, order_count DESC, operator_name ASC, operator_id ASC
+                    """,
+                    [
+                        *self._flatten_values(operator_rows),
+                        *self._flatten_values(keyword_values),
+                        scope_key_value,
+                        context["end_day"],
+                        scope_key_value,
+                        prefix_start_day,
+                        *profile_scope_params,
+                        *profile_scope_params,
+                    ],
+                ).fetchall()
+            ]
+        for row in rows:
+            stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
+            pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
+            total_pay_amount = round(float(row.get("total_pay_amount", 0.0) or 0.0), 2)
+            settled_pay_amount = round(float(row.get("settled_pay_amount", 0.0) or 0.0), 2)
+            order_count = int(row.get("order_count", 0) or 0)
+            settled_order_count = int(row.get("settled_order_count", 0) or 0)
+            refund_amount_1h = 0.0
+            row["stat_cost"] = stat_cost
+            row["pay_amount"] = pay_amount
+            row["total_pay_amount"] = total_pay_amount
+            row["settled_pay_amount"] = settled_pay_amount
+            row["roi"] = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            row["settled_roi"] = round(settled_pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+            row["pay_order_cost"] = round(stat_cost / order_count, 2) if order_count > 0 else 0.0
+            row["settled_amount_rate"] = round(settled_pay_amount / total_pay_amount * 100.0, 2) if total_pay_amount > 0 else 0.0
+            row["refund_amount_1h"] = refund_amount_1h
+            row["refund_rate_1h"] = 0.0
+            row["refund_rate_1h_available"] = False
+            row["order_count"] = order_count
+            row["settled_order_count"] = settled_order_count
+            row["ranking_source"] = "material_ranking_day_prefix"
+        return rows
+
+    def _operator_material_index_page_payload(
+        self,
+        user_id: int,
+        *,
+        range_key: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        page: int = 1,
+        page_size: int = 0,
+        sort_key: str = "",
+        sort_dir: str = "desc",
+        search: str = "",
+        include_disabled_user: bool = False,
+        force_refresh: bool = False,
+    ) -> dict[str, Any] | None:
+        operators, keyword_values, configured_keywords = self._operator_keyword_index_config(
+            include_disabled=include_disabled_user,
+            only_user_id=int(user_id or 0),
+        )
+        context = self._material_index_window_context(range_key, start_date, end_date)
+        _sort_sql, normalized_sort_key, normalized_sort_dir = self._material_performance_sort_sql(sort_key, sort_dir)
+        normalized_page = self._query_page_value(page)
+        normalized_page_size = self._query_page_size_value(page_size, 20, max_size=500)
+        if not operators or not keyword_values:
+            return self._empty_material_performance_page_payload(
+                range_key=context["range_key"],
+                range_label=context["range_label"],
+                start_dt=context["start_dt"],
+                end_dt=context["end_dt"],
+                page_size=normalized_page_size,
+                sort_key=normalized_sort_key,
+                sort_dir=normalized_sort_dir,
+                search=search,
+                tz_name=context["tz_name"],
+                all_customer_centers=True,
+                source="material_ranking_operator_keywords",
+            )
+        cache_scope = material_cache_scope_for_range(context["range_key"], snapshot_time="")
+        cache_namespace = f"{build_material_cache_namespace(MATERIAL_VIEW_PERFORMANCE, scope=cache_scope)}:operator-page"
+        material_cache_namespace = f"{build_material_cache_namespace(MATERIAL_VIEW_PERFORMANCE, scope=cache_scope)}:page"
+        cache_version = f"{self._shared_cache_version(cache_namespace)}:{self._shared_cache_version(material_cache_namespace)}"
+        keyword_signature = hashlib.sha1(
+            self._json_text(
+                sorted(
+                    [
+                        (int(operator_id), sorted(values))
+                        for operator_id, values in configured_keywords.items()
+                    ]
+                )
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        raw_cache_key = (
+            f"operator-material-index-page:{user_id}:{context['range_key']}:{start_date}:{end_date}:"
+            f"{normalized_page}:{normalized_page_size}:{normalized_sort_key}:{normalized_sort_dir}:"
+            f"{hashlib.sha1(str(search or '').strip().lower().encode('utf-8')).hexdigest()[:16]}:{keyword_signature}"
+        )
+
+        def build_payload() -> dict[str, Any]:
+            scope_key_value = material_ranking_index.scope_key(self, all_customer_centers=True)
+            keyword_values_sql = self._values_sql(keyword_values)
+            if not keyword_values_sql:
+                return self._empty_material_performance_page_payload(
+                    range_key=context["range_key"],
+                    range_label=context["range_label"],
+                    start_dt=context["start_dt"],
+                    end_dt=context["end_dt"],
+                    page_size=normalized_page_size,
+                    sort_key=normalized_sort_key,
+                    sort_dir=normalized_sort_dir,
+                    search=search,
+                    tz_name=context["tz_name"],
+                    all_customer_centers=True,
+                    source="material_ranking_operator_keywords",
+                )
+            metric_column = {
+                "overall_ctr": "(CASE WHEN overall_show_count > 0 THEN overall_click_count::DOUBLE PRECISION / overall_show_count ELSE 0 END)",
+                "stat_cost": "stat_cost",
+                "total_pay_amount": "total_pay_amount",
+                "settled_pay_amount": "settled_pay_amount",
+                "pay_amount": "pay_amount",
+                "roi": "(CASE WHEN stat_cost > 0 THEN pay_amount::DOUBLE PRECISION / stat_cost ELSE 0 END)",
+                "settled_roi": "(CASE WHEN stat_cost > 0 THEN settled_pay_amount::DOUBLE PRECISION / stat_cost ELSE 0 END)",
+                "pay_order_cost": "(CASE WHEN order_count > 0 THEN stat_cost::DOUBLE PRECISION / order_count ELSE 0 END)",
+                "settled_amount_rate": "(CASE WHEN total_pay_amount > 0 THEN settled_pay_amount::DOUBLE PRECISION / total_pay_amount ELSE 0 END)",
+                "refund_rate_1h": "(CASE WHEN total_pay_amount > 0 THEN refund_amount_1h::DOUBLE PRECISION / total_pay_amount ELSE 0 END)",
+                "order_count": "order_count",
+                "settled_order_count": "settled_order_count",
+                "plan_count": "plan_count",
+                "advertiser_count": "advertiser_count",
+            }.get(normalized_sort_key, "stat_cost")
+            metric_order = "DESC" if normalized_sort_dir == "desc" else "ASC"
+            profile_expr = self._material_profile_search_expr("p")
+            search_text = self._query_text(search)
+            search_sql = ""
+            search_params: list[Any] = []
+            if search_text:
+                search_sql = f"AND {profile_expr} LIKE ? ESCAPE '\\'"
+                search_params.append(self._sql_like_pattern(search_text))
+            with self.db() as conn:
+                ready, prefix_start_day, indexed_day_count = self._material_prefix_window_ready(
+                    conn,
+                    scope_key_value=scope_key_value,
+                    start_day=context["start_day"],
+                    end_day=context["end_day"],
+                )
+                if not ready:
+                    empty = self._empty_material_performance_page_payload(
+                        range_key=context["range_key"],
+                        range_label=context["range_label"],
+                        start_dt=context["start_dt"],
+                        end_dt=context["end_dt"],
+                        page_size=normalized_page_size,
+                        sort_key=normalized_sort_key,
+                        sort_dir=normalized_sort_dir,
+                        search=search,
+                        tz_name=context["tz_name"],
+                        all_customer_centers=True,
+                        source="material_ranking_operator_keywords_missing_index",
+                    )
+                    empty["ranking_index_missing"] = True
+                    return empty
+                page_start = (normalized_page - 1) * normalized_page_size
+                rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        WITH operator_keywords(user_id, keyword, pattern) AS (
+                            VALUES {keyword_values_sql}
+                        ),
+                        end_rows AS (
+                            SELECT *
+                            FROM material_ranking_day_prefix
+                            WHERE scope_key = ? AND day_key = ?
+                        ),
+                        start_rows AS (
+                            SELECT *
+                            FROM material_ranking_day_prefix
+                            WHERE scope_key = ? AND day_key = ?
+                        ),
+                        metrics AS (
+                            SELECT
+                                e.material_key,
+                                e.snapshot_time,
+                                CAST(e.active_day_count - COALESCE(s.active_day_count, 0) AS INTEGER) AS active_day_count,
+                                CAST(ROUND((e.stat_cost - COALESCE(s.stat_cost, 0))::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
+                                CAST(ROUND((e.pay_amount - COALESCE(s.pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
+                                CAST(ROUND((e.total_pay_amount - COALESCE(s.total_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
+                                CAST(ROUND((e.settled_pay_amount - COALESCE(s.settled_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
+                                CAST(e.order_count - COALESCE(s.order_count, 0) AS INTEGER) AS order_count,
+                                CAST(e.settled_order_count - COALESCE(s.settled_order_count, 0) AS INTEGER) AS settled_order_count,
+                                CAST(e.overall_show_count - COALESCE(s.overall_show_count, 0) AS INTEGER) AS overall_show_count,
+                                CAST(e.overall_click_count - COALESCE(s.overall_click_count, 0) AS INTEGER) AS overall_click_count,
+                                CAST(ROUND((e.refund_amount_1h - COALESCE(s.refund_amount_1h, 0))::numeric, 2) AS DOUBLE PRECISION) AS refund_amount_1h,
+                                CAST(e.plan_count - COALESCE(s.plan_count, 0) AS INTEGER) AS plan_count,
+                                CAST(e.advertiser_count - COALESCE(s.advertiser_count, 0) AS INTEGER) AS advertiser_count
+                            FROM end_rows e
+                            LEFT JOIN start_rows s
+                              ON s.scope_key = e.scope_key
+                             AND s.material_key = e.material_key
+                        ),
+                        matched_materials AS (
+                            SELECT p.material_key, COUNT(DISTINCT ok.keyword) AS matched_keyword_count
+                            FROM operator_keywords ok
+                            JOIN material_profile p
+                              ON COALESCE(p.customer_center_id, '') <> ''
+                             AND {profile_expr} LIKE ok.pattern ESCAPE '\\'
+                             {search_sql}
+                            JOIN metrics m
+                              ON m.material_key = p.material_key
+                             AND m.active_day_count > 0
+                            GROUP BY p.material_key
+                        ),
+                        filtered AS (
+                            SELECT m.*, mm.matched_keyword_count
+                            FROM metrics m
+                            JOIN matched_materials mm ON mm.material_key = m.material_key
+                            WHERE m.active_day_count > 0
+                        ),
+                        summary AS (
+                            SELECT
+                                COUNT(*) AS total_count,
+                                CAST(ROUND(COALESCE(SUM(stat_cost), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS aggregate_stat_cost,
+                                CAST(ROUND(COALESCE(SUM(pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS aggregate_pay_amount,
+                                CAST(ROUND(COALESCE(SUM(total_pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS aggregate_total_pay_amount,
+                                CAST(ROUND(COALESCE(SUM(settled_pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS aggregate_settled_pay_amount,
+                                CAST(COALESCE(SUM(order_count), 0) AS INTEGER) AS aggregate_order_count,
+                                CAST(COALESCE(SUM(settled_order_count), 0) AS INTEGER) AS aggregate_settled_order_count,
+                                CAST(COALESCE(SUM(overall_show_count), 0) AS INTEGER) AS aggregate_overall_show_count,
+                                CAST(COALESCE(SUM(overall_click_count), 0) AS INTEGER) AS aggregate_overall_click_count,
+                                CAST(ROUND(COALESCE(SUM(refund_amount_1h), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS aggregate_refund_amount_1h,
+                                CAST(COALESCE(SUM(plan_count), 0) AS INTEGER) AS aggregate_plan_count,
+                                CAST(COALESCE(SUM(advertiser_count), 0) AS INTEGER) AS aggregate_advertiser_count
+                            FROM filtered
+                        ),
+                        ranked AS (
+                            SELECT
+                                filtered.*,
+                                ROW_NUMBER() OVER (
+                                    ORDER BY {metric_column} {metric_order}, material_key ASC
+                                ) AS rank_no
+                            FROM filtered
+                        ),
+                        paged AS (
+                            SELECT *
+                            FROM ranked
+                            WHERE rank_no > ? AND rank_no <= ?
+                        )
+                        SELECT
+                            COALESCE((SELECT MAX(snapshot_time) FROM filtered), '') AS latest_snapshot_time,
+                            ? AS indexed_day_count,
+                            summary.*,
+                            paged.material_key,
+                            paged.rank_no,
+                            paged.snapshot_time AS page_snapshot_time,
+                            paged.active_day_count AS page_active_day_count,
+                            paged.stat_cost AS page_stat_cost,
+                            paged.pay_amount AS page_pay_amount,
+                            paged.total_pay_amount AS page_total_pay_amount,
+                            paged.settled_pay_amount AS page_settled_pay_amount,
+                            paged.order_count AS page_order_count,
+                            paged.settled_order_count AS page_settled_order_count,
+                            paged.overall_show_count AS page_overall_show_count,
+                            paged.overall_click_count AS page_overall_click_count,
+                            paged.refund_amount_1h AS page_refund_amount_1h,
+                            paged.plan_count AS page_plan_count,
+                            paged.advertiser_count AS page_advertiser_count,
+                            paged.matched_keyword_count AS page_matched_keyword_count
+                        FROM summary
+                        LEFT JOIN paged ON TRUE
+                        ORDER BY paged.rank_no NULLS LAST
+                        """,
+                        [
+                            *self._flatten_values(keyword_values),
+                            scope_key_value,
+                            context["end_day"],
+                            scope_key_value,
+                            prefix_start_day,
+                            *search_params,
+                            page_start,
+                            page_start + normalized_page_size,
+                            indexed_day_count,
+                        ],
+                    ).fetchall()
+                ]
+                summary = dict(rows[0] or {}) if rows else {}
+                total_count = int(summary.get("total_count", 0) or 0)
+                if total_count <= 0:
+                    empty = self._empty_material_performance_page_payload(
+                        range_key=context["range_key"],
+                        range_label=context["range_label"],
+                        start_dt=context["start_dt"],
+                        end_dt=context["end_dt"],
+                        page_size=normalized_page_size,
+                        sort_key=normalized_sort_key,
+                        sort_dir=normalized_sort_dir,
+                        search=search,
+                        tz_name=context["tz_name"],
+                        all_customer_centers=True,
+                        source="material_ranking_operator_keywords",
+                    )
+                    empty["ranking_index_used"] = True
+                    empty["ranking_index_range_key"] = "day_prefix"
+                    empty["operator_keyword_count"] = len(keyword_values)
+                    return empty
+                total_pages = max(1, (total_count + normalized_page_size - 1) // normalized_page_size)
+                current_page = min(normalized_page, total_pages)
+                if current_page != normalized_page:
+                    return self._operator_material_index_page_payload(
+                        user_id,
+                        range_key=range_key,
+                        start_date=start_date,
+                        end_date=end_date,
+                        page=current_page,
+                        page_size=normalized_page_size,
+                        sort_key=sort_key,
+                        sort_dir=sort_dir,
+                        search=search,
+                        include_disabled_user=include_disabled_user,
+                        force_refresh=force_refresh,
+                    )
+                page_material_keys = [
+                    str(row.get("material_key") or "").strip()
+                    for row in rows
+                    if str(row.get("material_key") or "").strip()
+                ]
+                profile_by_key: dict[str, dict[str, Any]] = {}
+                if page_material_keys:
+                    placeholders = ",".join("?" for _ in page_material_keys)
+                    profile_by_key = {
+                        str(row.get("material_key") or "").strip(): dict(row)
+                        for row in conn.execute(
+                            f"""
+                            SELECT DISTINCT ON (material_key) *
+                            FROM material_profile
+                            WHERE COALESCE(customer_center_id, '') <> ''
+                              AND material_key IN ({placeholders})
+                            ORDER BY material_key, updated_at DESC
+                            """,
+                            page_material_keys,
+                        ).fetchall()
+                        if str(row.get("material_key") or "").strip()
+                    }
+                latest_snapshot_time = str(summary.get("latest_snapshot_time") or "").strip()
+                page_source_rows: list[dict[str, Any]] = []
+                metric_by_key = {
+                    str(row.get("material_key") or "").strip(): dict(row)
+                    for row in rows
+                    if str(row.get("material_key") or "").strip()
+                }
+                for material_key in page_material_keys:
+                    metric = metric_by_key.get(material_key) or {}
+                    profile = profile_by_key.get(material_key) or {}
+                    stat_cost = round(float(metric.get("page_stat_cost", 0.0) or 0.0), 2)
+                    pay_amount = round(float(metric.get("page_pay_amount", 0.0) or 0.0), 2)
+                    total_pay_amount = round(float(metric.get("page_total_pay_amount", 0.0) or 0.0), 2)
+                    settled_pay_amount = round(float(metric.get("page_settled_pay_amount", 0.0) or 0.0), 2)
+                    order_count = int(metric.get("page_order_count", 0) or 0)
+                    settled_order_count = int(metric.get("page_settled_order_count", 0) or 0)
+                    overall_show_count = int(metric.get("page_overall_show_count", 0) or 0)
+                    overall_click_count = int(metric.get("page_overall_click_count", 0) or 0)
+                    refund_amount_1h = round(float(metric.get("page_refund_amount_1h", 0.0) or 0.0), 2)
+                    page_source_rows.append(
+                        {
+                            "customer_center_id": str(profile.get("customer_center_id") or self._current_customer_center_id()),
+                            "snapshot_time": str(metric.get("page_snapshot_time") or latest_snapshot_time),
+                            "source_day": context["end_day"],
+                            "window_start": f"{context['start_day']} 00:00:00",
+                            "window_end": f"{context['end_day']} 23:59:59",
+                            "material_key": material_key,
+                            "material_id": str(profile.get("material_id") or ""),
+                            "material_name": str(profile.get("material_name") or "") or "unnamed material",
+                            "create_time": str(profile.get("create_time") or ""),
+                            "material_type": str(profile.get("material_type") or "") or "OTHER",
+                            "video_id": str(profile.get("video_id") or ""),
+                            "cover_url": str(profile.get("cover_url") or ""),
+                            "aweme_item_id": str(profile.get("aweme_item_id") or ""),
+                            "video_url": str(profile.get("video_url") or ""),
+                            "stat_cost": stat_cost,
+                            "pay_amount": pay_amount,
+                            "total_pay_amount": total_pay_amount,
+                            "settled_pay_amount": settled_pay_amount,
+                            "order_count": order_count,
+                            "settled_order_count": settled_order_count,
+                            "plan_count": int(metric.get("page_plan_count", 0) or 0),
+                            "advertiser_count": int(metric.get("page_advertiser_count", 0) or 0),
+                            "plan_ids_json": str(profile.get("plan_ids_json") or "[]"),
+                            "advertiser_ids_json": str(profile.get("advertiser_ids_json") or "[]"),
+                            "is_original": int(profile.get("is_original", 0) or 0),
+                            "top_plan_name": str(profile.get("top_plan_name") or ""),
+                            "top_account_name": str(profile.get("top_account_name") or ""),
+                            "top_anchor_name": str(profile.get("top_anchor_name") or ""),
+                            "product_info_text": str(profile.get("product_info_text") or ""),
+                            "product_names_json": str(profile.get("product_names_json") or "[]"),
+                            "overall_show_count": overall_show_count,
+                            "overall_click_count": overall_click_count,
+                            "overall_ctr": round(overall_click_count / overall_show_count * 100.0, 2) if overall_show_count > 0 else 0.0,
+                            "roi": round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
+                            "settled_roi": round(settled_pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0,
+                            "pay_order_cost": round(stat_cost / order_count, 2) if order_count > 0 else 0.0,
+                            "settled_amount_rate": round(settled_pay_amount / total_pay_amount * 100.0, 2) if total_pay_amount > 0 else 0.0,
+                            "refund_amount_1h": refund_amount_1h,
+                            "refund_rate_1h": round(refund_amount_1h / total_pay_amount * 100.0, 2) if total_pay_amount > 0 else None,
+                            "matched_keyword_count": int(metric.get("page_matched_keyword_count", 0) or 0),
+                        }
+                    )
+                payload = self._build_material_payload_from_rows(
+                    conn,
+                    page_source_rows,
+                    latest_snapshot_time=latest_snapshot_time,
+                    all_customer_centers=True,
+                    meta_rows=page_source_rows,
+                    enrich_snapshot_context=False,
+                    query_context_ready=True,
+                )
+                key_order = {key: index for index, key in enumerate(page_material_keys)}
+                items = self._sanitize_material_preview_fields_for_payload(
+                    self._apply_latest_material_previews(conn, payload.get("items") or [])
+                )
+                items = [dict(item or {}) for item in items]
+                for item in items:
+                    metric = metric_by_key.get(str(item.get("material_key") or "").strip()) or {}
+                    item["matched_keyword_count"] = int(metric.get("page_matched_keyword_count", 0) or 0)
+                items.sort(key=lambda item: key_order.get(str(item.get("material_key") or "").strip(), len(key_order)))
+                start_index = (current_page - 1) * normalized_page_size
+                total_stat_cost = round(float(summary.get("aggregate_stat_cost", 0.0) or 0.0), 2)
+                total_pay_amount = round(float(summary.get("aggregate_pay_amount", 0.0) or 0.0), 2)
+                total_total_pay_amount = round(float(summary.get("aggregate_total_pay_amount", 0.0) or 0.0), 2)
+                total_settled_pay_amount = round(float(summary.get("aggregate_settled_pay_amount", 0.0) or 0.0), 2)
+                total_order_count = int(summary.get("aggregate_order_count", 0) or 0)
+                total_settled_order_count = int(summary.get("aggregate_settled_order_count", 0) or 0)
+                total_show_count = int(summary.get("aggregate_overall_show_count", 0) or 0)
+                total_click_count = int(summary.get("aggregate_overall_click_count", 0) or 0)
+                total_refund_amount_1h = round(float(summary.get("aggregate_refund_amount_1h", 0.0) or 0.0), 2)
+                payload["items"] = items
+                payload["snapshot_time"] = latest_snapshot_time
+                payload["snapshot_count"] = int(summary.get("indexed_day_count", 0) or 0)
+                payload["range_key"] = context["range_key"]
+                payload["range_label"] = context["range_label"]
+                payload["material_mode"] = MATERIAL_VIEW_PERFORMANCE
+                payload["query_start_date"] = context["start_day"]
+                payload["query_end_date"] = context["end_day"]
+                payload["pagination"] = {
+                    "page": current_page,
+                    "page_size": normalized_page_size,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                    "start_index": start_index + 1 if total_count > 0 else 0,
+                    "end_index": start_index + len(items),
+                    "sort_key": normalized_sort_key,
+                    "sort_dir": normalized_sort_dir,
+                    "search": str(search or "").strip(),
+                }
+                payload["materials_aggregate"] = {
+                    "material_mode": MATERIAL_VIEW_PERFORMANCE,
+                    "material_count": total_count,
+                    "stat_cost": total_stat_cost,
+                    "pay_amount": total_pay_amount,
+                    "total_pay_amount": total_total_pay_amount,
+                    "settled_pay_amount": total_settled_pay_amount,
+                    "order_count": total_order_count,
+                    "settled_order_count": total_settled_order_count,
+                    "overall_show_count": total_show_count,
+                    "overall_click_count": total_click_count,
+                    "overall_ctr": round(total_click_count / total_show_count * 100.0, 2) if total_show_count > 0 else 0.0,
+                    "roi": round(total_pay_amount / total_stat_cost, 2) if total_stat_cost > 0 else 0.0,
+                    "settled_roi": round(total_settled_pay_amount / total_stat_cost, 2) if total_stat_cost > 0 else 0.0,
+                    "pay_order_cost": round(total_stat_cost / total_order_count, 2) if total_order_count > 0 else 0.0,
+                    "settled_amount_rate": round(total_settled_pay_amount / total_total_pay_amount * 100.0, 2) if total_total_pay_amount > 0 else 0.0,
+                    "refund_amount_1h": total_refund_amount_1h,
+                    "refund_rate_1h": round(total_refund_amount_1h / total_total_pay_amount * 100.0, 2) if total_total_pay_amount > 0 else 0.0,
+                    "plan_count": int(summary.get("aggregate_plan_count", 0) or 0),
+                    "advertiser_count": int(summary.get("aggregate_advertiser_count", 0) or 0),
+                    "summary_text": f"total {total_count} materials",
+                }
+                payload["ranking_index_used"] = True
+                payload["ranking_index_range_key"] = "day_prefix"
+                payload["ranking_index_day_prefix_used"] = True
+                payload["ranking_index_day_rollup_used"] = True
+                payload["ranking_index_day_rollup_days"] = indexed_day_count
+                payload["operator_keyword_count"] = len(keyword_values)
+                payload["operator_keywords"] = sorted(next(iter(configured_keywords.values()), set()))
+                return self._attach_freshness(
+                    payload,
+                    data_time=payload.get("snapshot_time"),
+                    synced_at=payload.get("snapshot_time"),
+                    source="material_ranking_operator_keywords",
+                    partial=False,
+                )
+
+        fresh_ttl, stale_ttl = material_cache_ttls_for_scope(cache_scope)
+        return self._read_payload_cache_swr(
+            namespace=cache_namespace,
+            cache_store=self._material_query_cache,
+            cache_key=self._versioned_cache_key(cache_version, raw_cache_key),
+            raw_cache_key=raw_cache_key,
+            cache_version=cache_version,
+            force_refresh=force_refresh,
+            builder=build_payload,
+            fresh_ttl_seconds=max(fresh_ttl, 300),
+            stale_ttl_seconds=max(stale_ttl, 900),
+        )
+
     def _material_operator_matching_rows(
         self,
         *,
@@ -28497,6 +30490,15 @@ class DashboardService:
         stale_ttl = 900 if cache_scope == MATERIAL_CACHE_SCOPE_LIVE else 7200
 
         def build_payload() -> dict[str, Any]:
+            if not snapshot_time and allowed_advertiser_ids is None:
+                indexed_rows = self._material_operator_rankings_from_index(
+                    range_key=range_key,
+                    start_date=start_date,
+                    end_date=end_date,
+                    all_customer_centers=all_customer_centers,
+                )
+                if indexed_rows is not None:
+                    return {"items": indexed_rows}
             rows = self._material_operator_matching_rows(
                 range_key=range_key,
                 start_date=start_date,
@@ -30345,7 +32347,7 @@ require_auth, require_admin, require_material_uploader = build_auth_dependencies
     role_admin=ROLE_ADMIN,
     role_supervisor=ROLE_SUPERVISOR,
 )
-app = FastAPI(title=APP_NAME)
+app = FastAPI(title=APP_NAME, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=SESSION_HTTPS_ONLY)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).resolve().parent / "static")), name="static")
 register_user_routes(app, service, require_admin)

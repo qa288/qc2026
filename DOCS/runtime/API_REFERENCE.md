@@ -471,12 +471,10 @@ verified_date：`2026-03-30`
 
 - `POST /api/sync`
   - 手动触发主同步
-- `POST /api/sync/extended`
-  - 手动触发细粒度同步
-- `POST /api/sync/backfill/performance`
-  - 手动触发主快照回补
-- `POST /api/sync/backfill/extended`
-  - 手动触发细粒度回补
+- `POST /api/sync/full-refresh`
+  - 手动触发 history 队列全量校正
+- `GET /api/sync/full-refresh/status`
+  - 查询全量校正状态
 - `GET /api/system/integrations/ocean-engine/token-latest`
   - 读取最新 token
 - `POST /api/system/integrations/ocean-engine/exchange-auth-code`
@@ -494,8 +492,10 @@ verified_date：`2026-03-30`
   "ok": true,
   "queued": true,
   "task_id": "3df8b0f7-8b5d-4fd1-84f1-0f9c6d2f4e6a",
-  "task_name": "dashboard.performance_backfill",
-  "days": 30
+  "task_name": "dashboard.full_refresh",
+  "status": {
+    "state": "queued"
+  }
 }
 ```
 

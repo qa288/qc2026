@@ -175,12 +175,10 @@ Dashboard 当前包含：
 
 - `GET /api/session/me`
   - 登录后读取当前账号与权限能力
-- `POST /api/sync/extended`
-  - 手动提交一次细粒度同步任务，接口立即返回 `202`
-- `POST /api/sync/backfill/performance`
-  - 管理员手动提交一次主快照历史回补任务，默认回补最近 `30` 天
-- `POST /api/sync/backfill/extended`
-  - 管理员手动提交一次细粒度历史回补任务，默认回补最近 `30` 天
+- `POST /api/sync/full-refresh`
+  - 管理员手动提交一次 history 队列全量校正任务，接口立即返回 `202`
+- `GET /api/sync/full-refresh/status`
+  - 查询当前全量校正任务状态，用于“先补齐 nightly，再开启热链”
 - `GET /api/plans/{ad_id}/assets`
   - 读取某条计划最近一次落库的详情、商品、素材和视频首发标记
 - `GET /api/material-rankings`
@@ -285,9 +283,8 @@ Dashboard 当前包含：
 当前手动同步接口统一改为“入队，不阻塞等待”：
 
 - `POST /api/sync`
-- `POST /api/sync/extended`
-- `POST /api/sync/backfill/performance`
-- `POST /api/sync/backfill/extended`
+- `POST /api/sync/full-refresh`
+- `GET /api/sync/full-refresh/status`
 
 接口行为：
 

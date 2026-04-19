@@ -19,3 +19,8 @@ class UserScopePayload(BaseModel):
 class UserKeywordPayload(BaseModel):
     keyword: str = Field(min_length=1, max_length=80)
     enabled: bool = True
+
+
+class UserKeywordBatchPayload(BaseModel):
+    keywords: list[str] = Field(default_factory=list)
+    enabled: bool = True

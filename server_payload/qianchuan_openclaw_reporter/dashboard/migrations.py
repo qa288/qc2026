@@ -253,6 +253,7 @@ def _material_ranking_index_schema(conn: Any) -> None:
             material_key TEXT NOT NULL DEFAULT '',
             rank_no INTEGER NOT NULL DEFAULT 0,
             page_no INTEGER NOT NULL DEFAULT 0,
+            zero_bucket INTEGER NOT NULL DEFAULT 0,
             metric_value REAL NOT NULL DEFAULT 0,
             stat_cost REAL NOT NULL DEFAULT 0,
             pay_amount REAL NOT NULL DEFAULT 0,
@@ -314,6 +315,43 @@ def _material_ranking_index_schema(conn: Any) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_material_ranking_summary_retention
         ON material_ranking_summary (end_date, scope_key)
+        """
+    )
+
+
+def _material_ranking_index_zero_bucket_schema(conn: Any) -> None:
+    _ensure_column(conn, "material_ranking_index", "zero_bucket", "INTEGER NOT NULL DEFAULT 0")
+
+
+def _material_ranking_day_prefix_schema(conn: Any) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS material_ranking_day_prefix (
+            scope_key TEXT NOT NULL DEFAULT '',
+            day_key TEXT NOT NULL DEFAULT '',
+            material_key TEXT NOT NULL DEFAULT '',
+            snapshot_time TEXT NOT NULL DEFAULT '',
+            active_day_count INTEGER NOT NULL DEFAULT 0,
+            stat_cost REAL NOT NULL DEFAULT 0,
+            pay_amount REAL NOT NULL DEFAULT 0,
+            total_pay_amount REAL NOT NULL DEFAULT 0,
+            settled_pay_amount REAL NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            settled_order_count INTEGER NOT NULL DEFAULT 0,
+            overall_show_count INTEGER NOT NULL DEFAULT 0,
+            overall_click_count INTEGER NOT NULL DEFAULT 0,
+            refund_amount_1h REAL NOT NULL DEFAULT 0,
+            plan_count INTEGER NOT NULL DEFAULT 0,
+            advertiser_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (scope_key, day_key, material_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_ranking_day_prefix_material
+        ON material_ranking_day_prefix (scope_key, material_key, day_key)
         """
     )
 
@@ -514,12 +552,6 @@ def _customer_center_scope_schema_backfill(conn: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_product_snapshots_cc_plan_time ON product_snapshots (customer_center_id, ad_id, snapshot_time)"
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_material_snapshots_cc_plan_time ON material_snapshots (customer_center_id, ad_id, snapshot_time)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_material_rollups_cc_snapshot_time ON material_rollups (customer_center_id, snapshot_time)"
-    )
-    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_video_origin_flags_cc_material_time ON video_origin_flags (customer_center_id, material_id, snapshot_time)"
     )
     conn.execute(
@@ -717,6 +749,12 @@ def _material_relation_read_model_schema(conn: Any) -> None:
         ON material_relation_daily (biz_date, customer_center_id, material_key)
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_relation_daily_cc_date_material
+        ON material_relation_daily (customer_center_id, biz_date, material_key)
+        """
+    )
 
 
 def _material_name_lookup_indexes(conn: Any) -> None:
@@ -736,6 +774,26 @@ def _material_name_lookup_indexes(conn: Any) -> None:
             WHERE COALESCE(material_name, '') <> ''
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_profile_search_trgm
+            ON material_profile USING gin (
+                LOWER(
+                    COALESCE(material_key, '') || ' ' ||
+                    COALESCE(material_id, '') || ' ' ||
+                    COALESCE(material_name, '') || ' ' ||
+                    COALESCE(video_id, '') || ' ' ||
+                    COALESCE(product_info_text, '') || ' ' ||
+                    COALESCE(top_anchor_name, '') || ' ' ||
+                    COALESCE(top_plan_name, '') || ' ' ||
+                    COALESCE(top_account_name, '') || ' ' ||
+                    COALESCE(aweme_item_id, '') || ' ' ||
+                    COALESCE(material_type, '') || ' ' ||
+                    COALESCE(product_names_json, '')
+                ) gin_trgm_ops
+            )
+            """
+        )
         return
     conn.execute(
         """
@@ -749,6 +807,130 @@ def _material_name_lookup_indexes(conn: Any) -> None:
         ON material_daily (biz_date, material_name)
         """
     )
+
+
+def _comment_query_lookup_indexes(conn: Any) -> None:
+    statements = (
+        """
+        CREATE INDEX IF NOT EXISTS idx_comment_records_cc_date_sort
+        ON comment_records (
+            customer_center_id,
+            comment_date DESC,
+            create_time DESC,
+            like_count DESC,
+            reply_count DESC,
+            comment_id DESC
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_comment_records_cc_adv_date_sort
+        ON comment_records (
+            customer_center_id,
+            advertiser_id,
+            comment_date DESC,
+            create_time DESC,
+            like_count DESC,
+            reply_count DESC,
+            comment_id DESC
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_profile_cc_material_id_updated
+        ON material_profile (customer_center_id, material_id, updated_at DESC)
+        WHERE COALESCE(material_id, '') <> '' AND COALESCE(material_name, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_mrc_cc_adv_material_id
+        ON material_relation_current (customer_center_id, advertiser_id, material_id)
+        WHERE COALESCE(material_id, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_mrc_cc_adv_material_key
+        ON material_relation_current (customer_center_id, advertiser_id, material_key)
+        WHERE COALESCE(material_key, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_mrc_cc_adv_aweme_item
+        ON material_relation_current (customer_center_id, advertiser_id, aweme_item_id)
+        WHERE COALESCE(aweme_item_id, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_mrd_cc_date_adv_material_id
+        ON material_relation_daily (customer_center_id, biz_date, advertiser_id, material_id)
+        WHERE COALESCE(material_id, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_mrd_cc_date_adv_material_key
+        ON material_relation_daily (customer_center_id, biz_date, advertiser_id, material_key)
+        WHERE COALESCE(material_key, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_mrd_cc_date_adv_aweme_item
+        ON material_relation_daily (customer_center_id, biz_date, advertiser_id, aweme_item_id)
+        WHERE COALESCE(aweme_item_id, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_plan_current_cc_adv_ad
+        ON plan_current (customer_center_id, advertiser_id, ad_id)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_plan_snapshots_cc_adv_ad_time
+        ON plan_snapshots (customer_center_id, advertiser_id, ad_id, snapshot_time DESC)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_cc_material_id
+        ON material_current (customer_center_id, material_id)
+        WHERE COALESCE(material_id, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_cc_material_key_lookup
+        ON material_current (customer_center_id, material_key)
+        WHERE COALESCE(material_key, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_current_cc_aweme_item
+        ON material_current (customer_center_id, aweme_item_id)
+        WHERE COALESCE(aweme_item_id, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_cc_date_material_id
+        ON material_daily (customer_center_id, biz_date, material_id)
+        WHERE COALESCE(material_id, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_cc_date_material_key_lookup
+        ON material_daily (customer_center_id, biz_date, material_key)
+        WHERE COALESCE(material_key, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_cc_date_aweme_item
+        ON material_daily (customer_center_id, biz_date, aweme_item_id)
+        WHERE COALESCE(aweme_item_id, '') <> ''
+        """,
+    )
+    for statement in statements:
+        conn.execute(statement)
+
+
+def _material_asset_library_indexes(conn: Any) -> None:
+    statements = (
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_profile_cc_create_time_key
+        ON material_profile (customer_center_id, create_time DESC, material_key)
+        WHERE COALESCE(create_time, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_profile_cc_updated_key
+        ON material_profile (customer_center_id, updated_at DESC, material_key)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_material_first_seen
+        ON material_relation_edges (customer_center_id, material_key, first_seen_at)
+        WHERE COALESCE(first_seen_at, '') <> ''
+        """,
+    )
+    for statement in statements:
+        conn.execute(statement)
 
 
 def _material_snapshot_primary_key_with_advertiser(conn: Any) -> None:
@@ -929,7 +1111,9 @@ def _ensure_snapshot_table_indexes(conn: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_material_snapshots_plan_time ON material_snapshots (ad_id, snapshot_time)",
         "CREATE INDEX IF NOT EXISTS idx_material_snapshots_cc_plan_time ON material_snapshots (customer_center_id, ad_id, snapshot_time)",
         "CREATE INDEX IF NOT EXISTS idx_material_snapshots_material_time ON material_snapshots (material_id, snapshot_time)",
+        "CREATE INDEX IF NOT EXISTS idx_material_snapshots_snapshot_material ON material_snapshots (snapshot_time, material_key)",
         "CREATE INDEX IF NOT EXISTS idx_material_rollups_snapshot_time ON material_rollups (snapshot_time)",
+        "CREATE INDEX IF NOT EXISTS idx_material_rollups_snapshot_material ON material_rollups (snapshot_time, material_key)",
         "CREATE INDEX IF NOT EXISTS idx_material_rollups_cc_snapshot_time ON material_rollups (customer_center_id, snapshot_time)",
         "CREATE INDEX IF NOT EXISTS idx_video_origin_flags_material_time ON video_origin_flags (material_id, snapshot_time)",
         "CREATE INDEX IF NOT EXISTS idx_video_origin_flags_cc_material_time ON video_origin_flags (customer_center_id, material_id, snapshot_time)",
@@ -2448,6 +2632,26 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=30,
         name="material_ranking_index",
         apply_fn=_material_ranking_index_schema,
+    ),
+    Migration(
+        version=31,
+        name="material_ranking_index_zero_bucket",
+        apply_fn=_material_ranking_index_zero_bucket_schema,
+    ),
+    Migration(
+        version=32,
+        name="comment_query_lookup_indexes",
+        apply_fn=_comment_query_lookup_indexes,
+    ),
+    Migration(
+        version=33,
+        name="material_asset_library_indexes",
+        apply_fn=_material_asset_library_indexes,
+    ),
+    Migration(
+        version=34,
+        name="material_ranking_day_prefix",
+        apply_fn=_material_ranking_day_prefix_schema,
     ),
 )
 

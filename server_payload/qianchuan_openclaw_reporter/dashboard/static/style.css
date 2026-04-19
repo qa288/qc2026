@@ -488,9 +488,7 @@ body {
 }
 
 .overview-shell {
-  display: grid;
-  grid-template-columns: minmax(0, 1.72fr) minmax(360px, 0.92fr);
-  gap: 16px;
+  display: block;
   margin-top: 18px;
 }
 

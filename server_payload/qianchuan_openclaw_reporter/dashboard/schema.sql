@@ -536,6 +536,29 @@ CREATE TABLE IF NOT EXISTS material_ranking_summary (
 CREATE INDEX IF NOT EXISTS idx_material_ranking_summary_retention
 ON material_ranking_summary (end_date, scope_key);
 
+CREATE TABLE IF NOT EXISTS material_ranking_day_prefix (
+    scope_key TEXT NOT NULL DEFAULT '',
+    day_key TEXT NOT NULL DEFAULT '',
+    material_key TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL DEFAULT '',
+    active_day_count INTEGER NOT NULL DEFAULT 0,
+    stat_cost REAL NOT NULL DEFAULT 0,
+    pay_amount REAL NOT NULL DEFAULT 0,
+    total_pay_amount REAL NOT NULL DEFAULT 0,
+    settled_pay_amount REAL NOT NULL DEFAULT 0,
+    order_count INTEGER NOT NULL DEFAULT 0,
+    settled_order_count INTEGER NOT NULL DEFAULT 0,
+    overall_show_count INTEGER NOT NULL DEFAULT 0,
+    overall_click_count INTEGER NOT NULL DEFAULT 0,
+    refund_amount_1h REAL NOT NULL DEFAULT 0,
+    plan_count INTEGER NOT NULL DEFAULT 0,
+    advertiser_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (scope_key, day_key, material_key)
+);
+CREATE INDEX IF NOT EXISTS idx_material_ranking_day_prefix_material
+ON material_ranking_day_prefix (scope_key, material_key, day_key);
+
 CREATE TABLE IF NOT EXISTS material_profile (
     customer_center_id TEXT NOT NULL DEFAULT '',
     material_key TEXT NOT NULL,
@@ -578,6 +601,13 @@ CREATE TABLE IF NOT EXISTS material_relation_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_material_profile_updated
 ON material_profile (updated_at, customer_center_id, material_key);
+
+CREATE INDEX IF NOT EXISTS idx_material_profile_cc_create_time_key
+ON material_profile (customer_center_id, create_time DESC, material_key)
+WHERE COALESCE(create_time, '') <> '';
+
+CREATE INDEX IF NOT EXISTS idx_material_profile_cc_updated_key
+ON material_profile (customer_center_id, updated_at DESC, material_key);
 
 CREATE TABLE IF NOT EXISTS material_relation_current (
     customer_center_id TEXT NOT NULL DEFAULT '',
@@ -1103,6 +1133,10 @@ ON material_report_snapshots (customer_center_id, material_type, material_id, sn
 
 CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_material
 ON material_relation_edges (customer_center_id, material_key, last_seen_at DESC, advertiser_id, ad_id);
+
+CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_material_first_seen
+ON material_relation_edges (customer_center_id, material_key, first_seen_at)
+WHERE COALESCE(first_seen_at, '') <> '';
 
 CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_advertiser
 ON material_relation_edges (customer_center_id, advertiser_id, last_seen_at DESC, material_key);
