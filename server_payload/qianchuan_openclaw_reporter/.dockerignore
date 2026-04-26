@@ -3,17 +3,9 @@ config.json
 state/
 data/
 volumes/
-backups/
-wheelhouse/
 logs/
 __pycache__/
 *.pyc
-*.pyo
-*.log
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.codex_tmp/
 .git/
 .playwright-cli/
 docs/

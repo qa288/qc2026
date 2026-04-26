@@ -2105,6 +2105,262 @@ body {
   align-items: center;
 }
 
+#uploadJobTable {
+  min-width: 1120px;
+  table-layout: fixed;
+}
+
+#uploadJobTable .upload-job-col-id {
+  width: 88px;
+}
+
+#uploadJobTable .upload-job-col-status {
+  width: clamp(320px, 36%, 680px);
+}
+
+#uploadJobTable .upload-job-col-scope {
+  width: 104px;
+}
+
+#uploadJobTable .upload-job-col-file-progress,
+#uploadJobTable .upload-job-col-target-progress {
+  width: 92px;
+}
+
+#uploadJobTable .upload-job-col-failure {
+  width: 126px;
+}
+
+#uploadJobTable .upload-job-col-time {
+  width: 150px;
+}
+
+#uploadJobTable .upload-job-col-note {
+  width: auto;
+}
+
+#uploadJobTable .upload-job-col-actions {
+  width: 138px;
+}
+
+#uploadJobTable tbody td {
+  overflow-wrap: anywhere;
+}
+
+.upload-progress {
+  width: 100%;
+  max-width: 680px;
+  height: 7px;
+  margin-top: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(20, 59, 47, 0.1);
+}
+
+.upload-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand), var(--pay));
+  transition: width 220ms ease;
+}
+
+.upload-progress-label {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.upload-failure-toggle {
+  margin-top: 8px;
+}
+
+.upload-failure-row td {
+  background: rgba(142, 43, 43, 0.035);
+  white-space: normal;
+}
+
+.upload-failure-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(142, 43, 43, 0.13);
+  border-radius: 18px;
+  background: rgba(255, 252, 248, 0.84);
+}
+
+.upload-failure-panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.upload-detail-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.upload-failure-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.upload-failure-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(136px, 0.72fr) auto;
+  min-width: 0;
+  column-gap: 10px;
+  row-gap: 16px;
+  align-items: center;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(20, 59, 47, 0.08);
+}
+
+.upload-failure-card.is-failed {
+  border-color: rgba(142, 43, 43, 0.18);
+  background: rgba(255, 248, 244, 0.9);
+}
+
+.upload-failure-card.is-success {
+  border-color: rgba(11, 125, 101, 0.16);
+  background: rgba(247, 252, 249, 0.9);
+}
+
+.upload-failure-main {
+  min-width: 0;
+}
+
+.upload-failure-action {
+  display: flex;
+  justify-content: flex-end;
+  justify-self: end;
+  min-width: 0;
+}
+
+.upload-failure-action .button.compact {
+  min-width: 74px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.upload-failure-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.upload-failure-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.45;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.upload-failure-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.upload-failure-meta span {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-detail-progress {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  width: 100%;
+  justify-self: center;
+  margin-top: 0;
+}
+
+.upload-detail-progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(20, 59, 47, 0.1);
+}
+
+.upload-detail-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand), var(--pay));
+  transition: width 220ms ease;
+}
+
+.upload-detail-progress.is-success .upload-detail-progress-fill {
+  background: linear-gradient(90deg, #0b7d65, var(--pay));
+}
+
+.upload-detail-progress.is-failed .upload-detail-progress-fill {
+  background: linear-gradient(90deg, #c55a44, var(--alert));
+}
+
+.upload-detail-progress.is-running .upload-detail-progress-fill {
+  background: linear-gradient(90deg, var(--brand), #d69a2d);
+}
+
+.upload-detail-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.upload-failure-reason {
+  grid-column: 1 / -1;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.upload-failure-card.is-failed .upload-failure-reason {
+  color: var(--alert);
+}
+
+@media (max-width: 1100px) {
+  .upload-failure-list {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-failure-card {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-detail-progress {
+    width: 100%;
+    justify-self: stretch;
+  }
+
+  .upload-failure-action {
+    justify-content: flex-start;
+  }
+}
+
 .positive {
   color: var(--pay);
 }
@@ -5400,9 +5656,32 @@ body.role-operator .page-shell {
   color: #9cead5;
 }
 
+.preview-curve-chip.like {
+  background: rgba(247, 200, 75, 0.14);
+  color: #ffe08a;
+}
+
+.preview-curve-chip.comment {
+  background: rgba(142, 195, 255, 0.14);
+  color: #b6d7ff;
+}
+
+.preview-curve-chip.follow {
+  background: rgba(255, 122, 182, 0.14);
+  color: #ffc0dc;
+}
+
 .preview-curve-chip.peak {
   background: rgba(142, 195, 255, 0.14);
   color: #b6d7ff;
+}
+
+.preview-curve-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 999px;
 }
 
 .preview-curve-stage {
@@ -5441,7 +5720,7 @@ body.role-operator .page-shell {
 }
 
 .preview-curve-area {
-  opacity: 1;
+  opacity: 0.9;
 }
 
 .preview-curve-peak {

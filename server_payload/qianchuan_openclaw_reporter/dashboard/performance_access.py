@@ -33,6 +33,44 @@ class PerformanceAccess:
         self._apply_plan_delivery_type_metadata = apply_plan_delivery_type_metadata
 
     @staticmethod
+    def normalize_performance_section(section: str) -> str:
+        normalized = str(section or "all").strip().lower()
+        return normalized if normalized in {"all", "account", "plan", "breakdown"} else "all"
+
+    @classmethod
+    def performance_section_needs_balance_details(cls, section: str) -> bool:
+        return cls.normalize_performance_section(section) == "all"
+
+    @classmethod
+    def performance_section_should_decorate_plans(cls, section: str) -> bool:
+        return cls.normalize_performance_section(section) != "account"
+
+    @classmethod
+    def plan_select_columns(cls, *, section: str = "all", include_biz_date: bool = False) -> str:
+        if cls.normalize_performance_section(section) != "account":
+            return "*"
+        columns = [
+            "customer_center_id",
+            "snapshot_time",
+            "advertiser_id",
+            "advertiser_name",
+            "ad_id",
+            "ad_name",
+            "plan_source",
+            "plan_delivery_type",
+            "stat_cost",
+            "pay_amount",
+            "total_pay_amount",
+            "settled_pay_amount",
+            "order_count",
+            "settled_order_count",
+            "refund_amount_1h",
+        ]
+        if include_biz_date:
+            columns.insert(1, "biz_date")
+        return ", ".join(columns)
+
+    @staticmethod
     def _table_exists(conn: Any, table_name: str) -> bool:
         table = str(table_name or "").strip()
         if not table:
@@ -806,8 +844,14 @@ class PerformanceAccess:
                 ],
             )
 
-    def _current_rows_for_customer_center(self, conn: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]]]:
+    def _current_rows_for_customer_center(
+        self,
+        conn: Any,
+        *,
+        section: str = "all",
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]]]:
         customer_center_id = str(self._current_customer_center_id() or "").strip()
+        normalized_section = self.normalize_performance_section(section)
         summary = conn.execute(
             "SELECT * FROM summary_current WHERE customer_center_id = ? LIMIT 1",
             (customer_center_id,),
@@ -829,8 +873,8 @@ class PerformanceAccess:
         plan_rows = [
             dict(row)
             for row in conn.execute(
-                """
-                SELECT *
+                f"""
+                SELECT {self.plan_select_columns(section=normalized_section)}
                 FROM plan_current
                 WHERE customer_center_id = ?
                 ORDER BY order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
@@ -863,10 +907,17 @@ class PerformanceAccess:
         account_rows: list[dict[str, Any]],
         plan_rows: list[dict[str, Any]],
         latest_snapshot_time: str,
+        include_balance_details: bool = True,
+        decorate_plans: bool = True,
     ) -> dict[str, Any]:
-        account_balance_items = self._snapshot_account_balances(conn, latest_snapshot_time) if latest_snapshot_time else []
-        shared_wallet_items = self._snapshot_shared_wallets(conn, latest_snapshot_time) if latest_snapshot_time else []
-        wallet_relation_items = self._snapshot_wallet_relations(conn, latest_snapshot_time) if latest_snapshot_time else []
+        if include_balance_details and latest_snapshot_time:
+            account_balance_items = self._snapshot_account_balances(conn, latest_snapshot_time)
+            shared_wallet_items = self._snapshot_shared_wallets(conn, latest_snapshot_time)
+            wallet_relation_items = self._snapshot_wallet_relations(conn, latest_snapshot_time)
+        else:
+            account_balance_items = []
+            shared_wallet_items = []
+            wallet_relation_items = []
         return self._build_performance_snapshot_payload(
             start_dt,
             end_dt,
@@ -877,6 +928,7 @@ class PerformanceAccess:
             account_balance_items=account_balance_items,
             shared_wallet_items=shared_wallet_items,
             wallet_relation_items=wallet_relation_items,
+            decorate_plans=decorate_plans,
         )
 
     def _performance_snapshot_from_current_rows(
@@ -884,8 +936,11 @@ class PerformanceAccess:
         conn: Any,
         start_dt: datetime,
         end_dt: datetime,
+        *,
+        section: str = "all",
     ) -> dict[str, Any]:
-        summary_row, account_rows, plan_rows = self._current_rows_for_customer_center(conn)
+        normalized_section = self.normalize_performance_section(section)
+        summary_row, account_rows, plan_rows = self._current_rows_for_customer_center(conn, section=normalized_section)
         if not summary_row:
             return self._empty_performance_snapshot(start_dt, end_dt)
         latest_snapshot_time = str(summary_row.get("snapshot_time") or "").strip()
@@ -897,6 +952,8 @@ class PerformanceAccess:
             account_rows=account_rows,
             plan_rows=plan_rows,
             latest_snapshot_time=latest_snapshot_time,
+            include_balance_details=self.performance_section_needs_balance_details(normalized_section),
+            decorate_plans=self.performance_section_should_decorate_plans(normalized_section),
         )
 
     def _performance_snapshot_from_daily_and_current_rows(
@@ -904,7 +961,10 @@ class PerformanceAccess:
         conn: Any,
         start_dt: datetime,
         end_dt: datetime,
+        *,
+        section: str = "all",
     ) -> dict[str, Any]:
+        normalized_section = self.normalize_performance_section(section)
         customer_center_id = str(self._current_customer_center_id() or "").strip()
         summary_rows = self.latest_summary_daily_for_window(conn, start_dt, end_dt)
         account_rows = [
@@ -928,8 +988,8 @@ class PerformanceAccess:
         plan_rows = [
             dict(row)
             for row in conn.execute(
-                """
-                SELECT *
+                f"""
+                SELECT {self.plan_select_columns(section=normalized_section, include_biz_date=True)}
                 FROM plan_daily
                 WHERE customer_center_id = ?
                   AND biz_date >= ?
@@ -943,7 +1003,7 @@ class PerformanceAccess:
                 ),
             ).fetchall()
         ]
-        current_summary, current_accounts, current_plans = self._current_rows_for_customer_center(conn)
+        current_summary, current_accounts, current_plans = self._current_rows_for_customer_center(conn, section=normalized_section)
         if current_summary:
             summary_rows.append(current_summary)
             account_rows.extend(current_accounts)
@@ -961,6 +1021,8 @@ class PerformanceAccess:
             account_rows=account_rows,
             plan_rows=plan_rows,
             latest_snapshot_time=latest_snapshot_time,
+            include_balance_details=self.performance_section_needs_balance_details(normalized_section),
+            decorate_plans=self.performance_section_should_decorate_plans(normalized_section),
         )
 
     def _legacy_performance_snapshot_from_snapshots(
@@ -1037,9 +1099,15 @@ class PerformanceAccess:
         account_balance_items: list[dict[str, Any]],
         shared_wallet_items: list[dict[str, Any]],
         wallet_relation_items: list[dict[str, Any]],
+        decorate_plans: bool = True,
     ) -> dict[str, Any]:
         account_items = self.aggregate_account_snapshots(account_rows)
-        plan_items = [self._decorate_plan_item(item) for item in self.aggregate_plan_snapshots(plan_rows)]
+        aggregated_plan_items = self.aggregate_plan_snapshots(plan_rows)
+        plan_items = (
+            [self._decorate_plan_item(item) for item in aggregated_plan_items]
+            if decorate_plans
+            else aggregated_plan_items
+        )
 
         total_cost = round(
             sum(float(item.get("stat_cost", 0.0) or 0.0) for item in account_items if bool(item.get("ok", True))),
@@ -1094,7 +1162,10 @@ class PerformanceAccess:
         start_dt: datetime,
         end_dt: datetime,
         summary_rows: list[dict[str, Any]],
+        *,
+        section: str = "all",
     ) -> dict[str, Any]:
+        normalized_section = self.normalize_performance_section(section)
         customer_center_id = str(self._current_customer_center_id() or "").strip()
         selected_day_snapshots = {
             (
@@ -1134,8 +1205,8 @@ class PerformanceAccess:
         plan_rows = [
             dict(row)
             for row in conn.execute(
-                """
-                SELECT *
+                f"""
+                SELECT {self.plan_select_columns(section=normalized_section, include_biz_date=True)}
                 FROM plan_daily
                 WHERE customer_center_id = ?
                   AND biz_date >= ?
@@ -1162,9 +1233,14 @@ class PerformanceAccess:
             plan_rows = self._apply_plan_delivery_type_metadata(conn, plan_rows)
 
         latest_snapshot_time = max(str(item.get("snapshot_time") or "") for item in summary_rows)
-        account_balance_items = self._snapshot_account_balances(conn, latest_snapshot_time)
-        shared_wallet_items = self._snapshot_shared_wallets(conn, latest_snapshot_time)
-        wallet_relation_items = self._snapshot_wallet_relations(conn, latest_snapshot_time)
+        if self.performance_section_needs_balance_details(normalized_section):
+            account_balance_items = self._snapshot_account_balances(conn, latest_snapshot_time)
+            shared_wallet_items = self._snapshot_shared_wallets(conn, latest_snapshot_time)
+            wallet_relation_items = self._snapshot_wallet_relations(conn, latest_snapshot_time)
+        else:
+            account_balance_items = []
+            shared_wallet_items = []
+            wallet_relation_items = []
         return self._build_performance_snapshot_payload(
             start_dt,
             end_dt,
@@ -1175,6 +1251,7 @@ class PerformanceAccess:
             account_balance_items=account_balance_items,
             shared_wallet_items=shared_wallet_items,
             wallet_relation_items=wallet_relation_items,
+            decorate_plans=self.performance_section_should_decorate_plans(normalized_section),
         )
 
     def performance_snapshot_from_db(
@@ -1183,22 +1260,33 @@ class PerformanceAccess:
         end_dt: datetime,
         *,
         prefer_daily: bool = False,
+        section: str = "all",
     ) -> dict[str, Any]:
+        normalized_section = self.normalize_performance_section(section)
         with self._db() as conn:
             today_key = datetime.now(start_dt.tzinfo or end_dt.tzinfo).strftime("%Y-%m-%d")
             start_key = start_dt.strftime("%Y-%m-%d")
             end_key = end_dt.strftime("%Y-%m-%d")
             try:
                 if start_key == today_key and end_key == today_key:
-                    payload = self._performance_snapshot_from_current_rows(conn, start_dt, end_dt)
+                    payload = self._performance_snapshot_from_current_rows(conn, start_dt, end_dt, section=normalized_section)
                     if payload.get("snapshot_time"):
                         return payload
                 if end_key < today_key:
                     daily_summaries = self.latest_summary_daily_for_window(conn, start_dt, end_dt)
                     if daily_summaries:
-                        return self._performance_snapshot_from_daily_rows(conn, start_dt, end_dt, daily_summaries)
+                        return self._performance_snapshot_from_daily_rows(
+                            conn,
+                            start_dt,
+                            end_dt,
+                            daily_summaries,
+                            section=normalized_section,
+                        )
                     if start_key == end_key:
-                        current_summary, current_accounts, current_plans = self._current_rows_for_customer_center(conn)
+                        current_summary, current_accounts, current_plans = self._current_rows_for_customer_center(
+                            conn,
+                            section=normalized_section,
+                        )
                         if current_summary and self._summary_row_matches_day(current_summary, start_key):
                             return self._build_payload_from_summary_rows(
                                 conn,
@@ -1208,9 +1296,16 @@ class PerformanceAccess:
                                 account_rows=current_accounts,
                                 plan_rows=current_plans,
                                 latest_snapshot_time=str(current_summary.get("snapshot_time") or "").strip(),
+                                include_balance_details=self.performance_section_needs_balance_details(normalized_section),
+                                decorate_plans=self.performance_section_should_decorate_plans(normalized_section),
                             )
                 if start_key < today_key <= end_key:
-                    payload = self._performance_snapshot_from_daily_and_current_rows(conn, start_dt, end_dt)
+                    payload = self._performance_snapshot_from_daily_and_current_rows(
+                        conn,
+                        start_dt,
+                        end_dt,
+                        section=normalized_section,
+                    )
                     if payload.get("snapshot_time"):
                         return payload
             except Exception as exc:  # noqa: BLE001

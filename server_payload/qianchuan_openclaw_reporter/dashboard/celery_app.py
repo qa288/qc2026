@@ -65,6 +65,11 @@ celery_app.conf.update(
             "task": "dashboard.dispatch_alerts",
             "schedule": crontab(minute="*"),
         },
+        "dashboard-finalize-yesterday-daily": {
+            "task": "dashboard.finalize_yesterday_daily",
+            "schedule": crontab(hour=0, minute=5),
+            "options": {"queue": "history"},
+        },
         "dashboard-nightly-full-refresh": {
             "task": "dashboard.nightly_history_refresh",
             "schedule": crontab(hour=2, minute=0),

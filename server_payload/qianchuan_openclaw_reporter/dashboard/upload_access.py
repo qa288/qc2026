@@ -17,6 +17,7 @@ class UploadAccess:
         current_customer_center_id: Callable[[], str],
         normalize_match_text: Callable[..., str],
         sanitize_material_title: Callable[[str], str],
+        format_plan_status_text: Callable[[str, str], str] | None = None,
     ) -> None:
         self._db = db_factory
         self._now_text = now_text
@@ -26,6 +27,8 @@ class UploadAccess:
         self._current_customer_center_id = current_customer_center_id
         self._normalize_match_text = normalize_match_text
         self._sanitize_material_title = sanitize_material_title
+        self._format_plan_status_text = format_plan_status_text
+        self._column_exists_cache: dict[tuple[str, str, str], bool] = {}
 
     @staticmethod
     def _column_exists_locked(conn: Any, table_name: str, column_name: str) -> bool:
@@ -47,20 +50,129 @@ class UploadAccess:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
         return any(str(row["name"]) == column for row in rows)
 
+    @staticmethod
+    def _empty_visible_upload_targets(scope: str, query: str) -> dict[str, Any]:
+        return {
+            "scope": scope,
+            "query": str(query or "").strip(),
+            "snapshot_time": "",
+            "accounts": [],
+            "plans": [],
+            "plan_count": 0,
+            "account_count": 0,
+        }
+
+    @staticmethod
+    def _normalize_allowed_advertiser_ids(
+        allowed_advertiser_ids: set[int] | list[int] | tuple[int, ...] | None,
+    ) -> list[int] | None:
+        if allowed_advertiser_ids is None:
+            return None
+        return sorted({int(item) for item in allowed_advertiser_ids if int(item or 0) > 0})
+
+    def _column_exists_cached_locked(self, conn: Any, table_name: str, column_name: str) -> bool:
+        key = (str(getattr(conn, "backend", "") or ""), str(table_name or "").strip(), str(column_name or "").strip())
+        if key not in self._column_exists_cache:
+            self._column_exists_cache[key] = self._column_exists_locked(conn, table_name, column_name)
+        return self._column_exists_cache[key]
+
+    def _upload_target_account_rows_locked(self, conn: Any, allowed_advertiser_ids: list[int] | None) -> list[dict[str, Any]]:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
+        where_clauses = ["customer_center_id = ?"]
+        params: list[Any] = [customer_center_id]
+        if allowed_advertiser_ids is not None:
+            placeholders = ",".join("?" for _ in allowed_advertiser_ids)
+            where_clauses.append(f"advertiser_id IN ({placeholders})")
+            params.extend(allowed_advertiser_ids)
+        rows = conn.execute(
+            f"""
+            SELECT
+                snapshot_time,
+                advertiser_id,
+                advertiser_name,
+                stat_cost,
+                pay_amount,
+                order_count,
+                roi
+            FROM account_current
+            WHERE {" AND ".join(where_clauses)}
+            ORDER BY stat_cost DESC, advertiser_id ASC
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _upload_target_plan_rows_locked(self, conn: Any, allowed_advertiser_ids: list[int] | None) -> list[dict[str, Any]]:
+        customer_center_id = str(self._current_customer_center_id() or "").strip()
+        has_plan_source = self._column_exists_cached_locked(conn, "plan_current", "plan_source")
+        has_status = self._column_exists_cached_locked(conn, "plan_current", "status")
+        has_opt_status = self._column_exists_cached_locked(conn, "plan_current", "opt_status")
+        where_clauses = ["customer_center_id = ?"]
+        params: list[Any] = [customer_center_id]
+        if has_plan_source:
+            where_clauses.append("COALESCE(plan_source, 'UNI_PROMOTION') = 'UNI_PROMOTION'")
+        if allowed_advertiser_ids is not None:
+            placeholders = ",".join("?" for _ in allowed_advertiser_ids)
+            where_clauses.append(f"advertiser_id IN ({placeholders})")
+            params.extend(allowed_advertiser_ids)
+        rows = conn.execute(
+            f"""
+            SELECT
+                snapshot_time,
+                advertiser_id,
+                advertiser_name,
+                ad_id,
+                ad_name,
+                product_id,
+                product_name,
+                anchor_name,
+                marketing_goal,
+                {"plan_source," if has_plan_source else "'UNI_PROMOTION' AS plan_source,"}
+                {"status," if has_status else "'' AS status,"}
+                {"opt_status," if has_opt_status else "'' AS opt_status,"}
+                stat_cost,
+                pay_amount,
+                order_count,
+                roi
+            FROM plan_current
+            WHERE {" AND ".join(where_clauses)}
+            ORDER BY stat_cost DESC, advertiser_id ASC, ad_id ASC
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _upload_plan_status_text(self, item: dict[str, Any]) -> str:
+        status = str(item.get("status") or "").strip()
+        opt_status = str(item.get("opt_status") or "").strip()
+        if callable(self._format_plan_status_text):
+            try:
+                return str(self._format_plan_status_text(status, opt_status) or "")
+            except Exception:
+                pass
+        return " / ".join(part for part in (status, opt_status) if part)
+
+    def _upload_target_plan_paused(self, item: dict[str, Any]) -> bool:
+        status = str(item.get("status") or "").strip().upper()
+        opt_status = str(item.get("opt_status") or "").strip().upper()
+        status_text = str(self._upload_plan_status_text(item) or "").strip()
+        if status_text == "???":
+            return True
+        return status == "DISABLE" and opt_status in {"", "DISABLE"}
+
     def visible_upload_targets(self, user: dict[str, Any], scope: str, query: str) -> dict[str, Any]:
-        allowed = self._allowed_advertiser_ids_for_user(user)
-        payload = self._latest_snapshot(allowed)
-        if not payload:
-            return {"scope": scope, "query": query, "accounts": [], "plans": [], "plan_count": 0, "account_count": 0}
-        accounts = [dict(item) for item in payload.get("accounts", [])]
-        plans = [
-            dict(item)
-            for item in payload.get("plans", [])
-            if str(item.get("plan_source") or PLAN_SOURCE_UNI_PROMOTION).strip().upper() == PLAN_SOURCE_UNI_PROMOTION
-        ]
+        normalized_scope = "account" if str(scope or "").strip().lower() == "account" else "plan"
         query_text = str(query or "").strip().casefold()
+        allowed = self._normalize_allowed_advertiser_ids(self._allowed_advertiser_ids_for_user(user))
+        if allowed is not None and not allowed:
+            return self._empty_visible_upload_targets(normalized_scope, query)
+        with self._db() as conn:
+            accounts = self._upload_target_account_rows_locked(conn, allowed)
+            plans = self._upload_target_plan_rows_locked(conn, allowed)
+        if not accounts and not plans:
+            return self._empty_visible_upload_targets(normalized_scope, query)
         account_map = {int(item.get("advertiser_id", 0) or 0): dict(item) for item in accounts}
-        if scope == "account":
+        if normalized_scope == "account":
             matched_accounts = []
             for item in accounts:
                 haystack = self._normalize_match_text(
@@ -70,10 +182,16 @@ class UploadAccess:
                 if not query_text or query_text in haystack:
                     matched_accounts.append(dict(item))
             account_ids = {int(item.get("advertiser_id", 0) or 0) for item in matched_accounts}
-            target_plans = [dict(item) for item in plans if int(item.get("advertiser_id", 0) or 0) in account_ids]
+            target_plans = [
+                dict(item)
+                for item in plans
+                if int(item.get("advertiser_id", 0) or 0) in account_ids and not self._upload_target_plan_paused(item)
+            ]
         else:
             target_plans = []
             for item in plans:
+                if self._upload_target_plan_paused(item):
+                    continue
                 haystack = self._normalize_match_text(
                     str(item.get("ad_name") or ""),
                     str(item.get("product_name") or ""),
@@ -86,10 +204,13 @@ class UploadAccess:
             account_ids = {int(item.get("advertiser_id", 0) or 0) for item in target_plans}
             matched_accounts = [account_map[item] for item in account_ids if item in account_map]
         normalized_plans = []
+        plan_counts_by_advertiser: dict[int, int] = {}
         for item in target_plans:
+            advertiser_id = int(item.get("advertiser_id", 0) or 0)
+            plan_counts_by_advertiser[advertiser_id] = plan_counts_by_advertiser.get(advertiser_id, 0) + 1
             normalized_plans.append(
                 {
-                    "advertiser_id": int(item.get("advertiser_id", 0) or 0),
+                    "advertiser_id": advertiser_id,
                     "advertiser_name": str(item.get("advertiser_name") or ""),
                     "ad_id": int(item.get("ad_id", 0) or 0),
                     "ad_name": str(item.get("ad_name") or ""),
@@ -101,7 +222,7 @@ class UploadAccess:
                     "pay_amount": round(float(item.get("pay_amount", 0.0) or 0.0), 2),
                     "order_count": int(float(item.get("order_count", 0.0) or 0.0)),
                     "roi": round(float(item.get("roi", 0.0) or 0.0), 2),
-                    "status_text": str(item.get("status_text") or ""),
+                    "status_text": self._upload_plan_status_text(item),
                 }
             )
         normalized_plans.sort(
@@ -116,11 +237,7 @@ class UploadAccess:
             {
                 "advertiser_id": int(item.get("advertiser_id", 0) or 0),
                 "advertiser_name": str(item.get("advertiser_name") or ""),
-                "plan_count": sum(
-                    1
-                    for plan in normalized_plans
-                    if int(plan["advertiser_id"]) == int(item.get("advertiser_id", 0) or 0)
-                ),
+                "plan_count": int(plan_counts_by_advertiser.get(int(item.get("advertiser_id", 0) or 0), 0)),
                 "stat_cost": round(float(item.get("stat_cost", 0.0) or 0.0), 2),
                 "pay_amount": round(float(item.get("pay_amount", 0.0) or 0.0), 2),
                 "order_count": int(float(item.get("order_count", 0.0) or 0.0)),
@@ -131,10 +248,14 @@ class UploadAccess:
         normalized_accounts.sort(
             key=lambda item: (-float(item["stat_cost"]), str(item["advertiser_name"]), int(item["advertiser_id"]))
         )
+        snapshot_time = max(
+            (str(item.get("snapshot_time") or "") for item in [*accounts, *plans]),
+            default="",
+        )
         return {
-            "scope": scope,
+            "scope": normalized_scope,
             "query": str(query or "").strip(),
-            "snapshot_time": str(payload.get("snapshot_time") or ""),
+            "snapshot_time": snapshot_time,
             "accounts": normalized_accounts,
             "plans": normalized_plans,
             "plan_count": len(normalized_plans),
@@ -436,32 +557,33 @@ class UploadAccess:
             items = []
             for row in rows:
                 job_id = int(row["id"])
-                upload_failures = conn.execute(
+                item = dict(row)
+                item["created_by_label"] = str(item.get("display_name") or item.get("username") or "")
+                status_text = str(item.get("status") or "").strip().lower()
+                has_failures = (
+                    int(item.get("failed_files", 0) or 0) > 0
+                    or int(item.get("failed_targets", 0) or 0) > 0
+                    or status_text in {"failed", "partial"}
+                )
+                detail_rows = conn.execute(
                     """
                     SELECT
-                        fa.status,
-                        fa.message,
+                        ta.id AS target_asset_id,
+                        ta.target_id,
+                        ta.file_id,
+                        ta.status AS target_asset_status,
+                        ta.message AS target_message,
                         f.original_name,
-                        fa.advertiser_id,
-                        fa.advertiser_name
-                    FROM material_upload_job_file_assets fa
-                    JOIN material_upload_job_files f ON f.id = fa.file_id
-                    WHERE fa.job_id = ? AND fa.status = 'failed'
-                    ORDER BY fa.id ASC
-                    LIMIT 5
-                    """,
-                    (job_id,),
-                ).fetchall()
-                bind_failures = conn.execute(
-                    """
-                    SELECT
-                        ta.status,
-                        ta.message,
-                        f.original_name,
+                        f.status AS file_status,
+                        f.message AS file_message,
                         t.advertiser_id,
                         t.advertiser_name,
                         t.ad_id,
-                        t.ad_name
+                        t.ad_name,
+                        fa.status AS file_asset_status,
+                        fa.message AS file_asset_message,
+                        fa.material_id,
+                        fa.video_id
                     FROM material_upload_job_target_assets ta
                     JOIN material_upload_job_targets t ON t.id = ta.target_id
                     JOIN material_upload_job_files f ON f.id = ta.file_id
@@ -470,42 +592,102 @@ class UploadAccess:
                        AND fa.file_id = ta.file_id
                        AND fa.advertiser_id = t.advertiser_id
                     WHERE ta.job_id = ?
-                      AND ta.status = 'failed'
-                      AND COALESCE(fa.status, '') != 'failed'
                     ORDER BY ta.id ASC
-                    LIMIT 5
+                    LIMIT 500
                     """,
                     (job_id,),
                 ).fetchall()
-                item = dict(row)
-                item["created_by_label"] = str(item.get("display_name") or item.get("username") or "")
-                failed_items = [
-                    {
-                        "failure_stage": "upload",
-                        "original_name": str(failed_row["original_name"] or ""),
-                        "message": str(failed_row["message"] or ""),
-                        "status": str(failed_row["status"] or ""),
-                        "advertiser_id": int(failed_row["advertiser_id"] or 0),
-                        "advertiser_name": str(failed_row["advertiser_name"] or ""),
-                        "ad_id": 0,
-                        "ad_name": "",
+                detail_items: list[dict[str, Any]] = []
+                completed_details = 0
+                success_details = 0
+                failed_items: list[dict[str, Any]] = []
+                upload_operation_keys: set[tuple[int, int]] = set()
+                upload_completed_keys: set[tuple[int, int]] = set()
+                for detail_row in detail_rows:
+                    target_asset_status = str(detail_row["target_asset_status"] or "").strip().lower()
+                    file_asset_status = str(detail_row["file_asset_status"] or "").strip().lower()
+                    file_status = str(detail_row["file_status"] or "").strip().lower()
+                    target_asset_id = int(detail_row["target_asset_id"] or 0)
+                    target_id = int(detail_row["target_id"] or 0)
+                    file_id = int(detail_row["file_id"] or 0)
+                    advertiser_id = int(detail_row["advertiser_id"] or 0)
+                    upload_key = (file_id, advertiser_id)
+                    upload_operation_keys.add(upload_key)
+                    if file_asset_status in {"success", "failed"}:
+                        upload_completed_keys.add(upload_key)
+                    file_asset_failed = file_asset_status == "failed"
+                    if target_asset_status == "success":
+                        stage = "done"
+                        display_status = "success"
+                        message = str(detail_row["target_message"] or "")
+                        completed_details += 1
+                        success_details += 1
+                    elif target_asset_status == "failed":
+                        stage = "upload_failed" if file_asset_failed else "bind_failed"
+                        display_status = "failed"
+                        message = str((detail_row["file_asset_message"] if file_asset_failed else detail_row["target_message"]) or "")
+                        completed_details += 1
+                    elif target_asset_status == "running":
+                        stage = "binding"
+                        display_status = "running"
+                        message = str(detail_row["target_message"] or "正在绑定计划。")
+                    elif file_asset_status == "running":
+                        stage = "uploading"
+                        display_status = "running"
+                        message = str(detail_row["file_asset_message"] or "正在上传素材。")
+                    elif file_asset_status == "success":
+                        stage = "bind_queued"
+                        display_status = "queued"
+                        message = "素材上传完成，等待绑定计划。"
+                    elif file_asset_status == "failed" or file_status == "failed":
+                        stage = "upload_failed"
+                        display_status = "failed"
+                        message = str(detail_row["file_asset_message"] or detail_row["file_message"] or "上传素材失败。")
+                        completed_details += 1
+                    elif status_text == "queued":
+                        stage = "queued"
+                        display_status = "queued"
+                        message = "等待后台执行。"
+                    else:
+                        stage = "upload_queued"
+                        display_status = "queued"
+                        message = "等待上传素材。"
+                    detail_item = {
+                        "target_asset_id": target_asset_id,
+                        "target_id": target_id,
+                        "file_id": file_id,
+                        "failure_stage": "upload" if file_asset_failed or stage == "upload_failed" else "bind",
+                        "stage": stage,
+                        "status": display_status,
+                        "original_name": str(detail_row["original_name"] or ""),
+                        "message": message,
+                        "advertiser_id": advertiser_id,
+                        "advertiser_name": str(detail_row["advertiser_name"] or ""),
+                        "ad_id": int(detail_row["ad_id"] or 0),
+                        "ad_name": str(detail_row["ad_name"] or ""),
+                        "material_id": str(detail_row["material_id"] or ""),
+                        "video_id": str(detail_row["video_id"] or ""),
+                        "retryable": target_asset_status == "failed",
                     }
-                    for failed_row in upload_failures
-                ]
-                failed_items.extend(
-                    {
-                        "failure_stage": "bind",
-                        "original_name": str(failed_row["original_name"] or ""),
-                        "message": str(failed_row["message"] or ""),
-                        "status": str(failed_row["status"] or ""),
-                        "advertiser_id": int(failed_row["advertiser_id"] or 0),
-                        "advertiser_name": str(failed_row["advertiser_name"] or ""),
-                        "ad_id": int(failed_row["ad_id"] or 0),
-                        "ad_name": str(failed_row["ad_name"] or ""),
-                    }
-                    for failed_row in bind_failures
-                )
-                if not failed_items:
+                    detail_items.append(detail_item)
+                    if display_status == "failed":
+                        failed_items.append(detail_item)
+                total_details = len(detail_items)
+                total_operations = len(upload_operation_keys) + total_details
+                completed_operations = len(upload_completed_keys) + completed_details
+                if total_operations > 0:
+                    progress_percent = round(max(0, min(100, completed_operations * 100 / total_operations)))
+                elif str(item.get("status") or "").strip().lower() in {"success", "ok"}:
+                    progress_percent = 100
+                else:
+                    progress_percent = 0
+                item["detail_items"] = detail_items
+                item["detail_count"] = total_details
+                item["completed_detail_count"] = completed_details
+                item["success_detail_count"] = success_details
+                item["failed_detail_count"] = len(failed_items)
+                item["progress_percent"] = progress_percent
+                if has_failures and not failed_items:
                     legacy_failures = conn.execute(
                         """
                         SELECT original_name, message, status
@@ -518,7 +700,11 @@ class UploadAccess:
                     ).fetchall()
                     failed_items = [
                         {
+                            "target_asset_id": 0,
+                            "target_id": 0,
+                            "file_id": 0,
                             "failure_stage": "upload",
+                            "stage": "upload_failed",
                             "original_name": str(failed_row["original_name"] or ""),
                             "message": str(failed_row["message"] or ""),
                             "status": str(failed_row["status"] or ""),
@@ -526,9 +712,11 @@ class UploadAccess:
                             "advertiser_name": "",
                             "ad_id": 0,
                             "ad_name": "",
+                            "retryable": False,
                         }
                         for failed_row in legacy_failures
                     ]
+                    item["failed_detail_count"] = len(failed_items)
                 item["failed_items"] = failed_items
                 items.append(item)
         return items

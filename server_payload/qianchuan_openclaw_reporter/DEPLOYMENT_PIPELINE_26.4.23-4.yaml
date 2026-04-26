@@ -1,0 +1,253 @@
+﻿# Qianchuan dashboard deployment and data-pipeline contract.
+# This file intentionally contains no secrets. Keep tokens, database passwords,
+# app_secret, refresh_token, and customer_center_id values in .env.dashboard only.
+
+profile_version: "26.4.23-4"
+profile_date: "2026-04-23"
+timezone: "Asia/Shanghai"
+image:
+  final_tag: "qc-dashboard:26.4.23-4"
+  env_key: "QC_DASHBOARD_IMAGE"
+  dockerfile: "dashboard/Dockerfile"
+  clean_full_build_command: "docker build --pull --no-cache --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t qc-dashboard:26.4.23-4 -f dashboard/Dockerfile ."
+  optional_build_args:
+    PIP_INDEX_URL: "https://pypi.tuna.tsinghua.edu.cn/simple"
+  note: "PIP_INDEX_URL only affects build-time dependency download speed; runtime behavior is unchanged."
+
+deployment:
+  source_root_on_server: "/opt/qianchuan/qianchuan_openclaw_reporter"
+  local_mirror_root: "C:/qc2026-main/.remote_edit/server_qianchuan"
+  compose_files:
+    source_build: "docker-compose.dashboard.yml"
+    prebuilt_image: "docker-compose.dashboard.image.yml"
+  commands:
+    build_from_source: "docker compose --env-file .env.dashboard -f docker-compose.dashboard.yml up -d --build"
+    clean_full_image_build: "docker build --pull --no-cache --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t qc-dashboard:26.4.23-4 -f dashboard/Dockerfile ."
+    run_prebuilt_image: "docker compose --env-file .env.dashboard -f docker-compose.dashboard.image.yml up -d"
+    check_containers: "docker ps --format '{{.Names}} {{.Image}} {{.Status}}'"
+  runtime_paths_do_not_copy_between_hosts:
+    - "data/"
+    - "volumes/"
+    - "backups/"
+    - "__pycache__/"
+  required_runtime_services:
+    - "qianchuan-web"
+    - "qianchuan-worker"
+    - "qianchuan-history-worker"
+    - "qianchuan-scheduler"
+    - "qianchuan-postgres"
+    - "qianchuan-redis"
+  required_env_keys_without_values:
+    - "APP_ID"
+    - "APP_SECRET"
+    - "REFRESH_TOKEN"
+    - "CUSTOMER_CENTER_ID"
+    - "DATABASE_URL or POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB"
+    - "REDIS_URL"
+    - "CELERY_BROKER_URL"
+    - "CELERY_RESULT_BACKEND"
+    - "QC_DASHBOARD_IMAGE"
+    - "ENABLE_HOT_SYNC_SCHEDULES"
+    - "DETAIL_SYNC_INTERVAL_MINUTES"
+    - "MATERIAL_SYNC_INTERVAL_MINUTES"
+    - "MATERIAL_SYNC_WARM_INTERVAL_MINUTES"
+    - "DETAIL_MATERIAL_TYPES"
+    - "MATERIAL_PLAN_MATERIAL_STATUS"
+
+api_chains:
+  account_plan_hot_chain:
+    purpose: "璐︽埛銆佽鍒掔儹閾惧拰璐︽埛-璁″垝椤甸潰鏁版嵁"
+    schedule_env: "DETAIL_SYNC_INTERVAL_MINUTES"
+    current_schedule_minutes: 10
+    retention_env: "ACCOUNT_PLAN_RETENTION_DAYS"
+    current_retention_days: 140
+    primary_apis:
+      - constant: "ACCOUNT_REPORT_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/get/"
+        usage: "鍗冨窛璐︽埛鎶ヨ〃"
+      - constant: "PLAN_LIST_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/list/"
+        usage: "鍏ㄥ煙璁″垝鍒楄〃鍜岃鍒掑疄鏃剁姸鎬?
+      - constant: "UNI_PROMOTION_CONFIG_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/config/get/"
+        usage: "鑷畾涔夋姤琛ㄩ厤缃?
+      - constant: "UNI_PROMOTION_DATA_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/data/get/"
+        usage: "鑷畾涔夋姤琛ㄦ暟鎹€佸叏鍩?涔樻柟琛ュ厖鎸囨爣"
+      - constant: "PLAN_DETAIL_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/detail/"
+        usage: "Creative/plan_detail锛岀‘璁よ鍒掔湡瀹炵粦瀹氱殑鏍囬銆佽棰戙€佸浘鐗囩礌鏉?
+      - constant: "PLAN_PRODUCT_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/product/get/"
+        usage: "璁″垝鍟嗗搧缁村害琛ュ厖"
+    delivery_type_display_rule:
+      - "plan_source=UNI_PROMOTION 鏃舵樉绀哄叏鍩熸姇鏀撅紝鍗充娇 plan_delivery_type=CUBIC銆?
+      - "plan_source=UNI_CUBIC 涓?plan_delivery_type=CUBIC 鏃舵樉绀轰箻鏂规姇鏀俱€?
+      - "plan_source=UNI_REPORT 涓?plan_delivery_type=CUBIC 鏃舵樉绀轰箻鏂规姇鏀俱€?
+      - "涓嶈鍙寜 plan_delivery_type=CUBIC 鍒ゆ柇涔樻柟锛屽惁鍒欏叏鍩熷崌绾х増涓婚摼浼氭樉绀哄弽銆?
+
+  material_hot_chain:
+    purpose: "绱犳潗鐑摼銆佺礌鏉愰〉鍙充晶璁″垝鏁?璐︽埛鏁般€佺礌鏉愭棩琛ㄥ拰鍏崇郴鏃ヨ〃"
+    hot_schedule_env: "MATERIAL_SYNC_INTERVAL_MINUTES"
+    current_hot_schedule_minutes: 10
+    warm_schedule_env: "MATERIAL_SYNC_WARM_INTERVAL_MINUTES"
+    current_warm_schedule_minutes: 30
+    material_status_env: "MATERIAL_PLAN_MATERIAL_STATUS"
+    required_material_status: "ALL"
+    detail_material_types_env: "DETAIL_MATERIAL_TYPES"
+    current_detail_material_types: ["VIDEO"]
+    primary_api:
+      constant: "PLAN_MATERIAL_URL"
+      endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/material/get/"
+      required_filtering:
+        material_status: "ALL"
+        video_type_for_VIDEO: "ALL"
+    ownership_source_order:
+      - "鏈鎺ュ彛琛岃嚜甯︾殑 customer_center_id銆乤dvertiser_id銆乤d_id銆?
+      - "Creative/plan_detail 杩斿洖鐨?title_material/video_material/image_material 缁戝畾鍏崇郴銆?
+      - "material_relation_edges 涓凡纭鐨勭礌鏉?璐︽埛-璁″垝杈广€?
+    forbidden_ownership_source:
+      - "鍐欏叆绱犳潗鍏崇郴銆佺礌鏉愭棩琛ㄦ垨鍘嗗彶琛ラ綈鏃讹紝涓嶅厑璁哥敤 material_profile.plan_ids_json 鍙嶆帹 ad_id銆?
+      - "material_profile.plan_ids_json 鍙兘浣滀负灞曠ず鍏煎瀛楁鎴栧厹搴曪紝涓嶆槸褰掑睘浜嬪疄鏉ユ簮銆?
+    write_models:
+      - "material_snapshots"
+      - "material_current"
+      - "material_daily"
+      - "material_relation_current"
+      - "material_relation_daily"
+      - "material_profile"
+      - "material_relation_edges"
+    relation_key:
+      - "customer_center_id"
+      - "biz_date or snapshot_time"
+      - "advertiser_id"
+      - "ad_id"
+      - "material_type"
+      - "material_key/material_id/title_signature"
+
+material_type_capture:
+  allowed_material_types: ["VIDEO", "IMAGE", "TITLE", "CAROUSEL", "LIVE_ROOM"]
+  cost_reconciliation_rule:
+    primary_cost_types: ["VIDEO", "IMAGE", "CAROUSEL", "LIVE_ROOM"]
+    excluded_from_non_title_cost: ["TITLE"]
+    threshold_yuan: 1.00
+    notes:
+      - "璁″垝娑堣€楀榻愭椂鎸夐潪 TITLE 绱犳潗姹傚拰銆俆ITLE 涓嶅弬涓?VIDEO/IMAGE 鎴愭湰琛ラ綈锛岄伩鍏嶅弻鍊嶅彔鍔犮€?
+      - "濡傛灉璁″垝鍚屾椂瀛樺湪 VIDEO + IMAGE锛屽巻鍙茶ˉ榻愬繀椤诲厑璁?IMAGE锛屽惁鍒欎細鍑虹幇灏戦噺鎴栧ぇ棰濆樊寮傘€?
+  video:
+    source_api_material_type: "VIDEO"
+    creative_detail_fields: ["video_material"]
+    row_material_type: "VIDEO"
+    capture_rule:
+      - "鐢?video_id/video_material_id/signature 浣滀负瑙嗛绱犳潗閿€?
+      - "VIDEO 鎸囨爣鍙兘鍐?VIDEO 琛岋紝涓嶅厑璁哥敤 TITLE 鏁版嵁琛?VIDEO銆?
+      - "鐑摼鐨勭礌鏉愬彸渚ц鍒掓暟銆佽处鎴锋暟鎸?relation_edges 鎴栨湰娆?ad_id/advertiser_id 缁熻銆?
+  image:
+    source_api_material_type: "IMAGE"
+    creative_detail_fields: ["image_material"]
+    row_material_type: "IMAGE"
+    capture_rule:
+      - "IMAGE 鏄潪 TITLE 鎴愭湰鍙ｅ緞鐨勪竴閮ㄥ垎锛屽巻鍙插樊寮傝鍒掗渶瑕佽ˉ銆?
+      - "IMAGE 涓嶈兘瑕嗙洊 VIDEO 琛岋紝鍙兘鍐?IMAGE 琛屻€?
+  title:
+    source_api_material_type: "TITLE"
+    creative_detail_fields: ["title_material"]
+    row_material_type: "TITLE"
+    capture_rule:
+      - "TITLE 鍙惤 TITLE 琛屻€?
+      - "TITLE 鍙敤浜庢爣棰樼礌鏉愬睍绀哄拰鏍囬缁村害鎸囨爣锛屼絾涓嶈兘濉炶繘 VIDEO銆?
+      - "鍘嗗彶琛ラ綈鏃跺鏋?TITLE 涓?VIDEO 鍚屾椂鍑虹幇锛岀姝㈡妸 TITLE 娑堣€楀彔鍔犲埌闈?TITLE 鎴愭湰銆?
+
+history_repair_policy:
+  default_scan_start_date: "2026-01-01"
+  compare_level: "customer_center_id + biz_date + ad_id"
+  acceptable_abs_diff_yuan: 1.00
+  scan_sql_intent:
+    plan_cost: "plan_daily 鎸?customer_center_id,biz_date,ad_id 姹囨€?stat_cost"
+    material_cost: "material_relation_daily 鎸夊悓閿眹鎬?UPPER(material_type) <> 'TITLE' 鐨?stat_cost"
+    diff_filter: "ABS(plan_cost - material_cost) > 1.00"
+  repair_order:
+    - "鍙壘鏈夊樊寮傜殑鏃ユ湡鍜岃鍒掞紝涓嶅叏閲忛噸鍒峰凡瀵归綈鏈堜唤銆?
+    - "瀵瑰樊寮?ad_id 璋?plan_detail/Creative 纭鐪熷疄缁戝畾銆?
+    - "瀵瑰樊寮?ad_id 璋?PLAN_MATERIAL_URL锛宮aterial_status 蹇呴』涓?ALL銆?
+    - "鎸?material_type 鍒嗘祦鍐?material_snapshots銆?
+    - "鐢ㄥ綋澶╂墍鏈夋湁鏁堝揩鐓ч噸寤?material_daily/material_relation_daily銆?
+    - "澶嶆牳璁″垝鏃ャ€佺礌鏉愭棩銆佺礌鏉愬叧绯绘棩涓夎竟宸紓銆?
+    - "鍐嶉噸寤哄彈褰卞搷 day 绱㈠紩鍜?day_prefix锛屽苟娓?Redis 缂撳瓨鐗堟湰銆?
+  do_not_do:
+    - "涓嶈鐢?DELIVERY_OK 鍋氬巻鍙茶ˉ榻愩€?
+    - "涓嶈鐢?material_profile.plan_ids_json 鍙嶆帹鍘嗗彶褰掑睘銆?
+    - "涓嶈涓轰簡鍑犲垎閽卞熬宸汉宸ユ敼 VIDEO锛岄櫎闈炵敤鎴锋槑纭姹傘€?
+    - "涓嶈鍦ㄥ簳琛ㄦ湭瀵归綈鍓嶅厛缂撳瓨閿欒绱㈠紩銆?
+
+index_and_cache_policy:
+  material_ranking:
+    retention_env: "MATERIAL_RANKING_INDEX_RETENTION_DAYS"
+    current_retention_days: 140
+    base_index: "single day material_ranking_index/day"
+    prefix_index: "material_ranking_day_prefix"
+    window_rule:
+      - "鏄ㄦ棩銆佽繎7澶┿€佽繎30澶╁悗绔簲浠?day/day_prefix 鑱氬悎鍒囩墖銆?
+      - "鍓嶇浠嶅彂鍘熸潵鐨?range锛屼笉闇€瑕佸墠绔媶鍒嗗ぇ绱㈠紩銆?
+      - "鏂拌嚜鐒舵棩鍙拷鍔犲墠涓€鏃?day 绱㈠紩锛屽苟浠庤鏃ユ洿鏂?day_prefix銆?
+      - "琛ュ巻鍙叉棩鏃讹紝浠庢渶鏃╀慨澶嶆棩鏈熷悜鍚庨噸绠?day_prefix銆?
+      - "涓嶈鍐嶆瀯寤?range_key=week/month/custom 鐨勫浐瀹氱獥鍙ｆ垚鍝佺储寮曪紱澶氭棩鏌ヨ鐢?day_prefix 浼樺厛銆乨ay_rollup 鍏滃簳銆?
+    cache_rule:
+      - "Redis 鐗堟湰蹇呴』璺?latest_index_day 鎴?day_prefix watermark 缁戝畾銆?
+      - "绱㈠紩閲嶅缓鍚庡繀椤?bump material 椤甸潰缂撳瓨鐗堟湰锛岄伩鍏嶇户缁懡涓棫缂撳瓨銆?
+  material_library:
+    required_indexes:
+      - "idx_material_profile_cc_create_time_key"
+      - "idx_material_profile_cc_updated_key"
+      - "idx_material_relation_edges_cc_material_first_seen"
+
+preflight_checks:
+  before_history_pull:
+    - "纭 .env.dashboard 涓?MATERIAL_PLAN_MATERIAL_STATUS=ALL銆?
+    - "纭鍘嗗彶鑴氭湰宸紓闃堝€间负 1.00 鍏冦€?
+    - "纭琛ラ綈鑼冨洿涓嶅寘鍚凡缁忓喕缁撲笖瀵归綈鐨勬棩鏈燂紝闄ら潪鏈鐩爣灏辨槸閲嶉獙銆?
+    - "纭涓嶄細鎶?TITLE 鍐欏叆 VIDEO銆?
+  before_deploy:
+    - "python -m py_compile dashboard/main.py dashboard/migrations.py dashboard/page_routes.py report_qianchuan.py"
+    - "docker compose --env-file .env.dashboard -f docker-compose.dashboard.image.yml config"
+    - "docker ps --format '{{.Names}} {{.Image}} {{.Status}}'"
+  after_deploy:
+    - "妫€鏌?/api/health 鎴栭〉闈㈤椤点€?
+    - "妫€鏌ョ礌鏉愯祫浜у簱 range=all 棣栧睆鎺ュ彛涓嶅啀 504銆?
+    - "妫€鏌ヨ鍒掓姇鏀剧被鍨嬶細UNI_PROMOTION+CUBIC 鏄剧ず鍏ㄥ煙鎶曟斁锛孶NI_CUBIC+CUBIC 鏄剧ず涔樻柟鎶曟斁銆?
+    - "妫€鏌ョ礌鏉愰〉鍙充晶璁″垝鏁?璐︽埛鏁版潵鑷?material_relation_edges銆?
+
+verification_sql:
+  material_plan_day_diff_non_title: |
+    WITH plan_cost AS (
+      SELECT customer_center_id, biz_date, ad_id,
+             ROUND(SUM(stat_cost)::numeric, 2) AS plan_cost
+      FROM plan_daily
+      WHERE biz_date BETWEEN :start_date AND :end_date
+      GROUP BY customer_center_id, biz_date, ad_id
+    ),
+    material_cost AS (
+      SELECT customer_center_id, biz_date, ad_id,
+             ROUND(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE'
+                            THEN stat_cost ELSE 0 END)::numeric, 2) AS material_cost
+      FROM material_relation_daily
+      WHERE biz_date BETWEEN :start_date AND :end_date
+      GROUP BY customer_center_id, biz_date, ad_id
+    )
+    SELECT p.customer_center_id, p.biz_date, p.ad_id,
+           p.plan_cost, COALESCE(m.material_cost, 0) AS material_cost,
+           ROUND((p.plan_cost - COALESCE(m.material_cost, 0))::numeric, 2) AS diff
+    FROM plan_cost p
+    LEFT JOIN material_cost m USING (customer_center_id, biz_date, ad_id)
+    WHERE ABS(p.plan_cost - COALESCE(m.material_cost, 0)) > :threshold_yuan
+    ORDER BY p.biz_date, ABS(p.plan_cost - COALESCE(m.material_cost, 0)) DESC;
+
+  material_relation_edge_counts: |
+    SELECT customer_center_id, material_key,
+           COUNT(DISTINCT advertiser_id) AS advertiser_count,
+           COUNT(DISTINCT ad_id) AS plan_count
+    FROM material_relation_edges
+    WHERE customer_center_id = :customer_center_id
+      AND material_key = :material_key
+    GROUP BY customer_center_id, material_key;
+

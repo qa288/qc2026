@@ -49,12 +49,53 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
             status_code=202,
         )
 
+    @app.post("/api/upload/jobs/prepare")
+    async def prepare_upload_job(
+        scope: str = Form("plan"),
+        query_text: str = Form(""),
+        target_plan_ids: str = Form("[]"),
+        file_count: int = Form(0),
+        user: dict[str, Any] = Depends(require_material_uploader),
+    ) -> JSONResponse:
+        try:
+            plan_ids = [int(item) for item in json.loads(str(target_plan_ids or "[]"))]
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="target_plan_ids format is invalid") from exc
+        payload = service.prepare_material_upload_job(user, scope, query_text, plan_ids, int(file_count or 0))
+        return api_response(payload, status_code=202)
+
+    @app.post("/api/upload/jobs/{job_id}/files")
+    async def upload_job_file(
+        job_id: int,
+        file: UploadFile = File(...),
+        user: dict[str, Any] = Depends(require_material_uploader),
+    ) -> JSONResponse:
+        payload = await service.receive_material_upload_job_file(user, int(job_id), file)
+        if payload.get("ready_to_queue"):
+            return api_response(
+                queue_upload_job(payload, "视频已上传到服务器，上传任务已入队。"),
+                status_code=202,
+            )
+        return api_response(payload, status_code=202)
+
     @app.post("/api/upload/jobs/{job_id}/retry")
     async def retry_upload_job(
         job_id: int,
         user: dict[str, Any] = Depends(require_material_uploader),
     ) -> JSONResponse:
         payload = service.retry_material_upload_job(user, int(job_id))
+        return api_response(
+            queue_upload_job(payload, "Retry job has been queued and is waiting for the worker."),
+            status_code=202,
+        )
+
+    @app.post("/api/upload/jobs/{job_id}/target-assets/{target_asset_id}/retry")
+    async def retry_upload_target_asset(
+        job_id: int,
+        target_asset_id: int,
+        user: dict[str, Any] = Depends(require_material_uploader),
+    ) -> JSONResponse:
+        payload = service.retry_material_upload_target_asset(user, int(job_id), int(target_asset_id))
         return api_response(
             queue_upload_job(payload, "Retry job has been queued and is waiting for the worker."),
             status_code=202,

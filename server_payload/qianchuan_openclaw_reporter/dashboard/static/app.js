@@ -131,9 +131,17 @@ const state = {
   userMatchedMaterials: {},
   uploadTargets: null,
   uploadJobs: [],
+  uploadJobsSignature: "",
+  uploadJobLastInteractionAt: 0,
+  uploadJobDeferredRenderTimer: 0,
+  uploadJobPendingItems: null,
+  uploadJobPendingSignature: "",
+  uploadJobLocalProgress: {},
   uploadSelectedPlanIds: [],
   uploadFiles: [],
   uploadRetryingJobId: null,
+  uploadRetryingFailureKey: "",
+  uploadExpandedJobIds: [],
   uploadDeletingJobId: null,
   displayScope: DISPLAY_SCOPE_ALL,
   unassignedScope: "all",
@@ -664,7 +672,7 @@ function truncateMiddle(value, head = 8, tail = 6) {
 
 function metricLabel(metric) {
   const labels = {
-    roi: "ROI",
+    roi: "支付ROI",
     stat_cost: "消耗",
     order_count: "订单数",
     pay_amount: "支付金额",
@@ -2267,6 +2275,7 @@ function uploadJobStatusLabel(status) {
   const value = String(status || "").trim().toLowerCase();
   if (value === "ok" || value === "success") return "完成";
   if (value === "running") return "进行中";
+  if (value === "receiving") return "上传视频中";
   if (value === "partial") return "部分完成";
   if (value === "failed") return "失败";
   if (value === "prepared" || value === "queued") return "待执行";
@@ -2276,7 +2285,7 @@ function uploadJobStatusLabel(status) {
 function uploadJobStatusClass(status) {
   const value = String(status || "").trim().toLowerCase();
   if (value === "ok" || value === "success") return "live";
-  if (value === "running" || value === "prepared" || value === "queued") return "paused";
+  if (value === "running" || value === "receiving" || value === "prepared" || value === "queued") return "paused";
   if (value === "partial" || value === "failed") return "system";
   return "neutral";
 }
@@ -2285,6 +2294,55 @@ function canRetryUploadJob(item) {
   const status = String(item?.status || "").trim().toLowerCase();
   if (status === "queued" || status === "running") return false;
   return Number(item?.failed_files || 0) > 0 || Number(item?.failed_targets || 0) > 0 || status === "failed" || status === "partial";
+}
+
+function uploadFailureKey(jobId, row) {
+  const targetAssetId = Number(row?.target_asset_id || 0);
+  if (targetAssetId) return `${Number(jobId || 0)}:${targetAssetId}`;
+  return `${Number(jobId || 0)}:${Number(row?.target_id || 0)}:${Number(row?.file_id || 0)}`;
+}
+
+function isUploadJobExpanded(jobId) {
+  const normalizedJobId = Number(jobId || 0);
+  return (state.uploadExpandedJobIds || []).includes(normalizedJobId);
+}
+
+function toggleUploadJobFailures(jobId) {
+  const normalizedJobId = Number(jobId || 0);
+  if (!normalizedJobId) return;
+  state.uploadJobLastInteractionAt = Date.now();
+  const expanded = new Set(state.uploadExpandedJobIds || []);
+  if (expanded.has(normalizedJobId)) {
+    expanded.delete(normalizedJobId);
+  } else {
+    expanded.add(normalizedJobId);
+  }
+  state.uploadExpandedJobIds = Array.from(expanded);
+}
+
+function uploadJobAnchorTop(jobId) {
+  if (!uploadJobTable) return null;
+  const normalizedJobId = Number(jobId || 0);
+  if (!normalizedJobId) return null;
+  const row = uploadJobTable.querySelector(`[data-upload-job-row="${normalizedJobId}"]`);
+  return row ? row.getBoundingClientRect().top : null;
+}
+
+function firstExpandedUploadJobId() {
+  return (state.uploadExpandedJobIds || []).map((jobId) => Number(jobId || 0)).find(Boolean) || 0;
+}
+
+function renderUploadJobTableStable(anchorJobId = 0) {
+  const normalizedAnchorJobId = Number(anchorJobId || 0) || firstExpandedUploadJobId();
+  const beforeTop = uploadJobAnchorTop(normalizedAnchorJobId);
+  renderUploadJobTable();
+  if (!normalizedAnchorJobId || beforeTop === null) return;
+  window.requestAnimationFrame(() => {
+    const afterTop = uploadJobAnchorTop(normalizedAnchorJobId);
+    if (afterTop === null) return;
+    const delta = afterTop - beforeTop;
+    if (Math.abs(delta) > 1) window.scrollBy(0, delta);
+  });
 }
 
 function uploadRetryButtonLabel(item) {
@@ -2303,16 +2361,116 @@ function uploadDeleteButtonLabel(item) {
 }
 
 function uploadFailureStageLabel(stage) {
-  return String(stage || "").trim().toLowerCase() === "bind" ? "????" : "????";
+  return String(stage || "").trim().toLowerCase() === "bind" ? "绑定计划" : "上传素材";
+}
+
+function uploadDetailStageLabel(stage) {
+  const value = String(stage || "").trim().toLowerCase();
+  if (value === "done") return "完成";
+  if (value === "uploading") return "上传素材中";
+  if (value === "upload_queued") return "等待上传素材";
+  if (value === "bind_queued") return "等待绑定计划";
+  if (value === "binding") return "绑定计划中";
+  if (value === "upload_failed") return "上传素材失败";
+  if (value === "bind_failed") return "绑定计划失败";
+  return value === "queued" ? "等待执行" : uploadFailureStageLabel(stage);
+}
+
+function uploadDetailStatusLabel(status) {
+  const value = String(status || "").trim().toLowerCase();
+  if (value === "success") return "完成";
+  if (value === "failed") return "失败";
+  if (value === "running") return "进行中";
+  if (value === "queued") return "等待";
+  return uploadJobStatusLabel(status);
+}
+
+function uploadProgressPercent(item) {
+  const statusText = String(item?.status || "").trim().toLowerCase();
+  if (statusText === "receiving" || statusText === "queued") {
+    const localProgress = state.uploadJobLocalProgress?.[String(item?.id || "")];
+    if (localProgress && Number.isFinite(Number(localProgress.percent))) {
+      return Math.max(0, Math.min(100, Math.round(Number(localProgress.percent))));
+    }
+  }
+  if (statusText === "receiving") {
+    const totalFiles = Number(item?.total_files || 0);
+    if (totalFiles > 0) {
+      return Math.max(0, Math.min(100, Math.round((Number(item?.uploaded_files || 0) / totalFiles) * 100)));
+    }
+  }
+  if (statusText === "queued") {
+    const totalFiles = Number(item?.total_files || 0);
+    if (totalFiles > 0 && Number(item?.uploaded_files || 0) >= totalFiles && !Number(item?.processed_targets || 0)) {
+      return 100;
+    }
+  }
+  const raw = Number(item?.progress_percent);
+  if (Number.isFinite(raw)) return Math.max(0, Math.min(100, Math.round(raw)));
+  const total = Number(item?.detail_count || item?.total_targets || 0);
+  if (!total) return statusText === "success" ? 100 : 0;
+  const completed = Number(item?.completed_detail_count || item?.processed_targets || 0);
+  return Math.max(0, Math.min(100, Math.round((completed / total) * 100)));
+}
+
+function renderUploadProgressBar(item) {
+  const percent = uploadProgressPercent(item);
+  const title = String(item?.status || "").trim().toLowerCase() === "receiving" ? "上传到服务器进度" : "上传进度";
+  return `
+    <div class="upload-progress" title="${title} ${percent}%">
+      <div class="upload-progress-fill" style="width: ${percent}%"></div>
+    </div>
+    <div class="upload-progress-label">${percent}%</div>
+  `;
+}
+
+function uploadDetailProgressPercent(row) {
+  const stage = String(row?.stage || row?.failure_stage || "").trim().toLowerCase();
+  const status = String(row?.status || "").trim().toLowerCase();
+  if (status === "success" || stage === "done") return 100;
+  if (stage === "bind_failed") return 88;
+  if (stage === "upload_failed") return 45;
+  if (stage === "binding") return 88;
+  if (stage === "bind_queued") return 72;
+  if (stage === "uploading") return 45;
+  if (stage === "upload_queued") return 12;
+  if (stage === "queued" || status === "queued") return 5;
+  if (status === "running") return 45;
+  if (status === "failed") return 45;
+  return 0;
+}
+
+function uploadDetailProgressTone(row) {
+  const status = String(row?.status || "").trim().toLowerCase();
+  if (status === "success") return "is-success";
+  if (status === "failed") return "is-failed";
+  if (status === "running") return "is-running";
+  return "";
+}
+
+function renderUploadDetailProgress(row) {
+  const percent = uploadDetailProgressPercent(row);
+  const label = uploadDetailStageLabel(row?.stage || row?.failure_stage);
+  return `
+    <div class="upload-detail-progress ${uploadDetailProgressTone(row)}" title="${escapeHtml(label)} ${percent}%">
+      <div class="upload-detail-progress-track">
+        <div class="upload-detail-progress-fill" style="width: ${percent}%"></div>
+      </div>
+      <div class="upload-detail-progress-meta">
+        <span>${escapeHtml(label)}</span>
+        <span class="mono">${percent}%</span>
+      </div>
+    </div>
+  `;
 }
 
 function formatUploadFailureItem(row) {
   const stageLabel = uploadFailureStageLabel(row?.failure_stage);
-  const advertiserLabel = String(row?.advertiser_name || "").trim() || (Number(row?.advertiser_id || 0) ? `?? ${row.advertiser_id}` : "");
-  const planLabel = String(row?.ad_name || "").trim() || (Number(row?.ad_id || 0) ? `?? ${row.ad_id}` : "");
+  const advertiserLabel = String(row?.advertiser_name || "").trim() || (Number(row?.advertiser_id || 0) ? `账户 ${row.advertiser_id}` : "");
+  const planLabel = String(row?.ad_name || "").trim() || (Number(row?.ad_id || 0) ? `计划 ${row.ad_id}` : "");
   const materialLabel = String(row?.original_name || "").trim() || "--";
   const parts = [stageLabel, advertiserLabel];
-  if (String(row?.failure_stage || "").trim().toLowerCase() === "bind" && planLabel) parts.push(planLabel);
+  if (planLabel) parts.push(planLabel);
   parts.push(materialLabel);
   const reason = normalizeUploadJobNote(row?.message);
   return reason && reason !== "--" ? `${parts.filter(Boolean).join(" / ")}: ${reason}` : parts.filter(Boolean).join(" / ");
@@ -2320,17 +2478,82 @@ function formatUploadFailureItem(row) {
 
 function renderUploadJobNote(item) {
   const base = normalizeUploadJobNote(item.note);
-  const failedItems = Array.isArray(item.failed_items) ? item.failed_items : [];
-  if (!failedItems.length) {
+  const detailItems = Array.isArray(item.detail_items) ? item.detail_items : [];
+  const failedCount = Number(item.failed_detail_count ?? item.failed_items?.length ?? 0);
+  if (!detailItems.length) {
     return escapeHtml(base);
   }
-  const previewItems = failedItems.slice(0, 5).map((row) => formatUploadFailureItem(row));
-  const extraCount = Math.max(0, failedItems.length - previewItems.length);
   return `
     <div class="cell-primary">${escapeHtml(base)}</div>
-    <div class="cell-subline"><span class="cell-subitem">???? ${formatNumber(failedItems.length)} ?</span></div>
-    ${previewItems.map((line) => `<div class="cell-subline"><span class="cell-subitem">${escapeHtml(line)}</span></div>`).join("")}
-    ${extraCount ? `<div class="cell-subline"><span class="cell-subitem">?? ${formatNumber(extraCount)} ????</span></div>` : ""}
+    <div class="cell-subline">
+      <span class="cell-subitem">明细 ${formatNumber(detailItems.length)} 条</span>
+      <span class="cell-subitem">完成 ${formatNumber(item.success_detail_count || 0)}</span>
+      <span class="cell-subitem">失败 ${formatNumber(failedCount)}</span>
+    </div>
+  `;
+}
+
+function renderUploadJobDetails(item) {
+  const detailItems = Array.isArray(item.detail_items) ? item.detail_items : [];
+  if (!detailItems.length) return "";
+  const failedCount = Number(item.failed_detail_count ?? item.failed_items?.length ?? 0);
+  return `
+    <div class="upload-failure-panel">
+      <div class="upload-failure-panel-head">
+        <div>
+          <div class="cell-primary">上传任务明细</div>
+          <div class="cell-subline"><span class="cell-subitem">每一行对应一个计划和一个视频素材，失败项可单独重试。</span></div>
+        </div>
+        <div class="upload-detail-summary">
+          <span class="status-pill live">完成 ${formatNumber(item.success_detail_count || 0)}</span>
+          <span class="status-pill system">失败 ${formatNumber(failedCount)}</span>
+          <span class="status-pill neutral">总计 ${formatNumber(detailItems.length)}</span>
+        </div>
+      </div>
+      <div class="upload-failure-list">
+        ${detailItems.map((row) => {
+          const key = uploadFailureKey(item.id, row);
+          const targetAssetId = Number(row?.target_asset_id || 0);
+          const retrying = state.uploadRetryingFailureKey === key;
+          const retryable = Boolean(row?.retryable) || String(row?.status || "").trim().toLowerCase() === "failed";
+          const retryDisabled = !retryable || !targetAssetId || retrying || Number(state.uploadDeletingJobId || 0) === Number(item.id || 0);
+          const planLabel = String(row?.ad_name || "").trim() || (Number(row?.ad_id || 0) ? `计划 ${row.ad_id}` : "--");
+          const advertiserLabel = String(row?.advertiser_name || "").trim() || (Number(row?.advertiser_id || 0) ? `账户 ${row.advertiser_id}` : "--");
+          const statusValue = String(row?.status || "").trim().toLowerCase();
+          const message = normalizeUploadJobNote(row?.message);
+          return `
+            <div class="upload-failure-card ${statusValue === "failed" ? "is-failed" : statusValue === "success" ? "is-success" : ""}">
+              <div class="upload-failure-main">
+                <div class="upload-failure-title-row">
+                  <div class="upload-failure-title">${escapeHtml(planLabel)}</div>
+                  <span class="status-pill ${uploadJobStatusClass(row?.status)}">${escapeHtml(uploadDetailStatusLabel(row?.status))}</span>
+                </div>
+                <div class="upload-failure-meta">
+                  <span>${escapeHtml(uploadDetailStageLabel(row?.stage || row?.failure_stage))}</span>
+                  <span>${escapeHtml(advertiserLabel)}</span>
+                  <span class="mono">PID ${escapeHtml(row?.ad_id || "--")}</span>
+                  <span>${escapeHtml(row?.original_name || "--")}</span>
+                </div>
+              </div>
+              ${renderUploadDetailProgress(row)}
+              <div class="upload-failure-action">
+                ${retryable ? `
+                  <button
+                    type="button"
+                    class="button ghost compact"
+                    data-action="retry-upload-target-asset"
+                    data-job-id="${escapeHtml(item.id)}"
+                    data-target-asset-id="${escapeHtml(targetAssetId)}"
+                    ${retryDisabled ? "disabled" : ""}
+                  >${retrying ? "重试中..." : "重试此计划"}</button>
+                ` : ""}
+              </div>
+              ${message && message !== "--" ? `<div class="upload-failure-reason">${escapeHtml(message)}</div>` : ""}
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
   `;
 }
 
@@ -2409,6 +2632,17 @@ function renderUploadJobTable() {
     return;
   }
   uploadJobTable.innerHTML = `
+    <colgroup>
+      <col class="upload-job-col-id" />
+      <col class="upload-job-col-status" />
+      <col class="upload-job-col-scope" />
+      <col class="upload-job-col-file-progress" />
+      <col class="upload-job-col-target-progress" />
+      <col class="upload-job-col-failure" />
+      <col class="upload-job-col-time" />
+      <col class="upload-job-col-note" />
+      <col class="upload-job-col-actions" />
+    </colgroup>
     <thead>
       <tr>
         <th>任务</th>
@@ -2423,51 +2657,118 @@ function renderUploadJobTable() {
       </tr>
     </thead>
     <tbody>
-      ${items.map((item) => `
-        <tr>
-          <td>
-            <div class="cell-primary mono">#${escapeHtml(item.id)}</div>
-            <div class="cell-subline">
-              <span class="cell-subitem">${escapeHtml(item.created_by_label || "--")}</span>
-            </div>
-          </td>
-          <td><span class="status-pill ${uploadJobStatusClass(item.status)}">${escapeHtml(uploadJobStatusLabel(item.status))}</span></td>
-          <td>
-            <div class="cell-primary">${escapeHtml(uploadScopeLabel(item.scope || "plan"))}</div>
-            <div class="cell-subline">
-              <span class="cell-subitem">${formatNumber(item.total_targets || 0)} 个计划</span>
-            </div>
-          </td>
-          <td class="mono">${formatNumber(item.success_files || item.uploaded_files || 0)} / ${formatNumber(item.total_files || 0)}</td>
-          <td class="mono">${formatNumber(item.processed_targets || 0)} / ${formatNumber(item.total_targets || 0)}</td>
-          <td>
-            <div class="cell-primary mono">${formatNumber(item.failed_files || 0)}</div>
-            <div class="cell-subline">
-              <span class="cell-subitem">计划失败 ${formatNumber(item.failed_targets || 0)}</span>
-            </div>
-          </td>
-          <td>${escapeHtml(item.created_at || "--")}</td>
-          <td>${renderUploadJobNote(item)}</td>
-          <td>
-            ${(() => {
-              const actions = [];
-              if (canRetryUploadJob(item)) {
-                actions.push(
-                  `<button type="button" class="button ghost compact" data-action="retry-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) || Number(state.uploadDeletingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadRetryButtonLabel(item))}</button>`,
-                );
-              }
-              if (canDeleteUploadJob(item)) {
-                actions.push(
-                  `<button type="button" class="button ghost danger compact" data-action="delete-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadDeletingJobId || 0) === Number(item.id || 0) || Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadDeleteButtonLabel(item))}</button>`,
-                );
-              }
-              return actions.length ? `<div class="upload-job-actions">${actions.join("")}</div>` : '<span class="cell-subitem">--</span>';
-            })()}
-          </td>
-        </tr>
-      `).join("")}
+      ${items.map((item) => {
+        const detailItems = Array.isArray(item.detail_items) ? item.detail_items : [];
+        const expanded = isUploadJobExpanded(item.id);
+        const rows = [`
+          <tr data-upload-job-row="${escapeHtml(item.id)}">
+            <td>
+              <div class="cell-primary mono">#${escapeHtml(item.id)}</div>
+              <div class="cell-subline">
+                <span class="cell-subitem">${escapeHtml(item.created_by_label || "--")}</span>
+              </div>
+            </td>
+            <td>
+              <span class="status-pill ${uploadJobStatusClass(item.status)}">${escapeHtml(uploadJobStatusLabel(item.status))}</span>
+              ${renderUploadProgressBar(item)}
+            </td>
+            <td>
+              <div class="cell-primary">${escapeHtml(uploadScopeLabel(item.scope || "plan"))}</div>
+              <div class="cell-subline">
+                <span class="cell-subitem">${formatNumber(item.total_targets || 0)} 个计划</span>
+              </div>
+            </td>
+            <td class="mono">${formatNumber(item.success_files || item.uploaded_files || 0)} / ${formatNumber(item.total_files || 0)}</td>
+            <td class="mono">${formatNumber(item.processed_targets || 0)} / ${formatNumber(item.total_targets || 0)}</td>
+            <td>
+              <div class="cell-primary mono">${formatNumber(item.failed_files || 0)}</div>
+              <div class="cell-subline">
+                <span class="cell-subitem">计划失败 ${formatNumber(item.failed_targets || 0)}</span>
+              </div>
+              <button type="button" class="button ghost compact upload-failure-toggle" data-action="toggle-upload-failures" data-job-id="${escapeHtml(item.id)}" ${detailItems.length ? "" : "disabled"}>
+                ${expanded ? "收起明细" : `查看 ${formatNumber(detailItems.length)} 条`}
+              </button>
+            </td>
+            <td>${escapeHtml(item.created_at || "--")}</td>
+            <td>${renderUploadJobNote(item)}</td>
+            <td>
+              ${(() => {
+                const actions = [];
+                if (canRetryUploadJob(item)) {
+                  actions.push(
+                    `<button type="button" class="button ghost compact" data-action="retry-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) || Number(state.uploadDeletingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadRetryButtonLabel(item))}</button>`,
+                  );
+                }
+                if (canDeleteUploadJob(item)) {
+                  actions.push(
+                    `<button type="button" class="button ghost danger compact" data-action="delete-upload-job" data-job-id="${escapeHtml(item.id)}" ${Number(state.uploadDeletingJobId || 0) === Number(item.id || 0) || Number(state.uploadRetryingJobId || 0) === Number(item.id || 0) ? "disabled" : ""}>${escapeHtml(uploadDeleteButtonLabel(item))}</button>`,
+                  );
+                }
+                return actions.length ? `<div class="upload-job-actions">${actions.join("")}</div>` : '<span class="cell-subitem">--</span>';
+              })()}
+            </td>
+          </tr>
+        `];
+        if (expanded && detailItems.length) {
+          rows.push(`
+            <tr class="upload-failure-row" data-upload-job-detail-row="${escapeHtml(item.id)}">
+              <td colspan="9">${renderUploadJobDetails(item)}</td>
+            </tr>
+          `);
+        }
+        return rows.join("");
+      }).join("")}
     </tbody>
   `;
+}
+
+function uploadJobsRenderSignature(items) {
+  return JSON.stringify((items || []).map((item) => ({
+    id: item?.id,
+    status: item?.status,
+    task_id: item?.task_id,
+    note: item?.note,
+    progress_percent: item?.progress_percent,
+    total_files: item?.total_files,
+    uploaded_files: item?.uploaded_files,
+    processed_files: item?.processed_files,
+    success_files: item?.success_files,
+    failed_files: item?.failed_files,
+    processed_targets: item?.processed_targets,
+    success_targets: item?.success_targets,
+    failed_targets: item?.failed_targets,
+    detail_items: (item?.detail_items || []).map((detail) => ({
+      target_asset_id: detail?.target_asset_id,
+      status: detail?.status,
+      stage: detail?.stage,
+      message: detail?.message,
+      video_id: detail?.video_id,
+    })),
+  })));
+}
+
+function applyUploadJobsRender(items, signature, anchorJobId = 0) {
+  state.uploadJobsSignature = signature || uploadJobsRenderSignature(items);
+  state.uploadJobs = items || [];
+  renderUploadJobTableStable(anchorJobId);
+}
+
+function deferUploadJobsRender(items, signature) {
+  state.uploadJobPendingItems = items || [];
+  state.uploadJobPendingSignature = signature || uploadJobsRenderSignature(items);
+  if (state.uploadJobDeferredRenderTimer) {
+    window.clearTimeout(state.uploadJobDeferredRenderTimer);
+  }
+  const elapsed = Date.now() - Number(state.uploadJobLastInteractionAt || 0);
+  const delay = Math.max(180, 900 - elapsed);
+  state.uploadJobDeferredRenderTimer = window.setTimeout(() => {
+    state.uploadJobDeferredRenderTimer = 0;
+    const pendingItems = state.uploadJobPendingItems || [];
+    const pendingSignature = state.uploadJobPendingSignature || uploadJobsRenderSignature(pendingItems);
+    state.uploadJobPendingItems = null;
+    state.uploadJobPendingSignature = "";
+    applyUploadJobsRender(pendingItems, pendingSignature);
+  }, delay);
 }
 
 async function fetchUploadTargets(force = false) {
@@ -2506,15 +2807,100 @@ async function fetchUploadJobs() {
     return;
   }
   const payload = await response.json();
-  state.uploadJobs = payload.items || [];
-  renderUploadJobTable();
+  const items = payload.items || [];
+  const nextSignature = uploadJobsRenderSignature(items);
+  if (nextSignature === state.uploadJobsSignature) return;
+  const hasExpandedRows = (state.uploadExpandedJobIds || []).length > 0;
+  const elapsed = Date.now() - Number(state.uploadJobLastInteractionAt || 0);
+  if (hasExpandedRows && elapsed < 900) {
+    deferUploadJobsRender(items, nextSignature);
+    return;
+  }
+  applyUploadJobsRender(items, nextSignature);
+}
+
+function setUploadJobLocalProgress(jobId, percent, message = "") {
+  const normalizedJobId = Number(jobId || 0);
+  if (!normalizedJobId) return;
+  const key = String(normalizedJobId);
+  const normalizedPercent = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  const now = Date.now();
+  const current = state.uploadJobLocalProgress?.[key];
+  if (
+    current
+    && Number(current.percent) === normalizedPercent
+    && String(current.message || "") === String(message || "")
+    && now - Number(current.updatedAt || 0) < 250
+  ) {
+    return;
+  }
+  state.uploadJobLocalProgress = {
+    ...(state.uploadJobLocalProgress || {}),
+    [key]: {
+      percent: normalizedPercent,
+      message: String(message || ""),
+      updatedAt: now,
+    },
+  };
+  renderUploadJobTableStable(normalizedJobId);
+}
+
+function clearUploadJobLocalProgress(jobId) {
+  const normalizedJobId = Number(jobId || 0);
+  if (!normalizedJobId || !state.uploadJobLocalProgress?.[String(normalizedJobId)]) return;
+  const next = { ...(state.uploadJobLocalProgress || {}) };
+  delete next[String(normalizedJobId)];
+  state.uploadJobLocalProgress = next;
+}
+
+function uploadMaterialJobFileToServer(jobId, file, fileIndex, totalFiles, totalBytes, progressState) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", file);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/upload/jobs/${encodeURIComponent(String(jobId))}/files`);
+    let lastLoaded = 0;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        lastLoaded = Number(event.loaded || 0);
+      }
+      const loadedBytes = Number(progressState.completedBytes || 0) + lastLoaded;
+      const percent = totalBytes > 0
+        ? (loadedBytes / totalBytes) * 100
+        : ((Math.max(0, fileIndex - 1) / Math.max(1, totalFiles)) * 100);
+      const label = `正在上传视频到服务器 ${fileIndex}/${totalFiles}，${Math.max(0, Math.min(100, percent)).toFixed(0)}%`;
+      setInlineFeedback(uploadJobStatus, label, "neutral");
+      setUploadJobLocalProgress(jobId, percent, label);
+    };
+    xhr.onload = () => {
+      let payload = {};
+      try {
+        payload = JSON.parse(xhr.responseText || "{}");
+      } catch (error) {
+        payload = {};
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(payload.detail || "上传视频到服务器失败"));
+        return;
+      }
+      progressState.completedBytes = Number(progressState.completedBytes || 0) + Number(file?.size || lastLoaded || 0);
+      const percent = totalBytes > 0
+        ? (Number(progressState.completedBytes || 0) / totalBytes) * 100
+        : ((fileIndex / Math.max(1, totalFiles)) * 100);
+      setUploadJobLocalProgress(jobId, percent, `已上传视频到服务器 ${fileIndex}/${totalFiles}`);
+      resolve(payload);
+    };
+    xhr.onerror = () => reject(new Error("上传视频到服务器失败"));
+    xhr.onabort = () => reject(new Error("上传视频到服务器已取消"));
+    xhr.send(form);
+  });
 }
 
 async function retryUploadJob(jobId) {
   const normalizedJobId = Number(jobId || 0);
   if (!normalizedJobId || state.uploadRetryingJobId === normalizedJobId) return;
   state.uploadRetryingJobId = normalizedJobId;
-  renderUploadJobTable();
+  renderUploadJobTableStable(normalizedJobId);
   setInlineFeedback(uploadJobStatus, `正在重试任务 #${normalizedJobId}…`, "neutral");
   try {
     const response = await fetch(`/api/upload/jobs/${encodeURIComponent(String(normalizedJobId))}/retry`, { method: "POST" });
@@ -2526,13 +2912,50 @@ async function retryUploadJob(jobId) {
     }
     setInlineFeedback(
       uploadJobStatus,
-      `已创建重试任务 #${payload.id}，来源任务 #${payload.source_job_id || normalizedJobId}。`,
+      `任务 #${payload.id || normalizedJobId} 的失败项已重新入队。`,
       "success",
     );
     await fetchUploadJobs();
   } finally {
     state.uploadRetryingJobId = null;
-    renderUploadJobTable();
+    renderUploadJobTableStable(normalizedJobId);
+  }
+}
+
+async function retryUploadTargetAsset(jobId, targetAssetId) {
+  const normalizedJobId = Number(jobId || 0);
+  const normalizedTargetAssetId = Number(targetAssetId || 0);
+  if (!normalizedJobId || !normalizedTargetAssetId) return;
+  const job = (state.uploadJobs || []).find((item) => Number(item?.id || 0) === normalizedJobId);
+  const failedItem = (Array.isArray(job?.detail_items) ? job.detail_items : Array.isArray(job?.failed_items) ? job.failed_items : []).find(
+    (item) => Number(item?.target_asset_id || 0) === normalizedTargetAssetId,
+  );
+  const retryKey = uploadFailureKey(normalizedJobId, failedItem || { target_asset_id: normalizedTargetAssetId });
+  if (state.uploadRetryingFailureKey === retryKey) return;
+  state.uploadRetryingFailureKey = retryKey;
+  renderUploadJobTableStable(normalizedJobId);
+  const planLabel = String(failedItem?.ad_name || "").trim() || `计划 ${failedItem?.ad_id || normalizedTargetAssetId}`;
+  setInlineFeedback(uploadJobStatus, `正在重试 ${planLabel}…`, "neutral");
+  try {
+    const response = await fetch(
+      `/api/upload/jobs/${encodeURIComponent(String(normalizedJobId))}/target-assets/${encodeURIComponent(String(normalizedTargetAssetId))}/retry`,
+      { method: "POST" },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(payload.detail || "重试该计划失败");
+      setInlineFeedback(uploadJobStatus, "重试该计划失败。", "warn");
+      return;
+    }
+    setInlineFeedback(
+      uploadJobStatus,
+      `已在原任务 #${payload.id || normalizedJobId} 内重新重试 ${planLabel}。`,
+      "success",
+    );
+    await fetchUploadJobs();
+  } finally {
+    state.uploadRetryingFailureKey = "";
+    renderUploadJobTableStable(normalizedJobId);
   }
 }
 
@@ -2553,7 +2976,7 @@ async function deleteUploadJob(jobId) {
     return;
   }
   state.uploadDeletingJobId = normalizedJobId;
-  renderUploadJobTable();
+  renderUploadJobTableStable(normalizedJobId);
   setInlineFeedback(
     uploadJobStatus,
     `\u6b63\u5728\u5220\u9664\u4efb\u52a1 #${normalizedJobId} \u7684\u8bb0\u5f55...`,
@@ -2568,7 +2991,8 @@ async function deleteUploadJob(jobId) {
       return;
     }
     state.uploadJobs = (state.uploadJobs || []).filter((item) => Number(item?.id || 0) !== normalizedJobId);
-    renderUploadJobTable();
+    state.uploadJobsSignature = uploadJobsRenderSignature(state.uploadJobs);
+    renderUploadJobTableStable();
     setInlineFeedback(
       uploadJobStatus,
       `\u5df2\u5220\u9664\u4efb\u52a1 #${normalizedJobId} \u7684\u8bb0\u5f55\u3002`,
@@ -2576,7 +3000,7 @@ async function deleteUploadJob(jobId) {
     );
   } finally {
     state.uploadDeletingJobId = null;
-    renderUploadJobTable();
+    renderUploadJobTableStable();
   }
 }
 
@@ -2628,7 +3052,7 @@ function renderAlertSummary(events) {
       <div class="summary-metric-row">
         <div><span>当前值</span><strong class="mono">${latestValue}</strong></div>
         <div><span>消耗</span><strong class="mono">${formatMoney(latest.stat_cost)}</strong></div>
-        <div><span>ROI</span><strong class="mono">${formatRate(latest.roi)}</strong></div>
+        <div><span>支付ROI</span><strong class="mono">${formatRate(latest.roi)}</strong></div>
         <div><span>订单</span><strong class="mono">${formatNumber(latest.order_count)}</strong></div>
       </div>
     </div>
@@ -2682,7 +3106,7 @@ function renderOverviewHero(latest) {
     ? "只看关键词命中的素材和团队表现。"
     : supervisor
       ? "只看授权范围内的账户、计划和素材。"
-      : "先看消耗、支付、订单和 ROI。";
+      : "先看消耗、支付、订单和支付ROI。";
   const pillMarkup = admin
     ? `
         <span class="system-pill ${accountTone === "danger" ? "danger" : ""}">${accountFailures ? `账户异常 ${formatNumber(accountFailures)}` : "账户查询正常"}</span>
@@ -2716,7 +3140,7 @@ function renderOverviewHero(latest) {
           <strong class="mono">${formatNumber(summary.order_count)}</strong>
         </article>
         <article class="overview-hero-metric accent">
-          <span>整体 ROI</span>
+          <span>支付ROI</span>
           <strong class="mono">${formatRate(summary.roi)}</strong>
         </article>
       </div>
@@ -3201,7 +3625,7 @@ function renderAlerts(events) {
       <div class="alert-metrics compact">
         <div><span>当前值</span><strong class="mono">${item.metric === "roi" ? formatRate(item.current_value) : item.metric === "order_count" ? formatNumber(item.current_value) : formatMoney(item.current_value)}</strong></div>
         <div><span>消耗</span><strong class="mono">${formatMoney(item.stat_cost)}</strong></div>
-        <div><span>ROI</span><strong class="mono">${formatRate(item.roi)}</strong></div>
+        <div><span>支付ROI</span><strong class="mono">${formatRate(item.roi)}</strong></div>
       </div>
       <div class="alert-footline">
         <span>支付 ${formatMoney(item.pay_amount)}</span>
@@ -3818,7 +4242,7 @@ function renderEmployeeDetail(employeeName) {
         <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
         <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
         <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
-        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
         <div class="detail-stat"><span class="label">覆盖账户</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
         <div class="detail-stat"><span class="label">关键词数</span><span class="value mono">${formatNumber(row.keyword_count)}</span></div>
         <div class="detail-stat"><span class="label">素材数</span><span class="value mono">${formatNumber(materialCount)}</span></div>
@@ -3836,7 +4260,7 @@ function renderEmployeeDetail(employeeName) {
         <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
         <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
         <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
-        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+        <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
         <div class="detail-stat"><span class="label">覆盖账户</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
         <div class="detail-stat"><span class="label">关键词数</span><span class="value mono">${formatNumber(row.keyword_count)}</span></div>
         <div class="detail-stat"><span class="label">总计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
@@ -3852,7 +4276,7 @@ function renderEmployeeDetail(employeeName) {
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
-      <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+      <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
       <div class="detail-stat"><span class="label">覆盖账户</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
       <div class="detail-stat"><span class="label">覆盖商品</span><span class="value mono">${formatNumber(row.product_count)}</span></div>
       <div class="detail-stat"><span class="label">总计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
@@ -3876,7 +4300,7 @@ function renderProductDetail(productKey) {
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}消耗</span><span class="value mono">${formatMoney(row.stat_cost)}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付</span><span class="value mono">${formatMoney(row.pay_amount)}</span></div>
       <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}订单</span><span class="value mono">${formatNumber(row.order_count)}</span></div>
-      <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
+      <div class="detail-stat"><span class="label">${escapeHtml(rangeLabel(breakdownFilter))}支付ROI</span><span class="value mono">${formatRate(row.roi)}</span></div>
       <div class="detail-stat"><span class="label">覆盖账户</span><span class="value mono">${formatNumber(row.advertiser_count)}</span></div>
       <div class="detail-stat"><span class="label">覆盖员工</span><span class="value mono">${formatNumber(row.employee_count)}</span></div>
       <div class="detail-stat"><span class="label">总计划数</span><span class="value mono">${formatNumber(row.plan_count)}</span></div>
@@ -3984,7 +4408,7 @@ function renderEmployeeTable(rows) {
           { key: "stat_cost", label: "消耗", sortable: true },
           { key: "total_pay_amount", label: "整体成交", sortable: true },
           { key: "settled_pay_amount", label: "净成交", sortable: true },
-          { key: "roi", label: "ROI", sortable: true },
+          { key: "roi", label: "支付ROI", sortable: true },
           { key: "settled_roi", label: "净ROI", sortable: true },
           { key: "order_count", label: "整体订单", sortable: true },
           { key: "settled_order_count", label: "净订单", sortable: true },
@@ -4074,7 +4498,7 @@ function renderEmployeeTable(rows) {
       { key: "stat_cost", label: "消耗", sortable: true },
       { key: "pay_amount", label: "支付", sortable: true },
       { key: "order_count", label: "订单", sortable: true },
-      { key: "roi", label: "ROI", sortable: true },
+      { key: "roi", label: "支付ROI", sortable: true },
       { key: "advertiser_count", label: "账户数", sortable: true },
       { key: "keyword_count", label: "关键词数", sortable: true },
       { key: "material_count", label: "素材数", sortable: true },
@@ -4145,7 +4569,7 @@ function renderEmployeeTable(rows) {
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "pay_amount", label: "支付", sortable: true },
         { key: "order_count", label: "订单", sortable: true },
-        { key: "roi", label: "ROI", sortable: true },
+        { key: "roi", label: "支付ROI", sortable: true },
         { key: "advertiser_count", label: "账户数", sortable: true },
         { key: "keyword_count", label: "关键词数", sortable: true },
         { key: "plan_count", label: "计划数", sortable: true },
@@ -4156,7 +4580,7 @@ function renderEmployeeTable(rows) {
         { key: "stat_cost", label: "消耗", sortable: true },
         { key: "pay_amount", label: "支付", sortable: true },
         { key: "order_count", label: "订单", sortable: true },
-        { key: "roi", label: "ROI", sortable: true },
+        { key: "roi", label: "支付ROI", sortable: true },
         { key: "advertiser_count", label: "账户数", sortable: true },
         { key: "product_count", label: "商品数", sortable: true },
         { key: "plan_count", label: "计划数", sortable: true },
@@ -4217,7 +4641,7 @@ function renderProductTable(rows) {
     { key: "stat_cost", label: "消耗", sortable: true },
     { key: "order_count", label: "订单", sortable: true },
     { key: "pay_amount", label: "支付", sortable: true },
-    { key: "roi", label: "ROI", sortable: true },
+    { key: "roi", label: "支付ROI", sortable: true },
     { key: "advertiser_count", label: "账户数", sortable: true },
     { key: "employee_count", label: "命中人数", sortable: true },
     { key: "plan_count", label: "计划数", sortable: true },
@@ -4309,8 +4733,8 @@ function renderMaterialDetail(materialKey) {
     : (libraryMode
       ? `当前素材按资产库口径展示，创建时间 ${formatDateTime(row.create_time || "")}，覆盖 ${formatNumber(row.advertiser_count)} 个账户、${formatNumber(row.plan_count)} 个计划。最近资产更新时间 ${escapeHtml(payload?.snapshot_time || "未记录")}。`
       : (materialSupportsSettledMetrics(row)
-        ? `当前素材消耗 ${formatMoney(row.stat_cost)}，整体成交 ${formatMaterialTotalPayAmount(row)}，净成交 ${formatMaterialSettledPayAmount(row)}，净成交 ROI ${formatMaterialSettledRoi(row)}。`
-        : `当前素材消耗 ${formatMoney(row.stat_cost)}，整体成交 ${formatMaterialTotalPayAmount(row)}，支付 ROI ${formatRate(row.roi)}。该素材类型暂不支持净成交口径。`));
+        ? `当前素材消耗 ${formatMoney(row.stat_cost)}，整体成交 ${formatMaterialTotalPayAmount(row)}，净成交 ${formatMaterialSettledPayAmount(row)}，净ROI ${formatMaterialSettledRoi(row)}。`
+        : `当前素材消耗 ${formatMoney(row.stat_cost)}，整体成交 ${formatMaterialTotalPayAmount(row)}，支付ROI ${formatRate(row.roi)}。该素材类型暂不支持净成交口径。`));
   materialDetail.innerHTML = `
     <div class="detail-shell-head">
       <div class="detail-shell-copy">
@@ -4349,7 +4773,7 @@ function renderMaterialDetail(materialKey) {
       ${detailHighlightCard("消耗", formatMoney(row.stat_cost), "mono")}
       ${detailHighlightCard("整体成交", formatMaterialTotalPayAmount(row), "mono")}
       ${detailHighlightCard("净成交", formatMaterialSettledPayAmount(row), "mono")}
-      ${detailHighlightCard("支付 ROI", formatRate(row.roi), "mono")}
+      ${detailHighlightCard("支付ROI", formatRate(row.roi), "mono")}
       `)}
     </div>
     <div class="detail-grid-section">
@@ -4357,7 +4781,7 @@ function renderMaterialDetail(materialKey) {
       <div class="detail-metric-grid">
         ${relationMode
           ? `
-        ${detailMetricCard("支付 ROI", formatRate(row.roi), "mono")}
+        ${detailMetricCard("支付ROI", formatRate(row.roi), "mono")}
         ${detailMetricCard("支付金额", formatMoney(row.pay_amount), "mono")}
         ${detailMetricCard("成交订单数", formatNumber(row.order_count), "mono")}
         ${detailMetricCard("整体点击率", formatPercent(row.overall_ctr), "mono")}
@@ -4374,7 +4798,7 @@ function renderMaterialDetail(materialKey) {
         ${detailMetricCard("资产更新时间", escapeHtml(payload?.snapshot_time || "-"), "compact mono")}
         `
           : `
-        ${detailMetricCard("净成交 ROI", formatMaterialSettledRoi(row), "mono")}
+        ${detailMetricCard("净ROI", formatMaterialSettledRoi(row), "mono")}
         ${detailMetricCard("支付金额", formatMoney(row.pay_amount), "mono")}
         ${detailMetricCard("成交订单数", formatNumber(row.order_count), "mono")}
         ${detailMetricCard("净成交订单数", materialSupportsSettledMetrics(row) ? formatNumber(row.settled_order_count) : "-", "mono")}
@@ -5018,7 +5442,7 @@ function relationPlanCardMarkup(item) {
       <div class="relation-card-metrics">
         ${relationMetricCardMarkup("支付", payAmount, "mono")}
         ${relationMetricCardMarkup("订单", orderCount, "mono")}
-        ${relationMetricCardMarkup("ROI", roi, "mono")}
+        ${relationMetricCardMarkup("支付ROI", roi, "mono")}
       </div>
     </article>
   `;
@@ -5657,7 +6081,7 @@ function renderPlanAssetSummaryPayload(payload) {
             </div>
             <div class="asset-item-meta">
               <span>支付 ${formatMoney(item.pay_amount)}</span>
-              <span>ROI ${formatRate(item.roi)}</span>
+              <span>支付ROI ${formatRate(item.roi)}</span>
               <span>消耗 ${formatMoney(item.stat_cost)}</span>
             </div>
           </article>
@@ -5679,7 +6103,7 @@ function renderPlanAssetSummaryPayload(payload) {
             <div class="asset-item-meta">
               <span>订单 ${formatNumber(item.order_count)}</span>
               <span>支付 ${formatMoney(item.pay_amount)}</span>
-              <span>ROI ${formatRate(item.roi)}</span>
+              <span>支付ROI ${formatRate(item.roi)}</span>
             </div>
           </article>
         `).join("") : '<div class="asset-item">当前没有同步到素材明细。</div>'}
@@ -5715,7 +6139,7 @@ async function renderPlanDetail(adId) {
   const currentRangeLabel = rangeLabel(planFilter);
   planDetailStage?.classList.remove("hidden");
   planDetail.className = "detail-panel";
-  const rangeSummary = `${currentRangeLabel}内整体支付 ROI ${formatRate(row.roi)}，整体成交 ${formatMoney(row.total_pay_amount)}，净成交 ${formatMoney(row.settled_pay_amount)}，1 小时内退款率 ${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}`;
+  const rangeSummary = `${currentRangeLabel}内支付ROI ${formatRate(row.roi)}，整体成交 ${formatMoney(row.total_pay_amount)}，净成交 ${formatMoney(row.settled_pay_amount)}，1 小时内退款率 ${Number(row.total_pay_amount || 0) > 0 ? formatPercent(row.refund_rate_1h) : "-"}`;
   planDetail.innerHTML = `
     <div class="detail-shell-head">
       <div class="detail-shell-copy">
@@ -5733,12 +6157,12 @@ async function renderPlanDetail(adId) {
       ${detailHighlightCard("消耗", formatMoney(row.stat_cost), "mono")}
       ${detailHighlightCard("整体成交金额", formatMoney(row.total_pay_amount), "mono")}
       ${detailHighlightCard("净成交金额", formatMoney(row.settled_pay_amount), "mono")}
-      ${detailHighlightCard("整体支付 ROI", formatRate(row.roi), "mono")}
+      ${detailHighlightCard("支付ROI", formatRate(row.roi), "mono")}
     </div>
     <div class="detail-grid-section">
       <div class="detail-section-title">效果拆分</div>
       <div class="detail-metric-grid">
-        ${detailMetricCard("净成交 ROI", formatRate(row.settled_roi), "mono")}
+        ${detailMetricCard("净ROI", formatRate(row.settled_roi), "mono")}
         ${detailMetricCard("支付金额", formatMoney(row.pay_amount), "mono")}
         ${detailMetricCard("整体成交订单数", formatNumber(row.order_count), "mono")}
         ${detailMetricCard("净成交订单数", formatNumber(row.settled_order_count), "mono")}
@@ -6405,7 +6829,6 @@ function isLikelyPublicVideoUrl(url) {
     const protocol = String(parsed.protocol || "").trim().toLowerCase();
     const host = String(parsed.hostname || "").trim().toLowerCase();
     if (!host) return false;
-    if (host.endsWith("cc.oceanengine.com")) return false;
     return protocol === "http:" || protocol === "https:";
   } catch {
     return false;
@@ -6611,7 +7034,8 @@ function materialPreviewMediaStageMarkup(row, options = {}) {
   const directVideoUrl = String(options.videoUrl ?? row?.video_url ?? "").trim();
   const coverUrl = String(options.coverUrl ?? row?.cover_url ?? "").trim();
   const message = String(options.message || "").trim();
-  const canDirectPlay = isLikelyPublicVideoUrl(directVideoUrl);
+  const allowBrowserVideo = Boolean(options.allowBrowserVideo);
+  const canDirectPlay = Boolean(directVideoUrl) && (allowBrowserVideo || isLikelyPublicVideoUrl(directVideoUrl));
   if (canDirectPlay) {
     return `
       <div class="preview-media-stage">
@@ -6646,9 +7070,23 @@ async function hydrateMaterialPreviewSource(row) {
     const previewMediaShell = materialPreviewBody.querySelector(".preview-media-shell");
     const previewCurvePanel = materialPreviewBody.querySelector('[data-role="preview-curve-panel"]');
     if (!previewMediaShell) return;
+    const resolvedBrowserVideoUrl = String(resolved.browser_video_url || "").trim();
+    const resolvedVideoUrl = String(resolved.video_url || "").trim();
+    const resolvedPublicVideoUrl = String(
+      resolved.public_video_url || (resolved.is_public_video_url ? resolvedVideoUrl : "") || "",
+    ).trim();
+    const resolvedBrowserCandidateUrl = String(
+      resolvedBrowserVideoUrl
+        || (resolved.video_access_mode === "browser_direct_candidate" ? resolvedVideoUrl : "")
+        || "",
+    ).trim();
+    const resolvedPlayableVideoUrl = String(
+      resolvedPublicVideoUrl || resolvedBrowserCandidateUrl || row.video_url || "",
+    ).trim();
     const mergedRow = {
       ...row,
-      video_url: String(resolved.public_video_url || resolved.video_url || row.video_url || "").trim(),
+      video_url: resolvedPlayableVideoUrl,
+      browser_video_url: resolvedBrowserCandidateUrl,
       cover_url: String(resolved.cover_url || row.cover_url || "").trim(),
       aweme_item_id: String(resolved.aweme_item_id || row.aweme_item_id || "").trim(),
     };
@@ -6657,7 +7095,8 @@ async function hydrateMaterialPreviewSource(row) {
       {
         videoUrl: mergedRow.video_url,
         coverUrl: mergedRow.cover_url,
-        message: resolved.is_public_video_url
+        allowBrowserVideo: Boolean(resolvedPublicVideoUrl || resolvedBrowserCandidateUrl),
+        message: resolved.is_public_video_url || resolvedBrowserCandidateUrl
           ? ""
           : (resolved.reason || "当前素材只返回站内预览地址，无法在本页面直连播放。"),
       },
@@ -6764,6 +7203,16 @@ function previewCurveAxisMarks(maxSecond) {
   return marks.map((ratio) => `${Math.round(maxSecond * ratio)}s`);
 }
 
+function materialPreviewCurveMetrics() {
+  return [
+    { field: "user_lose_cnt", label: "流失", className: "lose", color: "#ff855c", areaFrom: "rgba(255, 133, 92, 0.42)", areaTo: "rgba(255, 133, 92, 0.04)" },
+    { field: "click_cnt", label: "点击", className: "click", color: "#58d6b8", areaFrom: "rgba(88, 214, 184, 0.34)", areaTo: "rgba(88, 214, 184, 0.04)" },
+    { field: "dy_like", label: "点赞", className: "like", color: "#f7c84b", areaFrom: "rgba(247, 200, 75, 0.28)", areaTo: "rgba(247, 200, 75, 0.03)" },
+    { field: "dy_comment", label: "评论", className: "comment", color: "#8ec3ff", areaFrom: "rgba(142, 195, 255, 0.26)", areaTo: "rgba(142, 195, 255, 0.03)" },
+    { field: "dy_follow", label: "关注", className: "follow", color: "#ff7ab6", areaFrom: "rgba(255, 122, 182, 0.24)", areaTo: "rgba(255, 122, 182, 0.03)" },
+  ];
+}
+
 function renderMaterialPreviewCurvePanel(payload) {
   if (!payload?.supported) {
     return materialPreviewCurveEmptyMarkup("仅视频素材支持峰形图", payload?.message || "当前素材没有可查询的按秒互动分布。");
@@ -6775,25 +7224,39 @@ function renderMaterialPreviewCurvePanel(payload) {
 
   const chartWidth = 640;
   const chartHeight = 156;
-  const loseSeries = series.map((item) => ({ second: Number(item.second || 0), value: Number(item.user_lose_cnt || 0) }));
-  const clickSeries = series.map((item) => ({ second: Number(item.second || 0), value: Number(item.click_cnt || 0) }));
+  const metricDefs = materialPreviewCurveMetrics();
   const maxSecond = Math.max(...series.map((item) => Number(item.second || 0)), 1);
   const maxValue = Math.max(
-    ...series.map((item) => Math.max(Number(item.user_lose_cnt || 0), Number(item.click_cnt || 0))),
+    ...series.map((item) => Math.max(...metricDefs.map((metric) => Number(item?.[metric.field] || 0)))),
     1,
   );
   const baseline = chartHeight - 16;
-  const losePoints = previewCurvePoints(loseSeries, chartWidth, chartHeight, maxSecond, maxValue);
-  const clickPoints = previewCurvePoints(clickSeries, chartWidth, chartHeight, maxSecond, maxValue);
-  const loseLine = previewCurveLinePath(losePoints);
-  const clickLine = previewCurveLinePath(clickPoints);
-  const loseArea = previewCurveAreaPath(losePoints, baseline);
-  const clickArea = previewCurveAreaPath(clickPoints, baseline);
-  const peak = payload?.peak || {};
-  const peakSecond = Number(peak.second || 0);
-  const peakX = 8 + (maxSecond > 0 ? peakSecond / maxSecond : 0) * (chartWidth - 16);
-  const peakY = 8 + (chartHeight - 24) - (maxValue > 0 ? Number(peak.user_lose_cnt || 0) / maxValue : 0) * (chartHeight - 24);
   const gradientId = `preview-curve-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const metricShapes = metricDefs.map((metric) => {
+    const points = previewCurvePoints(
+      series.map((item) => ({ second: Number(item.second || 0), value: Number(item?.[metric.field] || 0) })),
+      chartWidth,
+      chartHeight,
+      maxSecond,
+      maxValue,
+    );
+    return {
+      ...metric,
+      points,
+      line: previewCurveLinePath(points),
+      area: previewCurveAreaPath(points, baseline),
+    };
+  });
+  const peaks = payload?.peaks && typeof payload.peaks === "object" ? payload.peaks : {};
+  const topPeak = metricDefs
+    .map((metric) => ({
+      ...metric,
+      second: Number(peaks?.[metric.field]?.second ?? payload?.peak?.second ?? 0),
+      value: Number(peaks?.[metric.field]?.value ?? payload?.peak?.[metric.field] ?? 0),
+    }))
+    .sort((left, right) => (right.value - left.value) || (left.second - right.second))[0] || metricDefs[0];
+  const peakX = 8 + (maxSecond > 0 ? topPeak.second / maxSecond : 0) * (chartWidth - 16);
+  const peakY = 8 + (chartHeight - 24) - (maxValue > 0 ? topPeak.value / maxValue : 0) * (chartHeight - 24);
   const rangeText = payload?.query_start_date && payload?.query_end_date
     ? (payload.query_start_date === payload.query_end_date
       ? payload.query_end_date
@@ -6810,30 +7273,30 @@ function renderMaterialPreviewCurvePanel(payload) {
       <span class="preview-curve-badge">T+1</span>
     </div>
     <div class="preview-curve-summary">
-      <span class="preview-curve-chip lose">流失 ${formatNumber(payload?.totals?.user_lose_cnt || 0)}</span>
-      <span class="preview-curve-chip click">点击 ${formatNumber(payload?.totals?.click_cnt || 0)}</span>
-      <span class="preview-curve-chip peak">峰值 ${formatNumber(peakSecond)}s</span>
+      ${metricDefs.map((metric) => `
+        <span class="preview-curve-chip ${metric.className}">
+          <span class="preview-curve-dot" style="background:${metric.color}"></span>
+          ${escapeHtml(metric.label)} ${formatNumber(payload?.totals?.[metric.field] || 0)}
+        </span>
+      `).join("")}
+      <span class="preview-curve-chip peak">峰值 ${escapeHtml(topPeak.label)} ${formatNumber(topPeak.second)}s</span>
     </div>
     <div class="preview-curve-stage">
       <svg class="preview-curve-svg" viewBox="0 0 ${chartWidth} ${chartHeight}" preserveAspectRatio="none" aria-hidden="true">
         <defs>
-          <linearGradient id="${gradientId}-lose" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stop-color="rgba(255, 133, 92, 0.88)"></stop>
-            <stop offset="100%" stop-color="rgba(255, 133, 92, 0.08)"></stop>
-          </linearGradient>
-          <linearGradient id="${gradientId}-click" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stop-color="rgba(88, 214, 184, 0.82)"></stop>
-            <stop offset="100%" stop-color="rgba(88, 214, 184, 0.08)"></stop>
-          </linearGradient>
+          ${metricShapes.map((metric) => `
+            <linearGradient id="${gradientId}-${metric.className}" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stop-color="${metric.areaFrom}"></stop>
+              <stop offset="100%" stop-color="${metric.areaTo}"></stop>
+            </linearGradient>
+          `).join("")}
         </defs>
         <path d="M 8 24 H ${chartWidth - 8}" class="preview-curve-grid"></path>
         <path d="M 8 ${(chartHeight - 24) / 2} H ${chartWidth - 8}" class="preview-curve-grid faint"></path>
         <path d="M 8 ${baseline} H ${chartWidth - 8}" class="preview-curve-grid"></path>
-        <path d="${loseArea}" fill="url(#${gradientId}-lose)" class="preview-curve-area lose"></path>
-        <path d="${clickArea}" fill="url(#${gradientId}-click)" class="preview-curve-area click"></path>
-        <path d="${loseLine}" class="preview-curve-line lose"></path>
-        <path d="${clickLine}" class="preview-curve-line click"></path>
-        <circle cx="${peakX.toFixed(2)}" cy="${peakY.toFixed(2)}" r="4" class="preview-curve-peak"></circle>
+        ${metricShapes.map((metric) => `<path d="${metric.area}" fill="url(#${gradientId}-${metric.className})" class="preview-curve-area ${metric.className}"></path>`).join("")}
+        ${metricShapes.map((metric) => `<path d="${metric.line}" class="preview-curve-line ${metric.className}" style="stroke:${metric.color}"></path>`).join("")}
+        <circle cx="${peakX.toFixed(2)}" cy="${peakY.toFixed(2)}" r="4" class="preview-curve-peak" style="fill:${topPeak.color}"></circle>
       </svg>
       <div class="preview-curve-axis">
         ${previewCurveAxisMarks(maxSecond).map((label) => `<span>${escapeHtml(label)}</span>`).join("")}
@@ -6909,6 +7372,7 @@ function openMaterialPreviewFromRow(row) {
   const directVideoUrl = String(row.video_url || "").trim();
   const coverUrl = String(row.cover_url || "").trim();
   const safeDirectVideoUrl = isLikelyPublicVideoUrl(directVideoUrl) ? directVideoUrl : "";
+  const safeCoverUrl = isLikelyDirectPreviewCoverUrl(coverUrl) ? coverUrl : "";
   const awemeLink = materialAwemeLink(row);
   if (materialPreviewTitle) {
     materialPreviewTitle.textContent = row.material_name || "素材预览";
@@ -8616,11 +9080,22 @@ function bindInputs() {
   });
   uploadJobTable?.addEventListener("click", async (event) => {
     const retryButton = event.target.closest('[data-action="retry-upload-job"]');
+    const retryTargetAssetButton = event.target.closest('[data-action="retry-upload-target-asset"]');
+    const toggleFailuresButton = event.target.closest('[data-action="toggle-upload-failures"]');
     const deleteButton = event.target.closest('[data-action="delete-upload-job"]');
-    const button = retryButton || deleteButton;
+    const button = retryButton || retryTargetAssetButton || toggleFailuresButton || deleteButton;
     if (!button) return;
     const jobId = Number(button.dataset.jobId || 0);
     if (!jobId) return;
+    if (toggleFailuresButton) {
+      toggleUploadJobFailures(jobId);
+      renderUploadJobTableStable(jobId);
+      return;
+    }
+    if (retryTargetAssetButton) {
+      await retryUploadTargetAsset(jobId, Number(retryTargetAssetButton.dataset.targetAssetId || 0));
+      return;
+    }
     if (retryButton) {
       await retryUploadJob(jobId);
       return;
@@ -8641,26 +9116,55 @@ function bindInputs() {
       window.alert("请先选择视频文件");
       return;
     }
+    const filesToUpload = state.uploadFiles.slice();
     const form = new FormData();
     form.set("scope", String(uploadScopeSelect?.value || "plan"));
     form.set("query_text", String(uploadKeywordInput?.value || "").trim());
     form.set("target_plan_ids", JSON.stringify(state.uploadSelectedPlanIds));
-    state.uploadFiles.forEach((file) => form.append("files", file));
+    form.set("file_count", String(filesToUpload.length));
     uploadJobSubmit.disabled = true;
     setInlineFeedback(uploadJobStatus, "正在创建上传任务…", "neutral");
+    let preparedJobId = 0;
     try {
-      const response = await fetch("/api/upload/jobs", { method: "POST", body: form });
+      const response = await fetch("/api/upload/jobs/prepare", { method: "POST", body: form });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         window.alert(payload.detail || "创建上传任务失败");
         setInlineFeedback(uploadJobStatus, "创建上传任务失败。", "error");
         return;
       }
+      preparedJobId = Number(payload.id || 0);
+      if (!preparedJobId) {
+        window.alert("创建上传任务失败");
+        setInlineFeedback(uploadJobStatus, "创建上传任务失败。", "error");
+        return;
+      }
+      setUploadJobLocalProgress(preparedJobId, 0, "任务已创建，等待上传视频到服务器");
+      setInlineFeedback(uploadJobStatus, `已创建任务 #${preparedJobId}，正在上传视频到服务器。`, "neutral");
+      await fetchUploadJobs();
+      const totalBytes = filesToUpload.reduce((sum, file) => sum + Number(file.size || 0), 0);
+      const progressState = { completedBytes: 0 };
+      for (let index = 0; index < filesToUpload.length; index += 1) {
+        await uploadMaterialJobFileToServer(
+          preparedJobId,
+          filesToUpload[index],
+          index + 1,
+          filesToUpload.length,
+          totalBytes,
+          progressState,
+        );
+        await fetchUploadJobs();
+      }
       state.uploadFiles = [];
       if (uploadFileInput) uploadFileInput.value = "";
       renderUploadFileSummary();
-      setInlineFeedback(uploadJobStatus, `已创建任务 #${payload.id}，当前为准备状态。`, "success");
+      setUploadJobLocalProgress(preparedJobId, 100, "视频已上传到服务器，后台任务已入队");
+      setInlineFeedback(uploadJobStatus, `已创建任务 #${preparedJobId}，视频已上传到服务器，后台开始执行。`, "success");
       await fetchUploadJobs();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "上传视频到服务器失败";
+      window.alert(message);
+      setInlineFeedback(uploadJobStatus, message, "error");
     } finally {
       uploadJobSubmit.disabled = false;
     }

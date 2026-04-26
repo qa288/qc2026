@@ -1,11 +1,13 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import asyncio
 import copy
 import hashlib
 import hmac
+import inspect
 import json
+import logging
 import math
 import os
 import re
@@ -51,6 +53,7 @@ from report_qianchuan import (  # noqa: E402
     PLAN_DELIVERY_METADATA_SOURCE_UNI_MAIN,
     PLAN_DELIVERY_METADATA_SOURCE_UNI_REPORT,
     PLAN_MATERIAL_TYPES,
+    PLAN_SOURCE_STANDARD,
     PLAN_SOURCE_UNI_CUBIC,
     PLAN_PRODUCT_FIELDS,
     PLAN_SOURCE_UNI_PROMOTION,
@@ -112,6 +115,8 @@ from dashboard.video_probe import (  # noqa: E402
 )
 
 
+LOGGER = logging.getLogger(__name__)
+
 APP_NAME = settings.app_name
 CONFIG_PATH = settings.config_path
 DATA_DIR = settings.data_dir
@@ -144,6 +149,8 @@ BOOTSTRAP_AUTH_OVERWRITE_EXISTING = settings.bootstrap_auth_overwrite_existing
 RANGE_CACHE_SECONDS = settings.range_cache_seconds
 LOCAL_DICT_CACHE_SOFT_LIMIT = 256
 LOCAL_DICT_CACHE_TRIM_TO = 192
+LOCAL_SECONDARY_CACHE_FRESH_CAP_SECONDS = 15
+LOCAL_SECONDARY_CACHE_STALE_CAP_SECONDS = 60
 PAYLOAD_CACHE_FRESH_SECONDS = max(int(RANGE_CACHE_SECONDS or 0), 1)
 PAYLOAD_CACHE_STALE_SECONDS = max(PAYLOAD_CACHE_FRESH_SECONDS * 3, 180)
 COMMENT_SYNC_SUCCESS_TTL_SECONDS = settings.comment_sync_success_ttl_seconds
@@ -152,7 +159,11 @@ COMMENT_SYNC_ERROR_RETRY_SECONDS = settings.comment_sync_error_retry_seconds
 BACKFILL_QUEUE_DEBOUNCE_SECONDS = settings.backfill_queue_debounce_seconds
 COMMENT_SYNC_QUEUE_DEBOUNCE_SECONDS = max(30, min(COMMENT_SYNC_SUCCESS_TTL_SECONDS, 120))
 COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS = max(
-    int(os.environ.get("COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS") or "0"),
+    int(os.environ.get("COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS") or "31"),
+    0,
+)
+COMMENT_INLINE_MATERIAL_CONTEXT_MAX_ROWS = max(
+    int(os.environ.get("COMMENT_INLINE_MATERIAL_CONTEXT_MAX_ROWS") or "2500"),
     0,
 )
 PERFORMANCE_RANGES = {"day", "yesterday", "week", "month", "custom"}
@@ -245,7 +256,23 @@ MATERIAL_REPORT_TITLE_METRICS = MATERIAL_REPORT_CORE_METRICS + [
     "total_pay_order_gmv_include_coupon_for_roi2",
     "total_cost_per_pay_order_for_roi2",
 ]
+MATERIAL_PREVIEW_SOURCE_CACHE_SECONDS = max(
+    int(str(os.environ.get("MATERIAL_PREVIEW_SOURCE_CACHE_SECONDS") or "300").strip() or "300"),
+    30,
+)
 MATERIAL_PREVIEW_REFRESH_CACHE_SECONDS = 600
+MATERIAL_PREVIEW_SOURCE_LOOKUP_ATTEMPTS = max(
+    int(str(os.environ.get("MATERIAL_PREVIEW_SOURCE_LOOKUP_ATTEMPTS") or "1").strip() or "1"),
+    1,
+)
+MATERIAL_PREVIEW_SOURCE_MAX_CANDIDATES = max(
+    int(str(os.environ.get("MATERIAL_PREVIEW_SOURCE_MAX_CANDIDATES") or "3").strip() or "3"),
+    1,
+)
+MATERIAL_PREVIEW_SOURCE_RESOLVE_TIMEOUT_SECONDS = max(
+    int(str(os.environ.get("MATERIAL_PREVIEW_SOURCE_RESOLVE_TIMEOUT_SECONDS") or "6").strip() or "6"),
+    1,
+)
 PREVIEW_VIDEO_RESOLVE_CACHE_SECONDS = 300
 LATEST_SNAPSHOT_CACHE_SECONDS = max(RANGE_CACHE_SECONDS, 300)
 LATEST_SNAPSHOT_STALE_SECONDS = max(LATEST_SNAPSHOT_CACHE_SECONDS * 3, 900)
@@ -486,6 +513,42 @@ def build_comment_cache_key(
     )
 
 
+def build_material_preview_identity_key(row: dict[str, Any] | None) -> str:
+    item = dict(row or {})
+    return "|".join(
+        [
+            str(item.get("material_key") or "").strip(),
+            str(item.get("material_id") or "").strip(),
+            str(item.get("video_id") or "").strip(),
+            str(item.get("aweme_item_id") or "").strip(),
+            str(item.get("material_type") or "").strip().upper(),
+        ]
+    )
+
+
+def build_material_preview_source_cache_key(
+    row: dict[str, Any] | None,
+    range_key: str,
+    start_date: str,
+    end_date: str,
+    snapshot_time: str,
+    allowed_advertiser_ids: set[int] | None,
+    customer_center_id: str,
+) -> str:
+    return "|".join(
+        [
+            "source",
+            build_material_preview_identity_key(row),
+            str(range_key or "").strip().lower(),
+            str(start_date or "").strip(),
+            str(end_date or "").strip(),
+            str(snapshot_time or "").strip(),
+            str(customer_center_id or "").strip(),
+            build_scope_cache_key(allowed_advertiser_ids),
+        ]
+    )
+
+
 def db_table_exists(conn: Any, table_name: str) -> bool:
     table = str(table_name or "").strip()
     if not table:
@@ -555,6 +618,7 @@ class DashboardService:
         self._performance_cache: dict[str, dict[str, Any]] = {}
         self._material_cache: dict[str, dict[str, Any]] = {}
         self._material_query_cache: dict[str, dict[str, Any]] = {}
+        self._material_preview_source_cache: dict[str, dict[str, Any]] = {}
         self._material_preview_refresh_cache: dict[str, dict[str, Any]] = {}
         self._preview_video_resolve_cache: dict[str, dict[str, Any]] = {}
         self._comment_cache: dict[str, dict[str, Any]] = {}
@@ -564,6 +628,7 @@ class DashboardService:
         self._latest_snapshot_refreshing: set[str] = set()
         self._latest_snapshot_cache_lock = threading.Lock()
         self._full_refresh_status_local: dict[str, Any] = {}
+        self._hot_sync_pause_local: dict[str, Any] = {}
         self._redis_client: Any | None = None
         self._backfill_queue_marks: dict[str, float] = {}
         self._material_page_prewarm_marks: dict[str, str] = {}
@@ -621,6 +686,50 @@ class DashboardService:
             self._current_customer_center_id,
             self._normalize_match_text,
             sanitize_material_title,
+            format_plan_status_text,
+        )
+
+    @staticmethod
+    def _assert_callable_accepts_keywords(
+        target: Any,
+        callable_name: str,
+        required_keywords: list[str],
+    ) -> None:
+        signature = inspect.signature(target)
+        parameters = signature.parameters
+        missing = [keyword for keyword in required_keywords if keyword not in parameters]
+        if missing:
+            missing_text = ", ".join(missing)
+            raise RuntimeError(
+                f"{callable_name} is missing required runtime keyword parameters: {missing_text}. "
+                "Deploy matching report_qianchuan.py and dashboard/main.py together."
+            )
+
+    def assert_runtime_client_compatibility(self) -> None:
+        self._assert_callable_accepts_keywords(
+            OceanEngineClient.__init__,
+            "OceanEngineClient.__init__",
+            ["token_resolver_callback", "token_refresh_mode"],
+        )
+        self._assert_callable_accepts_keywords(
+            OceanEngineClient.list_plan_materials,
+            "OceanEngineClient.list_plan_materials",
+            ["deadline_monotonic"],
+        )
+        self._assert_callable_accepts_keywords(
+            OceanEngineClient.list_qianchuan_videos,
+            "OceanEngineClient.list_qianchuan_videos",
+            ["deadline_monotonic"],
+        )
+        self._assert_callable_accepts_keywords(
+            OceanEngineClient.list_qianchuan_images,
+            "OceanEngineClient.list_qianchuan_images",
+            ["deadline_monotonic"],
+        )
+        self._assert_callable_accepts_keywords(
+            OceanEngineClient.list_qianchuan_carousels,
+            "OceanEngineClient.list_qianchuan_carousels",
+            ["deadline_monotonic"],
         )
 
     @property
@@ -634,6 +743,65 @@ class DashboardService:
         if self._redis_client is None:
             self._redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
         return self._redis_client
+
+    @staticmethod
+    def _hot_sync_pause_key() -> str:
+        return "dashboard:hot-sync-pause"
+
+    @staticmethod
+    def _hot_sync_pause_ttl_seconds() -> int:
+        return max(int(settings.full_refresh_lock_ttl_seconds or 3600), 21600)
+
+    def hot_syncs_paused(self) -> bool:
+        client = self._redis()
+        if client is None:
+            return bool(self._hot_sync_pause_local.get("paused"))
+        try:
+            raw = client.get(self._hot_sync_pause_key())
+        except Exception:  # noqa: BLE001
+            return bool(self._hot_sync_pause_local.get("paused"))
+        if not raw:
+            self._hot_sync_pause_local = {}
+            return False
+        try:
+            payload = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            self._hot_sync_pause_local = {"paused": True, "reason": "unknown"}
+            return True
+        if isinstance(payload, dict):
+            self._hot_sync_pause_local = dict(payload)
+            return bool(payload.get("paused"))
+        self._hot_sync_pause_local = {"paused": True, "reason": "unknown"}
+        return True
+
+    def pause_hot_syncs(self, reason: str = "") -> dict[str, Any]:
+        payload = {
+            "paused": True,
+            "reason": str(reason or "manual").strip() or "manual",
+            "updated_at": now_text(),
+        }
+        self._hot_sync_pause_local = dict(payload)
+        client = self._redis()
+        if client is not None:
+            try:
+                client.setex(
+                    self._hot_sync_pause_key(),
+                    self._hot_sync_pause_ttl_seconds(),
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return dict(payload)
+
+    def resume_hot_syncs(self) -> None:
+        self._hot_sync_pause_local = {}
+        client = self._redis()
+        if client is None:
+            return
+        try:
+            client.delete(self._hot_sync_pause_key())
+        except Exception:  # noqa: BLE001
+            pass
 
     def _shared_cache_version(self, namespace: str) -> str:
         client = self._redis()
@@ -1174,6 +1342,66 @@ class DashboardService:
         return max(time.time() - cached_at, 0.0)
 
     @staticmethod
+    def _secondary_local_cache_ttls(fresh_ttl_seconds: int, stale_ttl_seconds: int) -> tuple[int, int]:
+        local_fresh = max(min(int(fresh_ttl_seconds or 0), LOCAL_SECONDARY_CACHE_FRESH_CAP_SECONDS), 1)
+        local_stale = max(min(int(stale_ttl_seconds or 0), LOCAL_SECONDARY_CACHE_STALE_CAP_SECONDS), local_fresh)
+        return local_fresh, local_stale
+
+    @classmethod
+    def _payload_cache_freshness_signature(cls, payload: dict[str, Any] | None) -> tuple[str, str] | None:
+        if not isinstance(payload, dict):
+            return None
+        freshness = payload.get("freshness")
+        primary = ""
+        secondary = ""
+        if isinstance(freshness, dict):
+            primary = cls._normalize_datetime_text(freshness.get("data_time"))
+            secondary = cls._normalize_datetime_text(freshness.get("synced_at"))
+        if not primary:
+            for field in ("snapshot_time", "data_time"):
+                primary = cls._normalize_datetime_text(payload.get(field))
+                if primary:
+                    break
+        if not secondary:
+            for field in ("fetched_at", "updated_at", "snapshot_time", "data_time"):
+                secondary = cls._normalize_datetime_text(payload.get(field))
+                if secondary:
+                    break
+        if not primary and not secondary:
+            return None
+        return (primary or secondary, secondary or primary)
+
+    @classmethod
+    def _payload_cache_should_replace(
+        cls,
+        current_payload: dict[str, Any] | None,
+        next_payload: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(next_payload, dict):
+            return False
+        if not isinstance(current_payload, dict):
+            return True
+        current_signature = cls._payload_cache_freshness_signature(current_payload)
+        next_signature = cls._payload_cache_freshness_signature(next_payload)
+        if current_signature and not next_signature:
+            return False
+        if current_signature and next_signature:
+            return next_signature >= current_signature
+        return True
+
+    @classmethod
+    def _payload_cache_is_newer(
+        cls,
+        candidate_payload: dict[str, Any] | None,
+        baseline_payload: dict[str, Any] | None,
+    ) -> bool:
+        candidate_signature = cls._payload_cache_freshness_signature(candidate_payload)
+        baseline_signature = cls._payload_cache_freshness_signature(baseline_payload)
+        if not candidate_signature or not baseline_signature:
+            return False
+        return candidate_signature > baseline_signature
+
+    @staticmethod
     def _local_dict_cache_entry_get(
         cache_store: dict[str, dict[str, Any]],
         cache_key: str,
@@ -1249,10 +1477,54 @@ class DashboardService:
         return copy.deepcopy(payload) if isinstance(payload, dict) else None
 
     def _shared_dict_cache_set(self, namespace: str, raw_key: str, version: str, payload: dict[str, Any], ttl_seconds: int) -> None:
-        self._shared_json_cache_set(
-            self._shared_payload_cache_storage_key(namespace, raw_key, version),
+        storage_key = self._shared_payload_cache_storage_key(namespace, raw_key, version)
+        current_payload = self._shared_json_cache_get(storage_key)
+        if isinstance(current_payload, dict) and not self._payload_cache_should_replace(current_payload, payload):
+            return
+        self._shared_json_cache_set(storage_key, payload, ttl_seconds)
+
+    def _material_preview_cache_customer_center_id(self, display_scope: str) -> str:
+        if self._display_scope_uses_all_customer_centers(display_scope):
+            return "__all_customer_centers__"
+        return self._current_customer_center_id()
+
+    def _material_preview_source_cached_payload(self, cache_key: str, cache_version: str) -> dict[str, Any] | None:
+        versioned_cache_key = self._versioned_cache_key(cache_version, cache_key)
+        cached_payload = self._local_dict_cache_get(
+            self._material_preview_source_cache,
+            versioned_cache_key,
+            MATERIAL_PREVIEW_SOURCE_CACHE_SECONDS,
+        )
+        if cached_payload is None:
+            cached_payload = self._shared_dict_cache_get("material-preview-source", cache_key, cache_version)
+            if cached_payload is not None:
+                self._local_dict_cache_set(
+                    self._material_preview_source_cache,
+                    versioned_cache_key,
+                    cached_payload,
+                )
+        if not isinstance(cached_payload, dict):
+            return None
+        for field in ("public_video_url", "video_url", "cover_url", "browser_video_url"):
+            url = self._normalize_media_url(cached_payload.get(field))
+            if url and self._preview_url_needs_refresh(url, leeway_seconds=60):
+                return None
+        return cached_payload
+
+    def _store_material_preview_source_cache(
+        self,
+        cache_key: str,
+        cache_version: str,
+        payload: dict[str, Any],
+    ) -> None:
+        versioned_cache_key = self._versioned_cache_key(cache_version, cache_key)
+        self._local_dict_cache_set(self._material_preview_source_cache, versioned_cache_key, payload)
+        self._shared_dict_cache_set(
+            "material-preview-source",
+            cache_key,
+            cache_version,
             payload,
-            ttl_seconds,
+            MATERIAL_PREVIEW_SOURCE_CACHE_SECONDS,
         )
 
     def _shared_payload_cache_entry_get(
@@ -1282,11 +1554,40 @@ class DashboardService:
         *,
         cached_at: float | None = None,
     ) -> None:
-        self._shared_json_cache_set(
-            self._shared_payload_cache_storage_key(namespace, raw_key, version),
-            self._cache_entry(payload, cached_at=cached_at),
-            ttl_seconds,
-        )
+        storage_key = self._shared_payload_cache_storage_key(namespace, raw_key, version)
+        current_entry = self._shared_json_cache_get(storage_key)
+        current_payload = current_entry.get("payload") if isinstance(current_entry, dict) else None
+        if isinstance(current_payload, dict) and not self._payload_cache_should_replace(current_payload, payload):
+            return
+        self._shared_json_cache_set(storage_key, self._cache_entry(payload, cached_at=cached_at), ttl_seconds)
+
+    def _sync_local_payload_cache_from_shared(
+        self,
+        *,
+        namespace: str,
+        raw_cache_key: str,
+        cache_version: str,
+        cache_store: dict[str, dict[str, Any]],
+        cache_key: str,
+        local_stale_ttl_seconds: int,
+    ) -> dict[str, Any] | None:
+        shared_entry = self._shared_payload_cache_entry_get(namespace, raw_cache_key, cache_version)
+        if shared_entry is None:
+            return None
+        payload = self._cache_entry_payload(shared_entry)
+        if payload is None:
+            return None
+        age = self._cache_entry_age_seconds(shared_entry)
+        if age < max(int(local_stale_ttl_seconds or 0), 1):
+            self._local_dict_cache_set_entry(
+                cache_store,
+                cache_key,
+                payload,
+                cached_at=float(shared_entry.get("_cached_at", 0.0) or 0.0) or None,
+            )
+        else:
+            cache_store.pop(cache_key, None)
+        return payload
 
     @staticmethod
     def _payload_refresh_marker_key(namespace: str, cache_key: str) -> str:
@@ -1302,12 +1603,12 @@ class DashboardService:
         raw_cache_key: str,
         cache_version: str,
         stale_ttl_seconds: int,
+        local_stale_ttl_seconds: int,
         builder: Any,
     ) -> None:
         try:
             payload = builder()
             if isinstance(payload, dict):
-                self._local_dict_cache_set_entry(cache_store, cache_key, payload)
                 self._shared_payload_cache_entry_set(
                     namespace,
                     raw_cache_key,
@@ -1315,6 +1616,15 @@ class DashboardService:
                     payload,
                     stale_ttl_seconds,
                 )
+                if self._sync_local_payload_cache_from_shared(
+                    namespace=namespace,
+                    raw_cache_key=raw_cache_key,
+                    cache_version=cache_version,
+                    cache_store=cache_store,
+                    cache_key=cache_key,
+                    local_stale_ttl_seconds=local_stale_ttl_seconds,
+                ) is None:
+                    self._local_dict_cache_set_entry(cache_store, cache_key, payload)
         except Exception:
             pass
         finally:
@@ -1330,6 +1640,7 @@ class DashboardService:
         raw_cache_key: str,
         cache_version: str,
         stale_ttl_seconds: int,
+        local_stale_ttl_seconds: int,
         builder: Any,
     ) -> None:
         refresh_key = self._payload_refresh_marker_key(namespace, cache_key)
@@ -1347,6 +1658,7 @@ class DashboardService:
                 "raw_cache_key": raw_cache_key,
                 "cache_version": cache_version,
                 "stale_ttl_seconds": stale_ttl_seconds,
+                "local_stale_ttl_seconds": local_stale_ttl_seconds,
                 "builder": builder,
             },
             daemon=True,
@@ -1368,52 +1680,80 @@ class DashboardService:
     ) -> dict[str, Any]:
         fresh_ttl = max(int(fresh_ttl_seconds or 0), 1)
         stale_ttl = max(int(stale_ttl_seconds or 0), fresh_ttl)
+        local_fresh_ttl, local_stale_ttl = self._secondary_local_cache_ttls(fresh_ttl, stale_ttl)
         stale_payload: dict[str, Any] | None = None
         if not force_refresh:
-            local_entry = self._local_dict_cache_entry_get(cache_store, cache_key)
-            if local_entry is not None:
-                payload = self._cache_entry_payload(local_entry)
-                age = self._cache_entry_age_seconds(local_entry)
-                if payload is not None:
-                    stale_payload = payload
-                    if age < fresh_ttl:
-                        return payload
-                    if age < stale_ttl:
-                        self._schedule_payload_cache_refresh(
-                            namespace=namespace,
-                            cache_store=cache_store,
-                            cache_key=cache_key,
-                            raw_cache_key=raw_cache_key,
-                            cache_version=cache_version,
-                            stale_ttl_seconds=stale_ttl,
-                            builder=builder,
-                        )
-                        return payload
-                cache_store.pop(cache_key, None)
             shared_entry = self._shared_payload_cache_entry_get(namespace, raw_cache_key, cache_version)
+            shared_payload: dict[str, Any] | None = None
+            shared_age = float("inf")
             if shared_entry is not None:
                 payload = self._cache_entry_payload(shared_entry)
                 age = self._cache_entry_age_seconds(shared_entry)
-                if payload is not None:
-                    if age < stale_ttl:
+                if payload is not None and age < stale_ttl:
+                    shared_payload = payload
+                    shared_age = age
+            local_entry = self._local_dict_cache_entry_get(cache_store, cache_key)
+            local_payload: dict[str, Any] | None = None
+            local_age = float("inf")
+            if local_entry is not None:
+                payload = self._cache_entry_payload(local_entry)
+                age = self._cache_entry_age_seconds(local_entry)
+                if payload is not None and age < local_stale_ttl:
+                    local_payload = payload
+                    local_age = age
+                else:
+                    cache_store.pop(cache_key, None)
+
+            selected_source = ""
+            selected_payload: dict[str, Any] | None = None
+            selected_age = float("inf")
+            selected_fresh_ttl = fresh_ttl
+
+            if shared_payload is not None:
+                selected_source = "shared"
+                selected_payload = shared_payload
+                selected_age = shared_age
+                selected_fresh_ttl = fresh_ttl
+            if local_payload is not None and (
+                selected_payload is None or self._payload_cache_is_newer(local_payload, selected_payload)
+            ):
+                selected_source = "local"
+                selected_payload = local_payload
+                selected_age = local_age
+                selected_fresh_ttl = local_fresh_ttl
+
+            if selected_payload is not None:
+                stale_payload = selected_payload
+                if selected_source == "shared":
+                    if shared_entry is not None and selected_age < local_stale_ttl:
                         self._local_dict_cache_set_entry(
                             cache_store,
                             cache_key,
-                            payload,
+                            selected_payload,
                             cached_at=float(shared_entry.get("_cached_at", 0.0) or 0.0) or None,
                         )
-                        stale_payload = payload
-                        if age >= fresh_ttl:
-                            self._schedule_payload_cache_refresh(
-                                namespace=namespace,
-                                cache_store=cache_store,
-                                cache_key=cache_key,
-                                raw_cache_key=raw_cache_key,
-                                cache_version=cache_version,
-                                stale_ttl_seconds=stale_ttl,
-                                builder=builder,
-                            )
-                        return payload
+                else:
+                    self._shared_payload_cache_entry_set(
+                        namespace,
+                        raw_cache_key,
+                        cache_version,
+                        selected_payload,
+                        stale_ttl,
+                        cached_at=float((local_entry or {}).get("_cached_at", 0.0) or 0.0) or None,
+                    )
+                if selected_age < selected_fresh_ttl:
+                    return selected_payload
+                self._schedule_payload_cache_refresh(
+                    namespace=namespace,
+                    cache_store=cache_store,
+                    cache_key=cache_key,
+                    raw_cache_key=raw_cache_key,
+                    cache_version=cache_version,
+                    stale_ttl_seconds=stale_ttl,
+                    local_stale_ttl_seconds=local_stale_ttl,
+                    builder=builder,
+                )
+                return selected_payload
         try:
             payload = builder()
         except Exception:
@@ -1422,8 +1762,18 @@ class DashboardService:
             raise
         if isinstance(payload, dict) and payload.pop("_skip_payload_cache", False):
             return copy.deepcopy(payload)
-        self._local_dict_cache_set_entry(cache_store, cache_key, payload)
         self._shared_payload_cache_entry_set(namespace, raw_cache_key, cache_version, payload, stale_ttl)
+        shared_payload = self._sync_local_payload_cache_from_shared(
+            namespace=namespace,
+            raw_cache_key=raw_cache_key,
+            cache_version=cache_version,
+            cache_store=cache_store,
+            cache_key=cache_key,
+            local_stale_ttl_seconds=local_stale_ttl,
+        )
+        if shared_payload is not None:
+            return copy.deepcopy(shared_payload)
+        self._local_dict_cache_set_entry(cache_store, cache_key, payload)
         return copy.deepcopy(payload)
 
     def _invalidate_cache_namespaces(self, *namespaces: str) -> None:
@@ -1554,6 +1904,17 @@ class DashboardService:
             text = value.strip()
             return text or None
         return value
+
+    @classmethod
+    def _db_local_timestamp_value(cls, value: Any, tz_name: str = TIMEZONE) -> Any:
+        text = cls._normalize_datetime_text(value)
+        if not text:
+            return None
+        try:
+            parsed = datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return text
+        return parsed.replace(tzinfo=ZoneInfo(str(tz_name or TIMEZONE).strip() or TIMEZONE))
 
     def _record_history_backfill_job_locked(
         self,
@@ -3547,8 +3908,100 @@ class DashboardService:
     def _material_title_from_filename(self, filename: str) -> str:
         return self.upload_access.material_title_from_filename(filename)
 
+    @staticmethod
+    def _material_upload_library_concurrency() -> int:
+        raw_value = (
+            os.environ.get("MATERIAL_UPLOAD_LIBRARY_CONCURRENCY")
+            or os.environ.get("MATERIAL_UPLOAD_CONCURRENCY")
+            or "3"
+        )
+        try:
+            value = int(raw_value)
+        except Exception:  # noqa: BLE001
+            value = 3
+        return max(1, min(value, 4))
+
+    @staticmethod
+    def _material_upload_bind_concurrency() -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_BIND_CONCURRENCY") or "3").strip()
+        try:
+            value = int(raw_value)
+        except Exception:  # noqa: BLE001
+            value = 3
+        return max(1, min(value, 6))
+
+    @staticmethod
+    def _material_upload_max_files() -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_MAX_FILES") or "50").strip()
+        try:
+            value = int(raw_value)
+        except Exception:  # noqa: BLE001
+            value = 50
+        return max(1, min(value, 200))
+
+    @staticmethod
+    def _is_material_upload_target_limit_error(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return (
+            "添加素材数量超过上限" in normalized
+            or "素材数量超过上限" in normalized
+            or "material count exceeds limit" in lowered
+            or "material number exceeds limit" in lowered
+        )
+
+    @classmethod
+    def _material_upload_target_limit_skip_message(cls, message: Any) -> str:
+        normalized = str(message or "").strip() or "添加素材数量超过上限，请刷新后重试"
+        return f"{normalized}；已停止该计划后续素材绑定。"
+
     def _latest_plan_context_map(self, ad_ids: list[int]) -> dict[int, dict[str, Any]]:
         return self.upload_access.latest_plan_context_map(ad_ids)
+
+    def _hydrate_upload_plan_context_map(
+        self,
+        client: OceanEngineClient,
+        target_rows: list[dict[str, Any]],
+        context_map: dict[int, dict[str, Any]],
+    ) -> dict[int, dict[str, Any]]:
+        hydrated = {int(ad_id): dict(context) for ad_id, context in context_map.items()}
+        for target in target_rows:
+            ad_id = int(target.get("ad_id", 0) or 0)
+            advertiser_id = int(target.get("advertiser_id", 0) or 0)
+            if ad_id <= 0 or advertiser_id <= 0:
+                continue
+            context = hydrated.get(ad_id)
+            if not context:
+                continue
+            if self._json_object(context.get("raw_json")):
+                continue
+            try:
+                detail_response = client.get_plan_detail(advertiser_id, ad_id)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("hydrate upload plan detail failed: advertiser_id=%s ad_id=%s error=%s", advertiser_id, ad_id, exc)
+                continue
+            detail_data = detail_response.get("data") or {}
+            if not isinstance(detail_data, dict) or not detail_data:
+                continue
+            context["raw_json"] = json.dumps(detail_data, ensure_ascii=False)
+            for key in ("marketing_goal", "plan_source", "status", "opt_status", "ad_name"):
+                if not self._first_text(context.get(key)):
+                    value = self._first_text(detail_data.get(key))
+                    if value:
+                        context[key] = value
+            if not self._first_text(context.get("product_id")):
+                creative_list = detail_data.get("multi_product_creative_list")
+                if isinstance(creative_list, list):
+                    for item in creative_list:
+                        if not isinstance(item, dict):
+                            continue
+                        product_id = self._first_text(item.get("product_id"))
+                        if product_id:
+                            context["product_id"] = product_id
+                            break
+        return hydrated
 
     def _latest_reporting_plan_context_map(
         self,
@@ -3758,6 +4211,27 @@ class DashboardService:
     def list_material_upload_jobs(self, user: dict[str, Any]) -> list[dict[str, Any]]:
         return self.upload_access.list_material_upload_jobs(user)
 
+    def _material_upload_targets_for_request(
+        self,
+        user: dict[str, Any],
+        scope: str,
+        query: str,
+        target_plan_ids: list[int],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        normalized_scope = "account" if str(scope or "").strip() == "account" else "plan"
+        normalized_target_ids = sorted({int(item) for item in target_plan_ids if int(item or 0) > 0})
+        if not normalized_target_ids:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少选择一个计划")
+        visible = self._visible_upload_targets(user, normalized_scope, query)
+        visible_plan_map = {int(item["ad_id"]): item for item in visible.get("plans", [])}
+        target_plans = [visible_plan_map[item] for item in normalized_target_ids if item in visible_plan_map]
+        if not target_plans:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="所选计划不在当前可用范围内")
+        return normalized_scope, target_plans
+
     def _material_upload_job_row_for_user_locked(
         self,
         conn: Any,
@@ -3802,7 +4276,10 @@ class DashboardService:
             source_path = Path(str(source.get("source_path") or ""))
             if not source_path.exists():
                 raise FileNotFoundError(f"source file missing: {source_path}")
-            shutil.copy2(source_path, destination)
+            if bool(source.get("move_source")):
+                shutil.move(str(source_path), str(destination))
+            else:
+                shutil.copy2(source_path, destination)
             file_size = int(source.get("file_size") or 0) or int(destination.stat().st_size)
             file_sha256 = str(source.get("file_sha256") or "")
             file_md5 = str(source.get("file_md5") or "")
@@ -3944,20 +4421,14 @@ class DashboardService:
                 pair_rows.append((job_id, target_id, file_id, "queued", "", now, now))
             if not pair_rows:
                 raise RuntimeError("material upload retry mapping is empty")
-        else:
-            pair_rows = [
-                (job_id, int(target_row["id"]), int(file_row["id"]), "queued", "", now, now)
-                for target_row in inserted_target_rows
-                for file_row in inserted_file_rows
-            ]
-        conn.executemany(
-            """
-            INSERT INTO material_upload_job_target_assets (
-                job_id, target_id, file_id, status, message, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            pair_rows,
-        )
+            conn.executemany(
+                """
+                INSERT INTO material_upload_job_target_assets (
+                    job_id, target_id, file_id, status, message, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                pair_rows,
+            )
         return {
             "id": job_id,
             "status": "queued",
@@ -3967,6 +4438,112 @@ class DashboardService:
             "total_targets": len(target_plans),
             "note": str(note or "上传任务已创建，等待后台执行。"),
             "created_at": now,
+        }
+
+    def _reset_material_upload_target_assets_for_retry_locked(
+        self,
+        conn: Any,
+        job: dict[str, Any],
+        target_asset_ids: list[int],
+        note: str,
+    ) -> dict[str, Any]:
+        job_id = int(job.get("id", 0) or 0)
+        normalized_ids = sorted({int(item) for item in target_asset_ids if int(item or 0) > 0})
+        if not job_id or not normalized_ids:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
+        placeholders = ",".join("?" for _ in normalized_ids)
+        retry_rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT
+                    ta.id AS target_asset_id,
+                    ta.target_id,
+                    ta.file_id,
+                    ta.status,
+                    t.advertiser_id,
+                    t.advertiser_name
+                FROM material_upload_job_target_assets ta
+                JOIN material_upload_job_targets t ON t.id = ta.target_id
+                WHERE ta.job_id = ?
+                  AND ta.id IN ({placeholders})
+                ORDER BY ta.id ASC
+                """,
+                [job_id, *normalized_ids],
+            ).fetchall()
+        ]
+        failed_rows = [row for row in retry_rows if str(row.get("status") or "").strip().lower() == "failed"]
+        if not failed_rows:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
+        now = now_text()
+        for row in failed_rows:
+            target_asset_id = int(row.get("target_asset_id", 0) or 0)
+            target_id = int(row.get("target_id", 0) or 0)
+            file_id = int(row.get("file_id", 0) or 0)
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            advertiser_name = str(row.get("advertiser_name") or "")
+            conn.execute(
+                """
+                UPDATE material_upload_job_target_assets
+                SET status = 'queued', message = ?, updated_at = ?
+                WHERE id = ? AND job_id = ?
+                """,
+                ("等待重试。", now, target_asset_id, job_id),
+            )
+            conn.execute(
+                """
+                UPDATE material_upload_job_targets
+                SET status = 'queued', message = ?, updated_at = ?
+                WHERE id = ? AND job_id = ?
+                """,
+                ("等待重试。", now, target_id, job_id),
+            )
+            conn.execute(
+                """
+                UPDATE material_upload_job_files
+                SET status = 'queued', message = ?, updated_at = ?
+                WHERE id = ? AND job_id = ?
+                """,
+                ("等待重试。", now, file_id, job_id),
+            )
+            existing_file_asset = conn.execute(
+                """
+                SELECT id
+                FROM material_upload_job_file_assets
+                WHERE job_id = ? AND file_id = ? AND advertiser_id = ?
+                LIMIT 1
+                """,
+                (job_id, file_id, advertiser_id),
+            ).fetchone()
+            if existing_file_asset:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_file_assets
+                    SET advertiser_name = ?, status = 'queued', message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (advertiser_name, "等待重试。", now, int(existing_file_asset["id"])),
+                )
+        self._recompute_material_upload_job_locked(conn, job_id)
+        self._update_material_upload_job(
+            conn,
+            job_id,
+            status="queued",
+            note=str(note or "失败项已重新入队，等待后台执行。"),
+            completed_at="",
+            updated_at=now,
+        )
+        return {
+            "id": job_id,
+            "status": "queued",
+            "scope": str(job.get("scope") or "plan"),
+            "query_text": str(job.get("query_text") or ""),
+            "total_files": int(job.get("total_files", 0) or 0),
+            "total_targets": int(job.get("total_targets", 0) or 0),
+            "note": str(note or "失败项已重新入队，等待后台执行。"),
+            "created_at": str(job.get("created_at") or ""),
+            "retry_target_asset_count": len(failed_rows),
+            "same_job_retry": True,
         }
 
     def retry_material_upload_job(self, user: dict[str, Any], job_id: int) -> dict[str, Any]:
@@ -3981,141 +4558,90 @@ class DashboardService:
             status_text = str(job.get("status") or "").strip().lower()
             if status_text in {"queued", "running"}:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务仍在执行中，暂时不能重试")
-            file_rows = [
+            retry_pair_rows = [
                 dict(row)
                 for row in conn.execute(
                     """
-                    SELECT *
-                    FROM material_upload_job_files
-                    WHERE job_id = ?
+                    SELECT id
+                    FROM material_upload_job_target_assets
+                    WHERE job_id = ? AND status = 'failed'
                     ORDER BY id ASC
                     """,
                     (int(job_id),),
                 ).fetchall()
             ]
-            target_rows = [
-                dict(row)
-                for row in conn.execute(
-                    """
-                    SELECT *
-                    FROM material_upload_job_targets
-                    WHERE job_id = ?
-                    ORDER BY advertiser_id ASC, ad_id ASC
-                    """,
-                    (int(job_id),),
-                ).fetchall()
-            ]
-            retry_pair_rows = [
-                dict(row)
-                for row in conn.execute(
-                    """
-                    SELECT target_id, file_id
-                    FROM material_upload_job_target_assets
-                    WHERE job_id = ? AND status = 'failed'
-                    ORDER BY target_id ASC, file_id ASC
-                    """,
-                    (int(job_id),),
-                ).fetchall()
-            ]
-            file_map = {int(row["id"]): row for row in file_rows}
-            target_map = {int(row["id"]): row for row in target_rows}
-            target_file_pairs: list[dict[str, int]] | None = None
-            if retry_pair_rows:
-                target_file_pairs = [
-                    {
-                        "source_target_id": int(row["target_id"]),
-                        "source_file_id": int(row["file_id"]),
-                    }
-                    for row in retry_pair_rows
-                ]
-                retry_target_rows = [
-                    target_map[target_id]
-                    for target_id in dict.fromkeys(int(row["target_id"]) for row in retry_pair_rows)
-                    if target_id in target_map
-                ]
-                retry_file_rows = [
-                    file_map[file_id]
-                    for file_id in dict.fromkeys(int(row["file_id"]) for row in retry_pair_rows)
-                    if file_id in file_map
-                ]
-            else:
-                retry_file_rows = [
-                    row for row in file_rows if str(row.get("status") or "").strip().lower() in {"failed", "partial"}
-                ]
-                retry_target_rows = [
-                    row for row in target_rows if str(row.get("status") or "").strip().lower() in {"failed", "partial"}
-                ]
-                if not retry_file_rows and int(job.get("failed_targets", 0) or 0) > 0:
-                    retry_file_rows = list(file_rows)
-                if not retry_target_rows and (
-                    int(job.get("failed_files", 0) or 0) > 0
-                    or int(job.get("failed_targets", 0) or 0) > 0
-                    or status_text in {"failed", "partial"}
-                ):
-                    retry_target_rows = list(target_rows)
-            if not retry_file_rows or not retry_target_rows:
+            retry_ids = [int(row["id"]) for row in retry_pair_rows]
+            if not retry_ids:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
-            file_sources: list[dict[str, Any]] = []
-            missing_files = 0
-            available_file_ids: set[int] = set()
-            for row in retry_file_rows:
-                source_path = UPLOAD_DIR / str(row.get("relative_path") or "")
-                if not source_path.exists():
-                    missing_files += 1
-                    continue
-                source_file_id = int(row.get("id", 0) or 0)
-                if source_file_id > 0:
-                    available_file_ids.add(source_file_id)
-                file_sources.append(
-                    {
-                        "original_name": str(row.get("original_name") or ""),
-                        "mime_type": str(row.get("mime_type") or ""),
-                        "source_path": source_path,
-                        "file_size": int(row.get("file_size", 0) or 0),
-                        "file_sha256": str(row.get("file_sha256") or ""),
-                        "file_md5": str(row.get("file_md5") or ""),
-                        "_source_file_id": source_file_id,
-                    }
-                )
-            if not file_sources:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="失败文件已丢失，无法重试")
-            if target_file_pairs is not None:
-                target_file_pairs = [
-                    pair for pair in target_file_pairs if int(pair["source_file_id"]) in available_file_ids
-                ]
-                if not target_file_pairs:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="失败文件已丢失，无法重试")
-                allowed_target_ids = {int(pair["source_target_id"]) for pair in target_file_pairs}
-                retry_target_rows = [
-                    row for row in retry_target_rows if int(row.get("id", 0) or 0) in allowed_target_ids
-                ]
-            retry_note = f"重试任务来自 #{int(job_id)}，等待后台执行。"
-            if missing_files > 0:
-                retry_note = f"{retry_note} 已跳过 {missing_files} 个缺失文件。"
-            payload = self._create_material_upload_job_locked(
+            payload = self._reset_material_upload_target_assets_for_retry_locked(
                 conn,
-                int(user.get("id", 0) or 0),
-                str(job.get("scope") or "plan"),
-                str(job.get("query_text") or ""),
-                [
-                    {
-                        "advertiser_id": int(item.get("advertiser_id", 0) or 0),
-                        "advertiser_name": str(item.get("advertiser_name") or ""),
-                        "ad_id": int(item.get("ad_id", 0) or 0),
-                        "ad_name": str(item.get("ad_name") or ""),
-                        "_source_target_id": int(item.get("id", 0) or 0),
-                    }
-                    for item in retry_target_rows
-                ],
-                file_sources,
-                retry_note,
-                target_file_pairs=target_file_pairs,
+                job,
+                retry_ids,
+                f"任务 #{int(job_id)} 的失败项已重新入队，等待后台执行。",
             )
         payload["source_job_id"] = int(job_id)
-        payload["retry_file_count"] = len(file_sources)
-        payload["retry_target_count"] = len(retry_target_rows)
-        if missing_files > 0:
-            payload["skipped_missing_files"] = missing_files
+        return payload
+
+    def retry_material_upload_target_asset(
+        self,
+        user: dict[str, Any],
+        job_id: int,
+        target_asset_id: int,
+    ) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        with self.db() as conn:
+            job = self._material_upload_job_row_for_user_locked(conn, user, int(job_id))
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="上传任务不存在")
+            job = dict(job)
+            status_text = str(job.get("status") or "").strip().lower()
+            if status_text in {"queued", "running"}:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务仍在执行中，暂时不能重试")
+            failure = conn.execute(
+                """
+                SELECT
+                    ta.id AS target_asset_id,
+                    ta.target_id,
+                    ta.file_id,
+                    ta.status AS target_asset_status,
+                    ta.message AS target_asset_message,
+                    f.original_name,
+                    f.relative_path,
+                    f.file_size,
+                    f.mime_type,
+                    f.file_sha256,
+                    f.file_md5,
+                    t.advertiser_id,
+                    t.advertiser_name,
+                    t.ad_id,
+                    t.ad_name
+                FROM material_upload_job_target_assets ta
+                JOIN material_upload_job_files f ON f.id = ta.file_id
+                JOIN material_upload_job_targets t ON t.id = ta.target_id
+                WHERE ta.job_id = ? AND ta.id = ?
+                LIMIT 1
+                """,
+                (int(job_id), int(target_asset_id)),
+            ).fetchone()
+            if not failure:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="失败明细不存在")
+            failure = dict(failure)
+            if str(failure.get("target_asset_status") or "").strip().lower() != "failed":
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该明细当前不是失败状态，无需重试")
+            source_path = UPLOAD_DIR / str(failure.get("relative_path") or "")
+            if not source_path.exists():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="失败文件已丢失，无法重试")
+            plan_label = str(failure.get("ad_name") or failure.get("ad_id") or "").strip()
+            payload = self._reset_material_upload_target_assets_for_retry_locked(
+                conn,
+                job,
+                [int(target_asset_id)],
+                f"计划 {plan_label} 已在原任务 #{int(job_id)} 内重新入队，等待后台执行。",
+            )
+        payload["source_job_id"] = int(job_id)
+        payload["retry_target_asset_id"] = int(target_asset_id)
         return payload
 
     def delete_material_upload_job(self, user: dict[str, Any], job_id: int) -> dict[str, Any]:
@@ -4247,6 +4773,46 @@ class DashboardService:
                     for item in (payload.get("plans") or [])
                 ],
             )
+            window_start = str(payload.get("window_start") or "").strip()
+            window_end = str(payload.get("window_end") or "").strip()
+            if len(window_start) >= 10 and len(window_end) >= 10 and window_start[:10] == window_end[:10]:
+                self.performance_access.upsert_daily_read_models(
+                    conn,
+                    [
+                        {
+                            "customer_center_id": customer_center_id,
+                            "snapshot_time": snapshot_time,
+                            "window_start": window_start,
+                            "window_end": window_end,
+                            "account_count": int((payload.get("summary") or {}).get("account_count", 0) or 0),
+                            "active_account_count": int((payload.get("summary") or {}).get("active_account_count", 0) or 0),
+                            "plan_count": int((payload.get("summary") or {}).get("plan_count", 0) or 0),
+                            "active_plan_count": int((payload.get("summary") or {}).get("active_plan_count", 0) or 0),
+                            "stat_cost": float((payload.get("summary") or {}).get("stat_cost", 0.0) or 0.0),
+                            "pay_amount": float((payload.get("summary") or {}).get("pay_amount", 0.0) or 0.0),
+                            "order_count": int((payload.get("summary") or {}).get("order_count", 0) or 0),
+                            "roi": float((payload.get("summary") or {}).get("roi", 0.0) or 0.0),
+                            "account_failures": int((payload.get("summary") or {}).get("account_failures", 0) or 0),
+                            "plan_failures": int((payload.get("summary") or {}).get("plan_failures", 0) or 0),
+                        }
+                    ],
+                    [
+                        {
+                            "customer_center_id": customer_center_id,
+                            "snapshot_time": snapshot_time,
+                            **dict(item),
+                        }
+                        for item in payload.get("accounts", [])
+                    ],
+                    [
+                        {
+                            "customer_center_id": customer_center_id,
+                            "snapshot_time": snapshot_time,
+                            **dict(item),
+                        }
+                        for item in payload.get("plans", [])
+                    ],
+                )
             self.performance_access.upsert_current_read_models(
                 conn,
                 self._summary_current_row_from_payload(customer_center_id, payload),
@@ -4431,8 +4997,14 @@ class DashboardService:
         start_dt: datetime,
         end_dt: datetime,
         prefer_daily: bool = False,
+        section: str = "all",
     ) -> dict[str, Any]:
-        return self.performance_access.performance_snapshot_from_db(start_dt, end_dt, prefer_daily=prefer_daily)
+        return self.performance_access.performance_snapshot_from_db(
+            start_dt,
+            end_dt,
+            prefer_daily=prefer_daily,
+            section=section,
+        )
 
     def _build_cross_customer_center_performance_payload(
         self,
@@ -4447,7 +5019,9 @@ class DashboardService:
         account_balance_items: list[dict[str, Any]],
         shared_wallet_items: list[dict[str, Any]],
         wallet_relation_items: list[dict[str, Any]],
+        section: str = "all",
     ) -> dict[str, Any]:
+        normalized_section = self.performance_access.normalize_performance_section(section)
         payload = self.performance_access._build_performance_snapshot_payload(
             start_dt,
             end_dt,
@@ -4458,6 +5032,7 @@ class DashboardService:
             account_balance_items=account_balance_items,
             shared_wallet_items=shared_wallet_items,
             wallet_relation_items=wallet_relation_items,
+            decorate_plans=self.performance_access.performance_section_should_decorate_plans(normalized_section),
         )
         payload["customer_center_count"] = customer_center_count
         return payload
@@ -4467,7 +5042,10 @@ class DashboardService:
         conn: Any,
         start_dt: datetime,
         end_dt: datetime,
+        *,
+        section: str = "all",
     ) -> dict[str, Any]:
+        normalized_section = self.performance_access.normalize_performance_section(section)
         summary_rows = [
             dict(row)
             for row in conn.execute(
@@ -4495,8 +5073,8 @@ class DashboardService:
         plan_rows = [
             dict(row)
             for row in conn.execute(
-                """
-                SELECT *
+                f"""
+                SELECT {self.performance_access.plan_select_columns(section=normalized_section)}
                 FROM plan_current
                 WHERE COALESCE(customer_center_id, '') <> ''
                 ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
@@ -4508,51 +5086,56 @@ class DashboardService:
         latest_pairs = self._latest_snapshot_pairs_by_customer_center(selected_pairs)
         latest_snapshot_times = sorted({snapshot_time for _customer_center_id, snapshot_time in latest_pairs})
         latest_placeholders = ",".join("?" for _ in latest_snapshot_times)
-        account_balance_items = self._filter_rows_for_snapshot_pairs(
-            [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT *
-                    FROM account_balances
-                    WHERE snapshot_time IN ({latest_placeholders})
-                    ORDER BY snapshot_time DESC, advertiser_id ASC
-                    """,
-                    latest_snapshot_times,
-                ).fetchall()
-            ],
-            latest_pairs,
-        ) if latest_snapshot_times else []
-        shared_wallet_items = self._filter_rows_for_snapshot_pairs(
-            [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT *
-                    FROM shared_wallets
-                    WHERE snapshot_time IN ({latest_placeholders})
-                    ORDER BY snapshot_time DESC, main_wallet_id ASC
-                    """,
-                    latest_snapshot_times,
-                ).fetchall()
-            ],
-            latest_pairs,
-        ) if latest_snapshot_times else []
-        wallet_relation_items = self._filter_rows_for_snapshot_pairs(
-            [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT *
-                    FROM shared_wallet_account_relations
-                    WHERE snapshot_time IN ({latest_placeholders})
-                    ORDER BY snapshot_time DESC, main_wallet_id ASC, advertiser_id ASC
-                    """,
-                    latest_snapshot_times,
-                ).fetchall()
-            ],
-            latest_pairs,
-        ) if latest_snapshot_times else []
+        if self.performance_access.performance_section_needs_balance_details(normalized_section) and latest_snapshot_times:
+            account_balance_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM account_balances
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            shared_wallet_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallets
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            wallet_relation_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallet_account_relations
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+        else:
+            account_balance_items = []
+            shared_wallet_items = []
+            wallet_relation_items = []
         return self._build_cross_customer_center_performance_payload(
             start_dt,
             end_dt,
@@ -4564,6 +5147,7 @@ class DashboardService:
             account_balance_items=account_balance_items,
             shared_wallet_items=shared_wallet_items,
             wallet_relation_items=wallet_relation_items,
+            section=normalized_section,
         )
 
     def _performance_snapshot_from_daily_and_current_all_customer_centers_locked(
@@ -4571,7 +5155,10 @@ class DashboardService:
         conn: Any,
         start_dt: datetime,
         end_dt: datetime,
+        *,
+        section: str = "all",
     ) -> dict[str, Any]:
+        normalized_section = self.performance_access.normalize_performance_section(section)
         today_key = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
         daily_summaries = [
             dict(row)
@@ -4656,8 +5243,8 @@ class DashboardService:
         plan_rows = [
             dict(row)
             for row in conn.execute(
-                """
-                SELECT *
+                f"""
+                SELECT {self.performance_access.plan_select_columns(section=normalized_section, include_biz_date=True)}
                 FROM plan_daily
                 WHERE biz_date >= ?
                   AND biz_date < ?
@@ -4683,8 +5270,8 @@ class DashboardService:
             [
                 dict(row)
                 for row in conn.execute(
-                    """
-                    SELECT *
+                    f"""
+                    SELECT {self.performance_access.plan_select_columns(section=normalized_section)}
                     FROM plan_current
                     WHERE COALESCE(customer_center_id, '') <> ''
                     ORDER BY snapshot_time DESC, order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
@@ -4697,51 +5284,56 @@ class DashboardService:
         latest_pairs = self._latest_snapshot_pairs_by_customer_center(current_pairs)
         latest_snapshot_times = sorted({snapshot_time for _customer_center_id, snapshot_time in latest_pairs})
         latest_placeholders = ",".join("?" for _ in latest_snapshot_times)
-        account_balance_items = self._filter_rows_for_snapshot_pairs(
-            [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT *
-                    FROM account_balances
-                    WHERE snapshot_time IN ({latest_placeholders})
-                    ORDER BY snapshot_time DESC, advertiser_id ASC
-                    """,
-                    latest_snapshot_times,
-                ).fetchall()
-            ],
-            latest_pairs,
-        ) if latest_snapshot_times else []
-        shared_wallet_items = self._filter_rows_for_snapshot_pairs(
-            [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT *
-                    FROM shared_wallets
-                    WHERE snapshot_time IN ({latest_placeholders})
-                    ORDER BY snapshot_time DESC, main_wallet_id ASC
-                    """,
-                    latest_snapshot_times,
-                ).fetchall()
-            ],
-            latest_pairs,
-        ) if latest_snapshot_times else []
-        wallet_relation_items = self._filter_rows_for_snapshot_pairs(
-            [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT *
-                    FROM shared_wallet_account_relations
-                    WHERE snapshot_time IN ({latest_placeholders})
-                    ORDER BY snapshot_time DESC, main_wallet_id ASC, advertiser_id ASC
-                    """,
-                    latest_snapshot_times,
-                ).fetchall()
-            ],
-            latest_pairs,
-        ) if latest_snapshot_times else []
+        if self.performance_access.performance_section_needs_balance_details(normalized_section) and latest_snapshot_times:
+            account_balance_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM account_balances
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            shared_wallet_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallets
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            wallet_relation_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallet_account_relations
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+        else:
+            account_balance_items = []
+            shared_wallet_items = []
+            wallet_relation_items = []
         return self._build_cross_customer_center_performance_payload(
             start_dt,
             end_dt,
@@ -4755,6 +5347,7 @@ class DashboardService:
             account_balance_items=account_balance_items,
             shared_wallet_items=shared_wallet_items,
             wallet_relation_items=wallet_relation_items,
+            section=normalized_section,
         )
 
     def _performance_snapshot_from_daily_all_customer_centers_locked(
@@ -4763,7 +5356,10 @@ class DashboardService:
         start_dt: datetime,
         end_dt: datetime,
         snapshots: list[dict[str, Any]],
+        *,
+        section: str = "all",
     ) -> dict[str, Any]:
+        normalized_section = self.performance_access.normalize_performance_section(section)
         selected_day_snapshots = {
             (
                 str(row.get("customer_center_id") or "").strip(),
@@ -4804,8 +5400,8 @@ class DashboardService:
         plan_rows = [
             dict(row)
             for row in conn.execute(
-                """
-                SELECT *
+                f"""
+                SELECT {self.performance_access.plan_select_columns(section=normalized_section, include_biz_date=True)}
                 FROM plan_daily
                 WHERE biz_date >= ?
                   AND biz_date <= ?
@@ -4847,51 +5443,56 @@ class DashboardService:
         }
         latest_snapshot_times = sorted({snapshot_time for _customer_center_id, snapshot_time in latest_pairs})
         latest_placeholders = ",".join("?" for _ in latest_snapshot_times)
-        account_balance_items = self._filter_rows_for_snapshot_pairs(
-            [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT *
-                    FROM account_balances
-                    WHERE snapshot_time IN ({latest_placeholders})
-                    ORDER BY snapshot_time DESC, advertiser_id ASC
-                    """,
-                    latest_snapshot_times,
-                ).fetchall()
-            ],
-            latest_pairs,
-        )
-        shared_wallet_items = self._filter_rows_for_snapshot_pairs(
-            [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT *
-                    FROM shared_wallets
-                    WHERE snapshot_time IN ({latest_placeholders})
-                    ORDER BY snapshot_time DESC, main_wallet_id ASC
-                    """,
-                    latest_snapshot_times,
-                ).fetchall()
-            ],
-            latest_pairs,
-        )
-        wallet_relation_items = self._filter_rows_for_snapshot_pairs(
-            [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT *
-                    FROM shared_wallet_account_relations
-                    WHERE snapshot_time IN ({latest_placeholders})
-                    ORDER BY snapshot_time DESC, main_wallet_id ASC, advertiser_id ASC
-                    """,
-                    latest_snapshot_times,
-                ).fetchall()
-            ],
-            latest_pairs,
-        )
+        if self.performance_access.performance_section_needs_balance_details(normalized_section) and latest_snapshot_times:
+            account_balance_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM account_balances
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            shared_wallet_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallets
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+            wallet_relation_items = self._filter_rows_for_snapshot_pairs(
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT *
+                        FROM shared_wallet_account_relations
+                        WHERE snapshot_time IN ({latest_placeholders})
+                        ORDER BY snapshot_time DESC, main_wallet_id ASC, advertiser_id ASC
+                        """,
+                        latest_snapshot_times,
+                    ).fetchall()
+                ],
+                latest_pairs,
+            )
+        else:
+            account_balance_items = []
+            shared_wallet_items = []
+            wallet_relation_items = []
 
         return self._build_cross_customer_center_performance_payload(
             start_dt,
@@ -4904,6 +5505,7 @@ class DashboardService:
             account_balance_items=account_balance_items,
             shared_wallet_items=shared_wallet_items,
             wallet_relation_items=wallet_relation_items,
+            section=normalized_section,
         )
 
     def _latest_snapshot_all_customer_centers(
@@ -4981,7 +5583,7 @@ class DashboardService:
     ) -> None:
         try:
             payload = self._compute_latest_snapshot(allowed_advertiser_ids, display_scope)
-            self._store_latest_snapshot_cache(cache_key, payload)
+            resolved_payload = payload
             if isinstance(payload, dict):
                 self._shared_dict_cache_set(
                     "latest-snapshot",
@@ -4990,6 +5592,10 @@ class DashboardService:
                     payload,
                     LATEST_SNAPSHOT_STALE_SECONDS,
                 )
+                shared_payload = self._shared_dict_cache_get("latest-snapshot", raw_cache_key, cache_version)
+                if shared_payload is not None:
+                    resolved_payload = shared_payload
+            self._store_latest_snapshot_cache(cache_key, resolved_payload)
         except Exception:
             pass
         finally:
@@ -5020,6 +5626,10 @@ class DashboardService:
         allowed_advertiser_ids: set[int] | None = None,
         display_scope: str = DISPLAY_SCOPE_CURRENT,
     ) -> dict[str, Any] | None:
+        local_fresh_ttl, local_stale_ttl = self._secondary_local_cache_ttls(
+            LATEST_SNAPSHOT_CACHE_SECONDS,
+            LATEST_SNAPSHOT_STALE_SECONDS,
+        )
         cache_version = self._shared_cache_version("latest-snapshot")
         raw_cache_key = build_latest_snapshot_cache_key(
             allowed_advertiser_ids,
@@ -5028,15 +5638,18 @@ class DashboardService:
         )
         cache_key = self._versioned_cache_key(cache_version, raw_cache_key)
         now_ts = time.time()
+        shared_payload = self._shared_dict_cache_get("latest-snapshot", raw_cache_key, cache_version)
+        if shared_payload is not None:
+            return copy.deepcopy(shared_payload)
         with self._latest_snapshot_cache_lock:
             cached = copy.deepcopy(self._latest_snapshot_cache.get(cache_key))
         if cached:
             cached_payload = cached.get("payload")
             cached_at = float(cached.get("_cached_at", 0.0) or 0.0)
             age = max(now_ts - cached_at, 0.0)
-            if age < LATEST_SNAPSHOT_CACHE_SECONDS:
+            if age < local_fresh_ttl:
                 return cached_payload
-            if age < LATEST_SNAPSHOT_STALE_SECONDS:
+            if age < local_stale_ttl:
                 self._schedule_latest_snapshot_refresh(
                     cache_key,
                     raw_cache_key,
@@ -5045,14 +5658,14 @@ class DashboardService:
                     display_scope,
                 )
                 return cached_payload
-        shared_payload = self._shared_dict_cache_get("latest-snapshot", raw_cache_key, cache_version)
-        if shared_payload is not None:
-            self._store_latest_snapshot_cache(cache_key, shared_payload)
-            return copy.deepcopy(shared_payload)
         payload = self._compute_latest_snapshot(allowed_advertiser_ids, display_scope)
-        self._store_latest_snapshot_cache(cache_key, payload)
         if isinstance(payload, dict):
             self._shared_dict_cache_set("latest-snapshot", raw_cache_key, cache_version, payload, LATEST_SNAPSHOT_STALE_SECONDS)
+            shared_payload = self._shared_dict_cache_get("latest-snapshot", raw_cache_key, cache_version)
+            if shared_payload is not None:
+                self._store_latest_snapshot_cache(cache_key, shared_payload)
+                return copy.deepcopy(shared_payload)
+        self._store_latest_snapshot_cache(cache_key, payload)
         return copy.deepcopy(payload)
 
     def clear_runtime_caches(self) -> None:
@@ -5148,6 +5761,7 @@ class DashboardService:
         normalized_scope = self._normalize_material_cache_scope(scope)
         self._prune_local_material_cache_store(self._material_cache, scope=normalized_scope)
         self._prune_local_material_cache_store(self._material_query_cache, scope=normalized_scope)
+        self._material_preview_source_cache.clear()
         self._material_preview_refresh_cache.clear()
         self._preview_video_resolve_cache.clear()
         refresh_prefixes = [
@@ -5425,6 +6039,7 @@ class DashboardService:
         force_refresh: bool = False,
         queue_missing_indexes: bool = True,
     ) -> None:
+        live_overlay_ranges = {"day", "week", "month"}
         window_by_display_range = {
             str(window.get("display_range_key") or ""): window
             for window in self._material_ranking_index_dynamic_windows()
@@ -5432,11 +6047,16 @@ class DashboardService:
         for display_scope, range_key in self._material_performance_page_prewarm_targets():
             try:
                 window = window_by_display_range.get(range_key)
-                if window and not self._material_ranking_index_summary_exists(
+                uses_live_overlay = str(range_key or "").strip().lower() in live_overlay_ranges
+                if (
+                    window
+                    and not uses_live_overlay
+                    and not self._material_ranking_index_summary_exists(
                     range_key=str(window.get("index_range_key") or ""),
                     start_day=str(window.get("start_day") or ""),
                     end_day=str(window.get("end_day") or ""),
                     all_customer_centers=self._display_scope_uses_all_customer_centers(display_scope),
+                    )
                 ):
                     if queue_missing_indexes:
                         cache_scope = material_cache_scope_for_range(range_key, snapshot_time="")
@@ -5478,11 +6098,10 @@ class DashboardService:
                 reason="unchanged_signature",
             )
             return
-        self.clear_material_runtime_caches(scope=MATERIAL_CACHE_SCOPE_LIVE)
+        self.clear_material_runtime_caches(scope="all")
         namespaces = self._material_performance_page_cache_namespaces()
         self._prune_payload_refresh_markers([f"{namespace}:" for namespace in namespaces])
         self._invalidate_cache_namespaces(*namespaces)
-        self._refresh_material_ranking_indexes_after_hot_sync()
         self._prewarm_material_performance_page_caches(
             force_refresh=True,
             queue_missing_indexes=False,
@@ -5620,7 +6239,9 @@ class DashboardService:
         start_dt: datetime,
         end_dt: datetime,
         prefer_daily: bool = False,
+        section: str = "all",
     ) -> dict[str, Any]:
+        normalized_section = self.performance_access.normalize_performance_section(section)
         with self.db() as conn:
             today_key = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
             if end_dt.strftime("%Y-%m-%d") < today_key:
@@ -5648,17 +6269,24 @@ class DashboardService:
                             start_dt,
                             end_dt,
                             daily_snapshots,
+                            section=normalized_section,
                         )
             elif start_dt.strftime("%Y-%m-%d") < today_key:
                 current_daily_payload = self._performance_snapshot_from_daily_and_current_all_customer_centers_locked(
                     conn,
                     start_dt,
                     end_dt,
+                    section=normalized_section,
                 )
                 if current_daily_payload.get("snapshot_time"):
                     return current_daily_payload
             else:
-                current_payload = self._performance_snapshot_from_current_all_customer_centers_locked(conn, start_dt, end_dt)
+                current_payload = self._performance_snapshot_from_current_all_customer_centers_locked(
+                    conn,
+                    start_dt,
+                    end_dt,
+                    section=normalized_section,
+                )
                 if current_payload.get("snapshot_time"):
                     return current_payload
             return self.performance_access._empty_performance_snapshot(start_dt, end_dt)
@@ -6091,7 +6719,7 @@ class DashboardService:
                       AND substr(esr.snapshot_time, 1, 10) = {day_expr}
                       AND substr(COALESCE(esr.window_start, ''), 1, 10) = {day_expr}
                       AND substr(COALESCE(esr.window_end, ''), 1, 10) = {day_expr}
-                      AND substr(COALESCE(esr.window_end, ''), 12, 8) >= '23:59:00'
+                      AND substr(COALESCE(esr.window_end, ''), 12, 8) >= '23:58:00'
                 )
                 OR EXISTS (
                     SELECT 1
@@ -6100,7 +6728,7 @@ class DashboardService:
                       AND md_stable.biz_date = {day_expr}
                       AND substr(COALESCE(md_stable.window_start, ''), 1, 10) = {day_expr}
                       AND substr(COALESCE(md_stable.window_end, ''), 1, 10) = {day_expr}
-                      AND substr(COALESCE(md_stable.window_end, ''), 12, 8) >= '23:59:00'
+                      AND substr(COALESCE(md_stable.window_end, ''), 12, 8) >= '23:58:00'
                 )
             )
         """
@@ -6137,7 +6765,7 @@ class DashboardService:
                   AND substr(snapshot_time, 1, 10) <= ?
                   AND substr(COALESCE(window_start, ''), 1, 10) = substr(snapshot_time, 1, 10)
                   AND substr(COALESCE(window_end, ''), 1, 10) = substr(snapshot_time, 1, 10)
-                  AND substr(COALESCE(window_end, ''), 12, 8) >= '23:59:00'
+                  AND substr(COALESCE(window_end, ''), 12, 8) >= '23:58:00'
                 UNION
                 SELECT biz_date AS day_key
                 FROM material_daily
@@ -6146,7 +6774,7 @@ class DashboardService:
                   AND biz_date <= ?
                   AND substr(COALESCE(window_start, ''), 1, 10) = biz_date
                   AND substr(COALESCE(window_end, ''), 1, 10) = biz_date
-                  AND substr(COALESCE(window_end, ''), 12, 8) >= '23:59:00'
+                  AND substr(COALESCE(window_end, ''), 12, 8) >= '23:58:00'
             ) stable_days
             WHERE COALESCE(day_key, '') <> ''
             """,
@@ -6168,18 +6796,25 @@ class DashboardService:
             if str(row["day_key"] or "").strip()
         }
 
-    @staticmethod
     def _history_metric_totals_aligned(
+        self,
         candidate_totals: dict[str, Any] | None,
         summary_totals: dict[str, Any] | None,
     ) -> bool:
         if not candidate_totals or not summary_totals:
             return False
-        money_tolerance = 1.0
-        for field in ("stat_cost", "pay_amount"):
+        money_tolerance = 2.0
+        for field in ("stat_cost", "pay_amount", "total_pay_amount", "settled_pay_amount"):
+            if field not in candidate_totals or field not in summary_totals:
+                continue
             if abs(float(candidate_totals.get(field, 0.0) or 0.0) - float(summary_totals.get(field, 0.0) or 0.0)) > money_tolerance:
                 return False
-        return int(candidate_totals.get("order_count", 0) or 0) == int(summary_totals.get("order_count", 0) or 0)
+        for field in ("order_count", "settled_order_count"):
+            if field not in candidate_totals or field not in summary_totals:
+                continue
+            if int(candidate_totals.get(field, 0) or 0) != int(summary_totals.get(field, 0) or 0):
+                return False
+        return True
 
     @staticmethod
     def _daily_metric_totals_by_day(
@@ -6190,17 +6825,39 @@ class DashboardService:
         end_day: str,
     ) -> dict[str, dict[str, Any]]:
         table = str(table_name or "").strip()
-        if table not in {"summary_daily", "material_daily", "material_relation_daily"}:
+        if table not in {"summary_daily", "account_daily", "plan_daily", "material_daily", "material_relation_daily"}:
             return {}
         if not db_table_exists(conn, table):
             return {}
+        if table == "summary_daily":
+            metric_sql = """
+                COALESCE(SUM(stat_cost), 0) AS stat_cost,
+                COALESCE(SUM(pay_amount), 0) AS pay_amount,
+                COALESCE(SUM(order_count), 0) AS order_count
+            """
+        elif table in {"material_daily", "material_relation_daily"}:
+            metric_sql = """
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE' THEN stat_cost ELSE 0 END), 0) AS stat_cost,
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE' THEN pay_amount ELSE 0 END), 0) AS pay_amount,
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE' THEN total_pay_amount ELSE 0 END), 0) AS total_pay_amount,
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE' THEN settled_pay_amount ELSE 0 END), 0) AS settled_pay_amount,
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE' THEN order_count ELSE 0 END), 0) AS order_count,
+                COALESCE(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE' THEN settled_order_count ELSE 0 END), 0) AS settled_order_count
+            """
+        else:
+            metric_sql = """
+                COALESCE(SUM(stat_cost), 0) AS stat_cost,
+                COALESCE(SUM(pay_amount), 0) AS pay_amount,
+                COALESCE(SUM(total_pay_amount), 0) AS total_pay_amount,
+                COALESCE(SUM(settled_pay_amount), 0) AS settled_pay_amount,
+                COALESCE(SUM(order_count), 0) AS order_count,
+                COALESCE(SUM(settled_order_count), 0) AS settled_order_count
+            """
         rows = conn.execute(
             f"""
             SELECT
                 biz_date,
-                COALESCE(SUM(stat_cost), 0) AS stat_cost,
-                COALESCE(SUM(pay_amount), 0) AS pay_amount,
-                COALESCE(SUM(order_count), 0) AS order_count
+                {metric_sql}
             FROM {table}
             WHERE customer_center_id = ?
               AND biz_date >= ?
@@ -6219,6 +6876,12 @@ class DashboardService:
                 "pay_amount": round(float(row["pay_amount"] or 0.0), 2),
                 "order_count": int(float(row["order_count"] or 0)),
             }
+            if "total_pay_amount" in row.keys():
+                totals_by_day[day_key]["total_pay_amount"] = round(float(row["total_pay_amount"] or 0.0), 2)
+            if "settled_pay_amount" in row.keys():
+                totals_by_day[day_key]["settled_pay_amount"] = round(float(row["settled_pay_amount"] or 0.0), 2)
+            if "settled_order_count" in row.keys():
+                totals_by_day[day_key]["settled_order_count"] = int(float(row["settled_order_count"] or 0))
         return totals_by_day
 
     def _stable_material_history_target_keys(
@@ -6289,6 +6952,13 @@ class DashboardService:
         summary_totals_by_day = self._daily_metric_totals_by_day(
             conn,
             "summary_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
+        plan_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "plan_daily",
             normalized_customer_center_id,
             start_day_key,
             end_day_key,
@@ -6387,7 +7057,7 @@ class DashboardService:
                 continue
             if day_key in material_days and self._history_metric_totals_aligned(
                 material_totals_by_day.get(day_key),
-                summary_totals_by_day.get(day_key),
+                plan_totals_by_day.get(day_key) or summary_totals_by_day.get(day_key),
             ):
                 cursor += timedelta(days=1)
                 continue
@@ -6468,6 +7138,36 @@ class DashboardService:
             for row in snapshot_count_rows
             if str(row["day_key"] or "").strip()
         }
+        start_day_key = start_day.strftime("%Y-%m-%d")
+        end_day_key = end_day.strftime("%Y-%m-%d")
+        summary_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "summary_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
+        plan_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "plan_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
+        relation_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "material_relation_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
+        material_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "material_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
         stable_days = self._stable_material_history_days_for_customer_center(
             conn,
             normalized_customer_center_id,
@@ -6554,6 +7254,13 @@ class DashboardService:
             has_sync_record = day_key in sync_rows_by_day
             material_row_count = int(sync_rows_by_day.get(day_key) or 0)
             snapshot_row_count = int(snapshot_count_by_day.get(day_key) or 0)
+            reference_totals = plan_totals_by_day.get(day_key) or summary_totals_by_day.get(day_key)
+            if reference_totals and (
+                self._history_metric_totals_aligned(relation_totals_by_day.get(day_key), reference_totals)
+                or self._history_metric_totals_aligned(material_totals_by_day.get(day_key), reference_totals)
+            ):
+                cursor += timedelta(days=1)
+                continue
             if (
                 day_key in successful_empty_days
                 and day_key in stable_days
@@ -6617,6 +7324,13 @@ class DashboardService:
         summary_totals_by_day = self._daily_metric_totals_by_day(
             conn,
             "summary_daily",
+            normalized_customer_center_id,
+            start_day_key,
+            end_day_key,
+        )
+        plan_totals_by_day = self._daily_metric_totals_by_day(
+            conn,
+            "plan_daily",
             normalized_customer_center_id,
             start_day_key,
             end_day_key,
@@ -6790,7 +7504,7 @@ class DashboardService:
                 continue
             if day_key in relation_days and self._history_metric_totals_aligned(
                 relation_totals_by_day.get(day_key),
-                summary_totals_by_day.get(day_key),
+                plan_totals_by_day.get(day_key) or summary_totals_by_day.get(day_key),
             ):
                 cursor += timedelta(days=1)
                 continue
@@ -7096,6 +7810,51 @@ class DashboardService:
             for row in rows
             if str(row["customer_center_id"] or "").strip() and str(row["target_date"] or "").strip()
         }
+
+    def _resolve_performance_history_target_success(
+        self,
+        conn: Any,
+        targets: list[dict[str, Any]],
+    ) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
+        success_keys: set[tuple[str, str]] = set()
+        snapshot_time_map: dict[tuple[str, str], str] = {}
+        for item in self._normalize_history_refresh_targets(targets):
+            customer_center_id = str(item.get("customer_center_id") or "").strip()
+            target_date = str(item.get("target_date") or "").strip()
+            if not customer_center_id or not target_date:
+                continue
+            target_day = datetime.strptime(target_date, "%Y-%m-%d")
+            meta = self._summary_meta_for_customer_center_day(conn, target_day, customer_center_id)
+            if not meta:
+                continue
+            success_keys.add((customer_center_id, target_date))
+            snapshot_time_map[(customer_center_id, target_date)] = str(meta.get("snapshot_time") or "").strip()
+        return success_keys, snapshot_time_map
+
+    def _resolve_extended_history_target_success(
+        self,
+        conn: Any,
+        targets: list[dict[str, Any]],
+    ) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
+        success_keys: set[tuple[str, str]] = set()
+        snapshot_time_map: dict[tuple[str, str], str] = {}
+        for item in self._normalize_history_refresh_targets(targets):
+            customer_center_id = str(item.get("customer_center_id") or "").strip()
+            target_date = str(item.get("target_date") or "").strip()
+            if not customer_center_id or not target_date:
+                continue
+            target_day = datetime.strptime(target_date, "%Y-%m-%d")
+            is_complete, snapshot_time = self._extended_history_day_complete_for_customer_center(
+                conn,
+                customer_center_id,
+                target_day,
+            )
+            if not is_complete:
+                continue
+            success_keys.add((customer_center_id, target_date))
+            if snapshot_time:
+                snapshot_time_map[(customer_center_id, target_date)] = snapshot_time
+        return success_keys, snapshot_time_map
 
     @classmethod
     def _select_material_reconcile_rolling_dates(
@@ -9691,16 +10450,20 @@ class DashboardService:
                 "supports_refund_rate_1h": True,
             }
         source_text = "升级版主链"
-        if normalized_source == "STANDARD":
+        source_title = "today 表现来自升级版 uni_promotion 主链"
+        if normalized_source == PLAN_SOURCE_STANDARD:
             source_text = "标准补链"
+            source_title = "today 表现来自标准补链，用于补齐主链未返回的计划"
         profile_text = "\u5168\u57df\u6295\u653e"
-        if normalized_source in {PLAN_SOURCE_UNI_CUBIC, PLAN_SOURCE_UNI_REPORT} and normalized_delivery_type == PLAN_DELIVERY_TYPE_CUBIC:
+        if normalized_delivery_type == PLAN_DELIVERY_TYPE_CUBIC:
             profile_text = "\u4e58\u65b9\u6295\u653e"
+            if normalized_source == PLAN_SOURCE_UNI_PROMOTION:
+                source_title = "today 表现来自升级版 uni_promotion 主链（OVERALL_PROJECT）"
         return {
             "metric_profile": "FULL",
             "metric_profile_text": profile_text,
             "metric_source_text": source_text,
-            "metric_source_title": "today 表现来自升级版 uni_promotion 主链",
+            "metric_source_title": source_title,
             "supports_pay_amount": True,
             "supports_total_pay_amount": True,
             "supports_pay_roi": True,
@@ -10573,6 +11336,18 @@ class DashboardService:
         return normalized
 
     @classmethod
+    def _first_image_id_from_image_material(cls, payload: Any) -> str:
+        for item in cls._normalize_image_material_payload(payload):
+            image_ids = item.get("image_ids")
+            if not isinstance(image_ids, list):
+                continue
+            for value in image_ids:
+                image_id = str(value or "").strip()
+                if image_id:
+                    return image_id
+        return ""
+
+    @classmethod
     def _extract_plan_image_material(cls, plan_context: dict[str, Any]) -> list[dict[str, Any]]:
         raw_payload = cls._json_object(plan_context.get("raw_json"))
         if not raw_payload:
@@ -10656,21 +11431,13 @@ class DashboardService:
         ffmpeg = cls._resolve_ffmpeg_executable()
         max_bytes = 1_450_000
         desired_mode = str(image_mode or "").strip().upper()
-        seek_seconds = 1.0
-        try:
-            probe_result = probe_video_file(video_path)
-            duration_seconds = float(getattr(probe_result, "duration_seconds", 0.0) or 0.0)
-            if duration_seconds > 0:
-                seek_seconds = max(0.0, min(1.0, duration_seconds / 2.0))
-        except Exception:  # noqa: BLE001
-            pass
         filter_args: list[str] = []
         if desired_mode == "SQUARE":
             filter_args = ["-vf", "crop='min(iw,ih)':'min(iw,ih)'"]
         attempts = [
-            ["-ss", f"{seek_seconds:.2f}", "-i", str(video_path), *filter_args, "-frames:v", "1", "-q:v", "6", str(output_path)],
-            ["-ss", f"{seek_seconds:.2f}", "-i", str(video_path), *filter_args, "-frames:v", "1", "-q:v", "10", str(output_path)],
-            ["-ss", "0.00", "-i", str(video_path), *filter_args, "-frames:v", "1", "-q:v", "12", str(output_path)],
+            ["-ss", "0.00", "-i", str(video_path), *filter_args, "-frames:v", "1", "-q:v", "6", str(output_path)],
+            ["-ss", "0.00", "-i", str(video_path), *filter_args, "-frames:v", "1", "-q:v", "10", str(output_path)],
+            ["-ss", "0.20", "-i", str(video_path), *filter_args, "-frames:v", "1", "-q:v", "12", str(output_path)],
         ]
         last_error = ""
         for args in attempts:
@@ -10704,15 +11471,16 @@ class DashboardService:
         file_path: Path,
         plan_context: dict[str, Any],
         material_title: str,
-        cache: dict[tuple[int, str], list[dict[str, Any]]],
+        cache: dict[tuple[int, str, str], list[dict[str, Any]]],
     ) -> list[dict[str, Any]]:
-        cache_key = (int(advertiser_id), str(file_path))
+        video_defaults = self._extract_plan_video_material_defaults(plan_context)
+        generated_image_mode = str(video_defaults.get("image_mode") or "").strip().upper()
+        cache_key = (int(advertiser_id), str(file_path), generated_image_mode)
         cached = cache.get(cache_key)
         if cached is not None:
             return [dict(item) for item in cached]
         if not file_path.exists():
             return []
-        generated_image_mode = "SQUARE"
         with tempfile.TemporaryDirectory(prefix="upload-cover-") as temp_dir:
             cover_path = Path(temp_dir) / f"{file_path.stem}_cover.jpg"
             self._extract_cover_frame_image(file_path, cover_path, generated_image_mode)
@@ -10725,7 +11493,7 @@ class DashboardService:
         image_id = self._first_text(data.get("image_id"), data.get("id"))
         if not image_id:
             return []
-        image_material: list[dict[str, Any]] = [{"image_ids": [image_id], "image_mode": generated_image_mode}]
+        image_material: list[dict[str, Any]] = [{"image_ids": [image_id], "image_mode": "SQUARE"}]
         cache[cache_key] = [dict(item) for item in image_material]
         return image_material
 
@@ -12015,6 +12783,92 @@ class DashboardService:
             row[field] = int(units)
 
     @staticmethod
+    def _distribute_money_metric_to_target_with_weights(
+        rows: list[dict[str, Any]],
+        field: str,
+        target_value: Any,
+        *,
+        weight_field: str = "stat_cost",
+    ) -> None:
+        if not rows:
+            return
+        try:
+            target_cents = max(0, int(round(float(target_value or 0.0) * 100)))
+        except Exception:
+            return
+        if target_cents <= 0:
+            for row in rows:
+                row[field] = 0.0
+            return
+
+        field_weights: list[int] = []
+        fallback_weights: list[int] = []
+        for row in rows:
+            try:
+                field_weights.append(max(0, int(round(float(row.get(field, 0.0) or 0.0) * 100))))
+            except Exception:
+                field_weights.append(0)
+            try:
+                fallback_weights.append(max(0, int(round(float(row.get(weight_field, 0.0) or 0.0) * 100))))
+            except Exception:
+                fallback_weights.append(0)
+        weights = field_weights if sum(field_weights) > 0 else fallback_weights
+        if sum(weights) <= 0:
+            weights = [1 for _ in rows]
+
+        total_weight = sum(weights)
+        allocated = [(weight * target_cents) // total_weight for weight in weights]
+        remainder_units = target_cents - sum(allocated)
+        remainders = sorted((weight * target_cents % total_weight, index) for index, weight in enumerate(weights) if weight > 0)
+        for _remainder, index in reversed(remainders[-remainder_units:] if remainder_units > 0 else []):
+            allocated[index] += 1
+        for row, cents in zip(rows, allocated):
+            row[field] = round(cents / 100.0, 2)
+
+    @staticmethod
+    def _distribute_integer_metric_to_target_with_weights(
+        rows: list[dict[str, Any]],
+        field: str,
+        target_value: Any,
+        *,
+        weight_field: str = "stat_cost",
+    ) -> None:
+        if not rows:
+            return
+        try:
+            target_units = max(0, int(round(float(target_value or 0))))
+        except Exception:
+            return
+        if target_units <= 0:
+            for row in rows:
+                row[field] = 0
+            return
+
+        field_weights: list[int] = []
+        fallback_weights: list[int] = []
+        for row in rows:
+            try:
+                field_weights.append(max(0, int(round(float(row.get(field, 0) or 0)))))
+            except Exception:
+                field_weights.append(0)
+            try:
+                fallback_weights.append(max(0, int(round(float(row.get(weight_field, 0.0) or 0.0) * 100))))
+            except Exception:
+                fallback_weights.append(0)
+        weights = field_weights if sum(field_weights) > 0 else fallback_weights
+        if sum(weights) <= 0:
+            weights = [1 for _ in rows]
+
+        total_weight = sum(weights)
+        allocated = [(weight * target_units) // total_weight for weight in weights]
+        remainder_units = target_units - sum(allocated)
+        remainders = sorted((weight * target_units % total_weight, index) for index, weight in enumerate(weights) if weight > 0)
+        for _remainder, index in reversed(remainders[-remainder_units:] if remainder_units > 0 else []):
+            allocated[index] += 1
+        for row, units in zip(rows, allocated):
+            row[field] = int(units)
+
+    @staticmethod
     def _sum_money_metric(rows: list[dict[str, Any]], field: str, *, material_type: str | None = None) -> float:
         total = 0.0
         target_type = str(material_type or "").strip().upper()
@@ -12070,10 +12924,6 @@ class DashboardService:
         target_stat_cost = round(float(target.get("stat_cost", 0.0) or 0.0), 2)
         if target_stat_cost <= 0:
             return
-        title_stat_cost = self._sum_money_metric(title_rows, "stat_cost")
-        non_title_stat_cost = self._sum_money_metric(non_title_rows, "stat_cost")
-        if title_stat_cost <= 0 or non_title_stat_cost <= 0:
-            return
         for row in title_rows:
             row["stat_cost"] = 0.0
             row["pay_amount"] = 0.0
@@ -12108,6 +12958,18 @@ class DashboardService:
             return normalized_rows
 
         targets: dict[tuple[int, int], dict[str, Any]] = {}
+        exact_snapshot_by_plan: dict[tuple[int, int], str] = {}
+        if use_current:
+            for row in normalized_rows:
+                advertiser_id = int(row.get("advertiser_id", 0) or 0)
+                ad_id = int(row.get("ad_id", 0) or 0)
+                row_snapshot_time = str(row.get("snapshot_time") or snapshot_time or "").strip()
+                if advertiser_id <= 0 or ad_id <= 0 or not row_snapshot_time:
+                    continue
+                key = (advertiser_id, ad_id)
+                previous_snapshot_time = str(exact_snapshot_by_plan.get(key) or "").strip()
+                if not previous_snapshot_time or row_snapshot_time > previous_snapshot_time:
+                    exact_snapshot_by_plan[key] = row_snapshot_time
 
         def store_plan_rows(rows: list[Any]) -> None:
             for raw_row in rows:
@@ -12139,8 +13001,55 @@ class DashboardService:
                 ).fetchall()
                 store_plan_rows(list(rows))
 
+        def query_exact_plan_snapshot_rows() -> None:
+            if not exact_snapshot_by_plan:
+                return
+            target_ad_ids = sorted({key[1] for key in exact_snapshot_by_plan})
+            snapshot_times = sorted({value for value in exact_snapshot_by_plan.values() if str(value).strip()})
+            if not target_ad_ids or not snapshot_times:
+                return
+            for ad_start in range(0, len(target_ad_ids), 400):
+                ad_chunk = target_ad_ids[ad_start : ad_start + 400]
+                if not ad_chunk:
+                    continue
+                ad_clause = ",".join("?" for _ in ad_chunk)
+                for time_start in range(0, len(snapshot_times), 50):
+                    time_chunk = snapshot_times[time_start : time_start + 50]
+                    if not time_chunk:
+                        continue
+                    time_clause = ",".join("?" for _ in time_chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT snapshot_time, advertiser_id, ad_id, stat_cost, pay_amount, total_pay_amount,
+                               settled_pay_amount, order_count, settled_order_count
+                        FROM plan_snapshots
+                        WHERE customer_center_id = ?
+                          AND ad_id IN ({ad_clause})
+                          AND snapshot_time IN ({time_clause})
+                        ORDER BY snapshot_time DESC, ad_id ASC
+                        """,
+                        [normalized_customer_center_id, *ad_chunk, *time_chunk],
+                    ).fetchall()
+                    for raw_row in rows:
+                        row = dict(raw_row)
+                        advertiser_id = int(row.get("advertiser_id", 0) or 0)
+                        ad_id = int(row.get("ad_id", 0) or 0)
+                        if advertiser_id <= 0 or ad_id <= 0:
+                            continue
+                        key = (advertiser_id, ad_id)
+                        if key in targets:
+                            continue
+                        exact_snapshot_time = str(exact_snapshot_by_plan.get(key) or "").strip()
+                        if not exact_snapshot_time:
+                            continue
+                        if str(row.get("snapshot_time") or "").strip() != exact_snapshot_time:
+                            continue
+                        targets[key] = row
+
         if use_current:
-            query_plan_rows("plan_current", "", [], missing_only=False)
+            # Keep current material restore pinned to the exact plan snapshot that produced the row when available.
+            query_exact_plan_snapshot_rows()
+            query_plan_rows("plan_current", "", [], missing_only=True)
         else:
             day_key = str(snapshot_time or "").strip()[:10]
             if day_key:
@@ -12174,17 +13083,34 @@ class DashboardService:
             if not target:
                 continue
             self._prefer_non_title_material_metrics(plan_rows, target)
+            carrier_rows = [
+                row
+                for row in plan_rows
+                if str(row.get("material_type") or "").strip().upper() != "TITLE"
+            ] or plan_rows
             for field in ("stat_cost", "pay_amount", "settled_pay_amount"):
-                if material_money_exceeds_target(plan_rows, field, target.get(field)) and not self._money_metric_matches_target(plan_rows, field, target.get(field)):
-                    self._distribute_money_metric_to_target(plan_rows, field, target.get(field))
+                if not self._money_metric_matches_target(carrier_rows, field, target.get(field)):
+                    self._distribute_money_metric_to_target_with_weights(
+                        carrier_rows,
+                        field,
+                        target.get(field),
+                    )
             total_pay_target = float(target.get("total_pay_amount", 0.0) or 0.0)
             if total_pay_target <= 0 and float(target.get("pay_amount", 0.0) or 0.0) > 0:
                 total_pay_target = float(target.get("pay_amount", 0.0) or 0.0)
-            if material_money_exceeds_target(plan_rows, "total_pay_amount", total_pay_target) and not self._money_metric_matches_target(plan_rows, "total_pay_amount", total_pay_target):
-                self._distribute_money_metric_to_target(plan_rows, "total_pay_amount", total_pay_target)
+            if not self._money_metric_matches_target(carrier_rows, "total_pay_amount", total_pay_target):
+                self._distribute_money_metric_to_target_with_weights(
+                    carrier_rows,
+                    "total_pay_amount",
+                    total_pay_target,
+                )
             for field in ("order_count", "settled_order_count"):
-                if material_integer_exceeds_target(plan_rows, field, target.get(field)) and not self._integer_metric_matches_target(plan_rows, field, target.get(field)):
-                    self._distribute_integer_metric_to_target(plan_rows, field, target.get(field))
+                if not self._integer_metric_matches_target(carrier_rows, field, target.get(field)):
+                    self._distribute_integer_metric_to_target_with_weights(
+                        carrier_rows,
+                        field,
+                        target.get(field),
+                    )
         return normalized_rows
 
     @staticmethod
@@ -13118,6 +14044,200 @@ class DashboardService:
         self._replace_material_relation_current_rows(conn, normalized_customer_center_id, relation_rows)
         return len(relation_rows)
 
+    def _restore_performance_history_day_from_latest_snapshot(
+        self,
+        conn: Any,
+        customer_center_id: str,
+        biz_date: str,
+    ) -> dict[str, Any]:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        day_key = str(biz_date or "").strip()
+        result = {
+            "ok": False,
+            "updated": False,
+            "reason": "",
+            "snapshot_time": "",
+            "summary_row_count": 0,
+            "account_row_count": 0,
+            "plan_row_count": 0,
+        }
+        if not normalized_customer_center_id or not day_key:
+            return {
+                **result,
+                "reason": "invalid_target",
+            }
+
+        def existing_daily_state(reason: str) -> dict[str, Any]:
+            summary_daily_row = conn.execute(
+                """
+                SELECT snapshot_time, account_count, plan_count
+                FROM summary_daily
+                WHERE customer_center_id = ?
+                  AND biz_date = ?
+                LIMIT 1
+                """,
+                (normalized_customer_center_id, day_key),
+            ).fetchone()
+            if not summary_daily_row:
+                return {
+                    **result,
+                    "reason": reason,
+                }
+            summary_item = dict(summary_daily_row)
+            account_row_count = int(
+                (
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) AS row_count
+                        FROM account_daily
+                        WHERE customer_center_id = ?
+                          AND biz_date = ?
+                        """,
+                        (normalized_customer_center_id, day_key),
+                    ).fetchone()
+                    or {}
+                ).get("row_count")
+                or 0
+            )
+            plan_row_count = int(
+                (
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) AS row_count
+                        FROM plan_daily
+                        WHERE customer_center_id = ?
+                          AND biz_date = ?
+                        """,
+                        (normalized_customer_center_id, day_key),
+                    ).fetchone()
+                    or {}
+                ).get("row_count")
+                or 0
+            )
+            expected_account_count = max(int(summary_item.get("account_count", 0) or 0), 0)
+            expected_plan_count = max(int(summary_item.get("plan_count", 0) or 0), 0)
+            if expected_account_count > 0 and account_row_count <= 0:
+                return {
+                    **result,
+                    "snapshot_time": str(summary_item.get("snapshot_time") or "").strip(),
+                    "summary_row_count": 1,
+                    "reason": reason,
+                }
+            if expected_plan_count > 0 and plan_row_count <= 0:
+                return {
+                    **result,
+                    "snapshot_time": str(summary_item.get("snapshot_time") or "").strip(),
+                    "summary_row_count": 1,
+                    "account_row_count": account_row_count,
+                    "reason": reason,
+                }
+            return {
+                "ok": True,
+                "updated": False,
+                "reason": "existing_daily_read_models",
+                "snapshot_time": str(summary_item.get("snapshot_time") or "").strip(),
+                "summary_row_count": 1,
+                "account_row_count": account_row_count,
+                "plan_row_count": plan_row_count,
+            }
+
+        latest_row = conn.execute(
+            """
+            SELECT MAX(snapshot_time) AS snapshot_time
+            FROM summary_snapshots
+            WHERE customer_center_id = ?
+              AND snapshot_time >= ?
+              AND snapshot_time <= ?
+            """,
+            (
+                normalized_customer_center_id,
+                f"{day_key} 00:00:00",
+                f"{day_key} 23:59:59",
+            ),
+        ).fetchone()
+        latest_snapshot_time = str((latest_row or {}).get("snapshot_time") or "").strip()
+        if not latest_snapshot_time:
+            return existing_daily_state("missing_local_summary_snapshot")
+        summary_row = conn.execute(
+            """
+            SELECT *
+            FROM summary_snapshots
+            WHERE customer_center_id = ?
+              AND snapshot_time = ?
+            LIMIT 1
+            """,
+            (normalized_customer_center_id, latest_snapshot_time),
+        ).fetchone()
+        if not summary_row:
+            return existing_daily_state("missing_local_summary_row")
+        summary_item = dict(summary_row)
+        account_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM account_snapshots
+                WHERE customer_center_id = ?
+                  AND snapshot_time = ?
+                ORDER BY stat_cost DESC, advertiser_id ASC
+                """,
+                (normalized_customer_center_id, latest_snapshot_time),
+            ).fetchall()
+        ]
+        plan_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM plan_snapshots
+                WHERE customer_center_id = ?
+                  AND snapshot_time = ?
+                ORDER BY order_count DESC, pay_amount DESC, roi DESC, stat_cost DESC, ad_id ASC
+                """,
+                (normalized_customer_center_id, latest_snapshot_time),
+            ).fetchall()
+        ]
+        expected_account_count = max(int(summary_item.get("account_count", 0) or 0), 0)
+        expected_plan_count = max(int(summary_item.get("plan_count", 0) or 0), 0)
+        if expected_account_count > 0 and not account_rows:
+            fallback = existing_daily_state("missing_local_account_snapshots")
+            if bool(fallback.get("ok")):
+                return fallback
+            return {
+                **result,
+                "snapshot_time": latest_snapshot_time,
+                "summary_row_count": 1,
+                "reason": "missing_local_account_snapshots",
+            }
+        if expected_plan_count > 0 and not plan_rows:
+            fallback = existing_daily_state("missing_local_plan_snapshots")
+            if bool(fallback.get("ok")):
+                return fallback
+            return {
+                **result,
+                "snapshot_time": latest_snapshot_time,
+                "summary_row_count": 1,
+                "account_row_count": len(account_rows),
+                "reason": "missing_local_plan_snapshots",
+            }
+        if plan_rows:
+            plan_rows = self._apply_plan_delivery_type_metadata_rows(conn, plan_rows)
+        self.performance_access.upsert_daily_read_models(
+            conn,
+            [summary_item],
+            account_rows,
+            plan_rows,
+        )
+        return {
+            "ok": True,
+            "updated": True,
+            "reason": "",
+            "snapshot_time": latest_snapshot_time,
+            "summary_row_count": 1,
+            "account_row_count": len(account_rows),
+            "plan_row_count": len(plan_rows),
+        }
+
     def _restore_material_history_day_from_latest_snapshot(
         self,
         conn: Any,
@@ -13126,13 +14246,62 @@ class DashboardService:
     ) -> dict[str, Any]:
         normalized_customer_center_id = str(customer_center_id or "").strip()
         day_key = str(biz_date or "").strip()
+        result = {
+            "ok": False,
+            "updated": False,
+            "reason": "",
+            "snapshot_time": "",
+            "material_daily_row_count": 0,
+            "material_relation_row_count": 0,
+            "material_snapshot_row_count": 0,
+        }
         if not normalized_customer_center_id or not day_key:
             return {
-                "snapshot_time": "",
-                "material_daily_row_count": 0,
-                "material_relation_row_count": 0,
+                **result,
+                "reason": "invalid_target",
+            }
+
+        def existing_daily_state(reason: str) -> dict[str, Any]:
+            material_daily_row = conn.execute(
+                """
+                SELECT MAX(snapshot_time) AS snapshot_time, COUNT(*) AS row_count
+                FROM material_daily
+                WHERE customer_center_id = ?
+                  AND biz_date = ?
+                """,
+                (normalized_customer_center_id, day_key),
+            ).fetchone()
+            relation_daily_row = conn.execute(
+                """
+                SELECT MAX(snapshot_time) AS snapshot_time, COUNT(*) AS row_count
+                FROM material_relation_daily
+                WHERE customer_center_id = ?
+                  AND biz_date = ?
+                """,
+                (normalized_customer_center_id, day_key),
+            ).fetchone()
+            material_daily_count = int((material_daily_row or {}).get("row_count") or 0)
+            relation_daily_count = int((relation_daily_row or {}).get("row_count") or 0)
+            snapshot_time = str(
+                (material_daily_row or {}).get("snapshot_time")
+                or (relation_daily_row or {}).get("snapshot_time")
+                or ""
+            ).strip()
+            if material_daily_count <= 0 and relation_daily_count <= 0:
+                return {
+                    **result,
+                    "reason": reason,
+                }
+            return {
+                "ok": True,
+                "updated": False,
+                "reason": "existing_material_daily_models",
+                "snapshot_time": snapshot_time,
+                "material_daily_row_count": material_daily_count,
+                "material_relation_row_count": relation_daily_count,
                 "material_snapshot_row_count": 0,
             }
+
         latest_row = conn.execute(
             """
             SELECT MAX(snapshot_time) AS snapshot_time
@@ -13144,14 +14313,7 @@ class DashboardService:
         ).fetchone()
         latest_snapshot_time = str((latest_row or {}).get("snapshot_time") or "").strip()
         if not latest_snapshot_time:
-            self._replace_material_daily_rows(conn, normalized_customer_center_id, day_key, [])
-            self._replace_material_relation_daily_rows(conn, normalized_customer_center_id, day_key, [])
-            return {
-                "snapshot_time": "",
-                "material_daily_row_count": 0,
-                "material_relation_row_count": 0,
-                "material_snapshot_row_count": 0,
-            }
+            return existing_daily_state("missing_local_material_snapshot")
         snapshot_rows = [
             dict(row)
             for row in conn.execute(
@@ -13166,13 +14328,13 @@ class DashboardService:
             ).fetchall()
         ]
         if not snapshot_rows:
-            self._replace_material_daily_rows(conn, normalized_customer_center_id, day_key, [])
-            self._replace_material_relation_daily_rows(conn, normalized_customer_center_id, day_key, [])
+            fallback = existing_daily_state("missing_local_material_snapshot_rows")
+            if bool(fallback.get("ok")):
+                return fallback
             return {
+                **result,
                 "snapshot_time": latest_snapshot_time,
-                "material_daily_row_count": 0,
-                "material_relation_row_count": 0,
-                "material_snapshot_row_count": 0,
+                "reason": "missing_local_material_snapshot_rows",
             }
         material_keys = sorted(
             {
@@ -13288,9 +14450,26 @@ class DashboardService:
             str(snapshot_rows[0].get("window_end") or ""),
             material_source_rows,
         )
+        updated_at = now_text()
         self._replace_material_daily_rows(conn, normalized_customer_center_id, day_key, material_rollup_rows)
         self._replace_material_relation_daily_rows(conn, normalized_customer_center_id, day_key, material_relation_rows)
+        self._upsert_material_relation_edges(
+            conn,
+            normalized_customer_center_id,
+            material_source_rows,
+            updated_at=updated_at,
+            snapshot_time=latest_snapshot_time,
+        )
+        self._upsert_material_profile_rows(
+            conn,
+            normalized_customer_center_id,
+            material_rollup_rows,
+            updated_at=updated_at,
+        )
         return {
+            "ok": True,
+            "updated": True,
+            "reason": "",
             "snapshot_time": latest_snapshot_time,
             "material_daily_row_count": len(material_rollup_rows),
             "material_relation_row_count": len(material_relation_rows),
@@ -13349,6 +14528,8 @@ class DashboardService:
         normalized_ad_ids = sorted({int(item or 0) for item in ad_ids if int(item or 0) > 0})
         if not normalized_customer_center_id or not day_key or not normalized_ad_ids:
             return 0
+        normalized_rows = self._dedupe_material_snapshot_rows_for_insert(material_rows)
+        target_ad_ids = set(normalized_ad_ids)
         for start in range(0, len(normalized_ad_ids), 400):
             chunk = normalized_ad_ids[start : start + 400]
             placeholders = ",".join("?" for _ in chunk)
@@ -13361,7 +14542,7 @@ class DashboardService:
                 """,
                 [normalized_customer_center_id, day_key, *chunk],
             )
-        normalized_rows = self._dedupe_material_snapshot_rows_for_insert(material_rows)
+        normalized_rows = [row for row in normalized_rows if int(row[5] or 0) in target_ad_ids]
         if not normalized_rows:
             return 0
         conn.executemany(
@@ -13375,6 +14556,50 @@ class DashboardService:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [(row[0], normalized_customer_center_id, *row[1:]) for row in normalized_rows],
+        )
+        return len(normalized_rows)
+
+    def _replace_material_relation_current_plan_subset(
+        self,
+        conn: Any,
+        customer_center_id: str,
+        ad_ids: set[int] | list[int] | tuple[int, ...],
+        material_relation_rows: list[tuple[Any, ...]] | list[list[Any]],
+    ) -> int:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        normalized_ad_ids = sorted({int(item or 0) for item in ad_ids if int(item or 0) > 0})
+        if not normalized_customer_center_id or not normalized_ad_ids:
+            return 0
+        target_ad_ids = set(normalized_ad_ids)
+        for start in range(0, len(normalized_ad_ids), 400):
+            chunk = normalized_ad_ids[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(
+                f"""
+                DELETE FROM material_relation_current
+                WHERE customer_center_id = ?
+                  AND ad_id IN ({placeholders})
+                """,
+                [normalized_customer_center_id, *chunk],
+            )
+        normalized_rows = [
+            tuple(row)
+            for row in material_relation_rows
+            if int((row[5] if isinstance(row, (list, tuple)) and len(row) > 5 else 0) or 0) in target_ad_ids
+        ]
+        if not normalized_rows:
+            return 0
+        conn.executemany(
+            """
+            INSERT INTO material_relation_current (
+                customer_center_id, snapshot_time, window_start, window_end, advertiser_id, advertiser_name,
+                ad_id, ad_name, material_type, material_key, material_id, material_name, create_time,
+                video_id, cover_url, aweme_item_id, video_url, stat_cost, pay_amount, total_pay_amount,
+                settled_pay_amount, order_count, settled_order_count, overall_show_count, overall_click_count,
+                top_anchor_name, product_info_text, is_original
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [(normalized_customer_center_id, *row) for row in normalized_rows],
         )
         return len(normalized_rows)
 
@@ -13597,6 +14822,120 @@ class DashboardService:
             "material_snapshot_row_count": len(snapshot_rows),
         }
 
+    def _restore_material_current_from_all_same_day_snapshots(
+        self,
+        conn: Any,
+        customer_center_id: str,
+        biz_date: str,
+    ) -> dict[str, Any]:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        day_key = str(biz_date or "").strip()
+        if not normalized_customer_center_id or not day_key:
+            return {
+                "snapshot_time": "",
+                "material_current_row_count": 0,
+                "material_relation_current_row_count": 0,
+                "material_snapshot_row_count": 0,
+            }
+        ordered_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM material_snapshots
+                WHERE customer_center_id = ?
+                  AND substr(snapshot_time, 1, 10) = ?
+                ORDER BY snapshot_time ASC, advertiser_id ASC, ad_id ASC, material_type ASC, material_key ASC
+                """,
+                (normalized_customer_center_id, day_key),
+            ).fetchall()
+        ]
+        if not ordered_rows:
+            self._replace_material_current_rows(conn, normalized_customer_center_id, [])
+            self._replace_material_relation_current_rows(conn, normalized_customer_center_id, [])
+            return {
+                "snapshot_time": "",
+                "material_current_row_count": 0,
+                "material_relation_current_row_count": 0,
+                "material_snapshot_row_count": 0,
+            }
+        latest_by_relation: dict[tuple[int, int, str, str], dict[str, Any]] = {}
+        for row in ordered_rows:
+            key = (
+                int(row.get("advertiser_id", 0) or 0),
+                int(row.get("ad_id", 0) or 0),
+                str(row.get("material_type") or "").strip(),
+                str(row.get("material_key") or "").strip(),
+            )
+            if key[0] <= 0 or key[1] <= 0 or not key[2] or not key[3]:
+                continue
+            latest_by_relation[key] = row
+        snapshot_rows = list(latest_by_relation.values())
+        if not snapshot_rows:
+            self._replace_material_current_rows(conn, normalized_customer_center_id, [])
+            self._replace_material_relation_current_rows(conn, normalized_customer_center_id, [])
+            return {
+                "snapshot_time": "",
+                "material_current_row_count": 0,
+                "material_relation_current_row_count": 0,
+                "material_snapshot_row_count": 0,
+            }
+        latest_snapshot_time = max(str(row.get("snapshot_time") or "") for row in snapshot_rows)
+        latest_row = max(
+            snapshot_rows,
+            key=lambda row: str(row.get("snapshot_time") or ""),
+        )
+        window_start = str(latest_row.get("window_start") or f"{day_key} 00:00:00")
+        window_end = str(latest_row.get("window_end") or f"{day_key} 23:59:59")
+        material_source_rows = self._material_source_rows_from_snapshot_rows(
+            conn,
+            normalized_customer_center_id,
+            snapshot_rows,
+            biz_date=day_key,
+        )
+        material_source_rows = self._normalize_material_source_rows_to_plan_metrics(
+            conn,
+            normalized_customer_center_id,
+            material_source_rows,
+            snapshot_time=latest_snapshot_time,
+            use_current=True,
+        )
+        material_rollup_rows = self._build_material_rollup_rows(
+            latest_snapshot_time,
+            window_start,
+            window_end,
+            groups=self._group_material_rows(material_source_rows),
+        )
+        material_relation_rows = self._build_material_relation_read_rows(
+            latest_snapshot_time,
+            window_start,
+            window_end,
+            material_source_rows,
+        )
+        self._replace_material_current_rows(conn, normalized_customer_center_id, material_rollup_rows)
+        self._replace_material_relation_current_rows(conn, normalized_customer_center_id, material_relation_rows)
+        updated_at = now_text()
+        self._upsert_material_relation_edges(
+            conn,
+            normalized_customer_center_id,
+            material_source_rows,
+            updated_at=updated_at,
+            snapshot_time=latest_snapshot_time,
+        )
+        self._upsert_material_profile_rows(
+            conn,
+            normalized_customer_center_id,
+            material_rollup_rows,
+            updated_at=updated_at,
+            write_mode="hot_minimal",
+        )
+        return {
+            "snapshot_time": latest_snapshot_time,
+            "material_current_row_count": len(material_rollup_rows),
+            "material_relation_current_row_count": len(material_relation_rows),
+            "material_snapshot_row_count": len(snapshot_rows),
+        }
+
     @staticmethod
     def _invalidate_material_ranking_indexes_for_day(conn: Any, biz_date: str) -> None:
         day_key = str(biz_date or "").strip()
@@ -13658,6 +14997,8 @@ class DashboardService:
         material_rows: list[tuple[Any, ...]] = []
         plan_sync_results: list[dict[str, Any]] = []
         material_types = self._detail_material_types(scoped_config)
+        if "VIDEO" in material_types and "TITLE" not in material_types:
+            material_types = [*material_types, "TITLE"]
         workers = self._material_sync_workers(scoped_config)
         request_timeout_seconds = self._material_sync_request_timeout_seconds()
         request_attempts = self._material_sync_request_attempts()
@@ -13816,17 +15157,11 @@ class DashboardService:
                     material_rollup_rows,
                     updated_at=updated_at,
                 )
-            rebuild_result = self._restore_material_history_day_from_latest_snapshot(
+            rebuild_result = self._restore_material_history_day_from_all_snapshots(
                 conn,
                 customer_center_id,
                 target_date,
             )
-            if not str(rebuild_result.get("snapshot_time") or "").strip():
-                rebuild_result = self._restore_material_history_day_from_all_snapshots(
-                    conn,
-                    customer_center_id,
-                    target_date,
-                )
             self._invalidate_material_ranking_indexes_for_day(conn, target_date)
             self._persist_plan_refresh_states(conn, customer_center_id, plan_sync_results)
         return {
@@ -13881,10 +15216,45 @@ class DashboardService:
             """,
             (normalized_customer_center_id, day_key),
         ).fetchone()
+        material_cost_row = conn.execute(
+            """
+            SELECT
+                ROUND(COALESCE(SUM(stat_cost), 0)::numeric, 2) AS material_daily_cost
+            FROM material_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchone()
+        relation_cost_row = conn.execute(
+            """
+            SELECT
+                ROUND(COALESCE(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE' THEN stat_cost ELSE 0 END), 0)::numeric, 2) AS relation_non_title_cost
+            FROM material_relation_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchone()
+        plan_cost_row = conn.execute(
+            """
+            SELECT ROUND(COALESCE(SUM(stat_cost), 0)::numeric, 2) AS plan_cost
+            FROM plan_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchone()
         return {
             "material_daily_row_count": int((material_daily_row or {}).get("row_count") or 0),
             "material_relation_row_count": int((material_relation_row or {}).get("row_count") or 0),
             "material_snapshot_row_count": int((material_snapshot_row or {}).get("row_count") or 0),
+            "material_daily_stat_cost": round(float((material_cost_row or {}).get("material_daily_cost") or 0.0), 2),
+            "material_relation_non_title_stat_cost": round(
+                float((relation_cost_row or {}).get("relation_non_title_cost") or 0.0),
+                2,
+            ),
+            "plan_stat_cost": round(float((plan_cost_row or {}).get("plan_cost") or 0.0), 2),
         }
 
     def _should_replace_material_history_day(
@@ -13899,8 +15269,18 @@ class DashboardService:
         new_daily = max(int(new_counts.get("material_daily_row_count", 0) or 0), 0)
         new_relation = max(int(new_counts.get("material_relation_row_count", 0) or 0), 0)
         new_snapshot = max(int(new_counts.get("material_snapshot_row_count", 0) or 0), 0)
+        existing_non_title_cost = round(float(existing_counts.get("material_relation_non_title_stat_cost", 0.0) or 0.0), 2)
+        new_non_title_cost = round(float(new_counts.get("material_relation_non_title_stat_cost", 0.0) or 0.0), 2)
+        plan_cost = round(float(existing_counts.get("plan_stat_cost", 0.0) or new_counts.get("plan_stat_cost", 0.0) or 0.0), 2)
         existing_has_rows = any((existing_daily, existing_relation, existing_snapshot))
         new_has_rows = any((new_daily, new_relation, new_snapshot))
+        existing_plan_gap = abs(plan_cost - existing_non_title_cost) if plan_cost > 0 else 0.0
+        new_plan_gap = abs(plan_cost - new_non_title_cost) if plan_cost > 0 else 0.0
+        improves_cost_alignment = (
+            plan_cost > 0
+            and new_non_title_cost > 0
+            and new_plan_gap + 1.0 < existing_plan_gap
+        )
         regresses = (
             new_daily < existing_daily
             or new_relation < existing_relation
@@ -13910,6 +15290,7 @@ class DashboardService:
             new_daily > existing_daily
             or new_relation > existing_relation
             or new_snapshot > existing_snapshot
+            or improves_cost_alignment
         )
         errors = [dict(item) for item in (error_items or []) if isinstance(item, dict)]
         blocking_errors = [
@@ -13919,8 +15300,14 @@ class DashboardService:
         ]
         if existing_has_rows and not new_has_rows:
             return False, "empty_replacement_blocked"
-        if regresses:
+        if regresses and not improves_cost_alignment:
             return False, "smaller_replacement_blocked"
+        if existing_non_title_cost > 0 and new_non_title_cost + 1.0 < existing_non_title_cost and not improves_cost_alignment:
+            return False, "cost_regression_blocked"
+        if plan_cost > 0 and new_non_title_cost > 0 and new_non_title_cost + 1.0 < plan_cost and not improves_cost_alignment:
+            return False, "plan_cost_mismatch_blocked"
+        if improves_cost_alignment and not blocking_errors:
+            return True, "cost_alignment_improved"
         if not blocking_errors:
             return True, "complete_refresh"
         if any(not bool(item.get("retryable")) for item in blocking_errors):
@@ -14633,6 +16020,20 @@ class DashboardService:
             return False
         # cc.oceanengine.com is only a platform preview address, not a direct public file.
         return not host.endswith("cc.oceanengine.com")
+
+    @classmethod
+    def _is_browser_preview_video_candidate_url(cls, url: Any) -> bool:
+        text = cls._normalize_media_url(url)
+        if not text:
+            return False
+        try:
+            parsed = urlsplit(text)
+        except ValueError:
+            return False
+        host = str(parsed.netloc or "").strip().lower()
+        if parsed.scheme not in {"http", "https"} or not host:
+            return False
+        return not cls._is_internal_preview_video_url(text)
 
     @classmethod
     def _needs_preview_video_redirect_resolution(cls, url: Any) -> bool:
@@ -16347,6 +17748,7 @@ class DashboardService:
             (customer_center_id, int(advertiser_id), str(start_date).strip(), str(end_date).strip()),
         )
         if records:
+            timezone_name = str(self.read_config().get("timezone") or TIMEZONE)
             conn.executemany(
                 """
                 INSERT INTO comment_records (
@@ -16380,7 +17782,7 @@ class DashboardService:
                         int(record["advertiser_id"]),
                         str(record["comment_id"]),
                         str(record["comment_date"] or ""),
-                        self._db_optional_timestamp_value(record.get("create_time")),
+                        self._db_local_timestamp_value(record.get("create_time"), timezone_name),
                         str(record["advertiser_name"] or advertiser_name or advertiser_id),
                         str(record["text"] or ""),
                         self._safe_int(record.get("reply_count", 0)),
@@ -16395,8 +17797,8 @@ class DashboardService:
                         str(record["material_id"] or ""),
                         str(record["item_id"] or ""),
                         str(record["raw_json"] or "{}"),
-                        self._db_optional_timestamp_value(record.get("fetched_at") or attempted_at),
-                        self._db_optional_timestamp_value(record.get("updated_at") or attempted_at),
+                        self._db_local_timestamp_value(record.get("fetched_at") or attempted_at, timezone_name),
+                        self._db_local_timestamp_value(record.get("updated_at") or attempted_at, timezone_name),
                     )
                     for record in records
                 ],
@@ -16410,6 +17812,7 @@ class DashboardService:
             sync_date = str(record.get("comment_date") or "").strip()
             if sync_date in date_counts:
                 date_counts[sync_date] += 1
+        timezone_name = str(self.read_config().get("timezone") or TIMEZONE)
         conn.executemany(
             """
             INSERT INTO comment_sync_states (
@@ -16432,8 +17835,8 @@ class DashboardService:
                     str(advertiser_name or advertiser_id),
                     "ok",
                     int(date_counts.get(sync_date, 0)),
-                    attempted_at,
-                    attempted_at,
+                    self._db_local_timestamp_value(attempted_at, timezone_name),
+                    self._db_local_timestamp_value(attempted_at, timezone_name),
                     "",
                 )
                 for sync_date in requested_dates
@@ -16455,6 +17858,7 @@ class DashboardService:
             datetime.strptime(str(start_date).strip(), "%Y-%m-%d"),
             datetime.strptime(str(end_date).strip(), "%Y-%m-%d"),
         )
+        timezone_name = str(self.read_config().get("timezone") or TIMEZONE)
         conn.executemany(
             """
             INSERT INTO comment_sync_states (
@@ -16476,7 +17880,7 @@ class DashboardService:
                     str(advertiser_name or advertiser_id),
                     "error",
                     0,
-                    attempted_at,
+                    self._db_local_timestamp_value(attempted_at, timezone_name),
                     None,
                     str(error_message or ""),
                 )
@@ -16809,6 +18213,9 @@ class DashboardService:
         advertiser_ids: set[int],
         start_date: str,
         end_date: str,
+        window_start: str = "",
+        window_end: str = "",
+        tz_name: str = TIMEZONE,
     ) -> list[dict[str, Any]]:
         if not advertiser_ids:
             return []
@@ -16819,6 +18226,13 @@ class DashboardService:
             str(end_date).strip(),
             *sorted(advertiser_ids),
         ]
+        window_clause = ""
+        if str(window_start or "").strip():
+            window_clause += " AND create_time >= ?"
+            params.append(self._db_local_timestamp_value(window_start, tz_name))
+        if str(window_end or "").strip():
+            window_clause += " AND create_time <= ?"
+            params.append(self._db_local_timestamp_value(window_end, tz_name))
         rows = conn.execute(
             f"""
             SELECT
@@ -16830,11 +18244,52 @@ class DashboardService:
               AND comment_date >= ?
               AND comment_date <= ?
               AND advertiser_id IN ({advertiser_placeholders})
+              {window_clause}
             ORDER BY create_time DESC, like_count DESC, reply_count DESC, comment_id DESC
             """,
             params,
         ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _comment_sibling_context_maps(items: list[dict[str, Any]]) -> tuple[
+        dict[tuple[int, str], dict[str, str]],
+        dict[str, dict[str, str]],
+    ]:
+        exact_by_item: dict[tuple[int, str], dict[str, str]] = {}
+        fallback_by_item: dict[str, dict[str, str]] = {}
+
+        def merge_context(target: dict[str, str], source: dict[str, str]) -> None:
+            for key, value in source.items():
+                if value and not target.get(key):
+                    target[key] = value
+
+        def put_context(target: dict[Any, dict[str, str]], key: Any, context: dict[str, str]) -> None:
+            if not key:
+                return
+            if key not in target:
+                target[key] = dict(context)
+                return
+            merge_context(target[key], context)
+
+        for item in items:
+            advertiser_id = int(item.get("advertiser_id", 0) or 0)
+            item_id = str(item.get("item_id") or "").strip()
+            if not item_id:
+                continue
+            context = {
+                "promotion_id": str(item.get("promotion_id") or "").strip(),
+                "promotion_name": str(item.get("promotion_name") or "").strip(),
+                "material_id": str(item.get("material_id") or "").strip(),
+                "material_name": str(item.get("material_name") or "").strip(),
+                "comment_anchor_name": str(item.get("comment_anchor_name") or item.get("top_anchor_name") or "").strip(),
+            }
+            if not any(context.values()):
+                continue
+            if advertiser_id:
+                put_context(exact_by_item, (advertiser_id, item_id), context)
+            put_context(fallback_by_item, item_id, context)
+        return exact_by_item, fallback_by_item
 
     def _mark_comment_replied(self, conn: Any, advertiser_id: int, comment_id: str, updated_at: str) -> None:
         row = conn.execute(
@@ -16861,8 +18316,8 @@ class DashboardService:
             """,
             (
                 next_reply_count,
-                self._db_optional_timestamp_value(updated_at),
-                self._db_optional_timestamp_value(updated_at),
+                self._db_local_timestamp_value(updated_at, self.read_config().get("timezone") or TIMEZONE),
+                self._db_local_timestamp_value(updated_at, self.read_config().get("timezone") or TIMEZONE),
                 self._current_customer_center_id(),
                 int(advertiser_id),
                 str(comment_id).strip(),
@@ -16879,8 +18334,8 @@ class DashboardService:
               AND comment_id = ?
             """,
             (
-                self._db_optional_timestamp_value(updated_at),
-                self._db_optional_timestamp_value(updated_at),
+                self._db_local_timestamp_value(updated_at, self.read_config().get("timezone") or TIMEZONE),
+                self._db_local_timestamp_value(updated_at, self.read_config().get("timezone") or TIMEZONE),
                 self._current_customer_center_id(),
                 int(advertiser_id),
                 str(comment_id).strip(),
@@ -16915,45 +18370,38 @@ class DashboardService:
         )
         cache_version = self._shared_cache_version("comment")
         versioned_cache_key = self._versioned_cache_key(cache_version, cache_key)
-        now_ts = time.time()
-        if not force_refresh:
-            cached_payload = self._local_dict_cache_get(self._comment_cache, versioned_cache_key, COMMENT_CACHE_SECONDS)
-            if cached_payload is not None:
-                if cached_payload.get("comment_sync_pending"):
-                    cached_payload["comment_sync_queued"] = self._queue_comment_sync_if_needed(
-                        str(cached_payload.get("query_start_date") or start_dt.strftime("%Y-%m-%d")),
-                        str(cached_payload.get("query_end_date") or end_dt.strftime("%Y-%m-%d")),
-                        advertiser_id=selected_advertiser_id,
-                        allowed_advertiser_ids=allowed_advertiser_ids,
-                    )
-                cached_meta = dict(cached_payload.get("meta") or {})
-                return self._attach_freshness(
-                    cached_payload,
-                    data_time=self._latest_item_datetime(cached_payload.get("items"), "create_time"),
-                    synced_at=cached_payload.get("fetched_at"),
-                    source="stored_comments",
-                    partial=bool(cached_payload.get("comment_sync_pending"))
-                    or int(cached_meta.get("error_count", 0) or 0) > 0,
+        _local_comment_fresh_ttl, local_comment_stale_ttl = self._secondary_local_cache_ttls(
+            COMMENT_CACHE_SECONDS,
+            COMMENT_CACHE_SECONDS,
+        )
+
+        def cached_comment_response(payload: dict[str, Any]) -> dict[str, Any]:
+            next_payload = copy.deepcopy(payload)
+            if next_payload.get("comment_sync_pending"):
+                next_payload["comment_sync_queued"] = self._queue_comment_sync_if_needed(
+                    str(next_payload.get("query_start_date") or start_dt.strftime("%Y-%m-%d")),
+                    str(next_payload.get("query_end_date") or end_dt.strftime("%Y-%m-%d")),
+                    advertiser_id=selected_advertiser_id,
+                    allowed_advertiser_ids=allowed_advertiser_ids,
                 )
+            meta = dict(next_payload.get("meta") or {})
+            return self._attach_freshness(
+                next_payload,
+                data_time=self._latest_item_datetime(next_payload.get("items"), "create_time"),
+                synced_at=next_payload.get("fetched_at"),
+                source="stored_comments",
+                partial=bool(next_payload.get("comment_sync_pending")) or int(meta.get("error_count", 0) or 0) > 0,
+            )
+
+        if not force_refresh:
             shared_payload = self._shared_dict_cache_get("comment", cache_key, cache_version)
             if shared_payload is not None:
-                if shared_payload.get("comment_sync_pending"):
-                    shared_payload["comment_sync_queued"] = self._queue_comment_sync_if_needed(
-                        str(shared_payload.get("query_start_date") or start_dt.strftime("%Y-%m-%d")),
-                        str(shared_payload.get("query_end_date") or end_dt.strftime("%Y-%m-%d")),
-                        advertiser_id=selected_advertiser_id,
-                        allowed_advertiser_ids=allowed_advertiser_ids,
-                    )
-                self._local_dict_cache_set(self._comment_cache, versioned_cache_key, shared_payload)
-                shared_meta = dict(shared_payload.get("meta") or {})
-                return self._attach_freshness(
-                    shared_payload,
-                    data_time=self._latest_item_datetime(shared_payload.get("items"), "create_time"),
-                    synced_at=shared_payload.get("fetched_at"),
-                    source="stored_comments",
-                    partial=bool(shared_payload.get("comment_sync_pending"))
-                    or int(shared_meta.get("error_count", 0) or 0) > 0,
-                )
+                return cached_comment_response(shared_payload)
+            cached_payload = self._local_dict_cache_get(self._comment_cache, versioned_cache_key, local_comment_stale_ttl)
+            if cached_payload is not None:
+                self._shared_dict_cache_set("comment", cache_key, cache_version, cached_payload, COMMENT_CACHE_SECONDS)
+                resolved_payload = self._shared_dict_cache_get("comment", cache_key, cache_version) or cached_payload
+                return cached_comment_response(resolved_payload)
 
         all_accounts = self._comment_stored_account_catalog(allowed_advertiser_ids)
         accounts = list(all_accounts)
@@ -16987,9 +18435,10 @@ class DashboardService:
                 source="stored_comments",
                 partial=False,
             )
-            self._local_dict_cache_set(self._comment_cache, versioned_cache_key, payload)
             self._shared_dict_cache_set("comment", cache_key, cache_version, payload, COMMENT_CACHE_SECONDS)
-            return payload
+            resolved_payload = self._shared_dict_cache_get("comment", cache_key, cache_version) or payload
+            self._local_dict_cache_set(self._comment_cache, versioned_cache_key, resolved_payload)
+            return resolved_payload
 
         comment_start_date = start_dt.strftime("%Y-%m-%d")
         comment_end_date = end_dt.strftime("%Y-%m-%d")
@@ -17032,9 +18481,20 @@ class DashboardService:
         material_context_by_material: dict[tuple[int, str], dict[str, str]] = {}
         fallback_material_context_by_item: dict[str, dict[str, str]] = {}
         fallback_material_context_by_material: dict[str, dict[str, str]] = {}
+        sibling_context_by_item: dict[tuple[int, str], dict[str, str]] = {}
+        fallback_sibling_context_by_item: dict[str, dict[str, str]] = {}
         with self.db() as conn:
-            stored_rows = self._stored_comment_records(conn, account_ids, comment_start_date, comment_end_date)
+            stored_rows = self._stored_comment_records(
+                conn,
+                account_ids,
+                comment_start_date,
+                comment_end_date,
+                window_start,
+                window_end,
+                config["timezone"],
+            )
             items = [self._comment_item_from_record(row) for row in stored_rows]
+            sibling_context_by_item, fallback_sibling_context_by_item = self._comment_sibling_context_maps(items)
             advertiser_ids = {int(item["advertiser_id"]) for item in items if int(item.get("advertiser_id", 0) or 0)}
             promotion_ids = {
                 int(str(item.get("promotion_id") or "").strip())
@@ -17054,7 +18514,10 @@ class DashboardService:
             plan_map, fallback_plan_map = self._comment_plan_context_maps(conn, advertiser_ids, promotion_ids)
             material_map, fallback_material_map = self._comment_material_name_maps(conn, advertiser_ids, material_ids)
             context_day_count = max((end_dt.date() - start_dt.date()).days + 1, 1)
-            if context_day_count <= COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS:
+            if (
+                context_day_count <= COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS
+                and len(items) <= COMMENT_INLINE_MATERIAL_CONTEXT_MAX_ROWS
+            ):
                 (
                     material_context_by_item,
                     material_context_by_material,
@@ -17074,6 +18537,18 @@ class DashboardService:
             promotion_text = str(item.get("promotion_id") or "").strip()
             material_text = str(item.get("material_id") or "").strip()
             item_text = str(item.get("item_id") or "").strip()
+            sibling_context = {}
+            if item_text:
+                sibling_context = sibling_context_by_item.get(
+                    (advertiser_id_value, item_text),
+                    {},
+                ) or fallback_sibling_context_by_item.get(item_text, {})
+            if not promotion_text and str(sibling_context.get("promotion_id") or "").strip():
+                promotion_text = str(sibling_context.get("promotion_id") or "").strip()
+                item["promotion_id"] = promotion_text
+            if not material_text and str(sibling_context.get("material_id") or "").strip():
+                material_text = str(sibling_context.get("material_id") or "").strip()
+                item["material_id"] = material_text
             plan_context: dict[str, str] = {}
             if promotion_text.isdigit():
                 promotion_id_value = int(promotion_text)
@@ -17098,6 +18573,10 @@ class DashboardService:
                 for key, value in material_context.items():
                     if value and not plan_context.get(key):
                         plan_context[key] = value
+            if sibling_context:
+                for key, value in sibling_context.items():
+                    if value and not plan_context.get(key):
+                        plan_context[key] = value
             inferred_promotion_id = str(plan_context.get("promotion_id") or "").strip()
             if not promotion_text and inferred_promotion_id:
                 promotion_text = inferred_promotion_id
@@ -17106,7 +18585,7 @@ class DashboardService:
             material_name = material_map.get((advertiser_id_value, material_text), "") or fallback_material_map.get(
                 material_text,
                 "",
-            ) or str(plan_context.get("material_name") or "").strip()
+            ) or str(plan_context.get("material_name") or sibling_context.get("material_name") or "").strip()
             comment_anchor_name = str(plan_context.get("comment_anchor_name") or "").strip()
             plan_source = str(plan_context.get("plan_source") or "").strip()
             item["promotion_name"] = promotion_name
@@ -17154,9 +18633,10 @@ class DashboardService:
             source="stored_comments",
             partial=bool(comment_sync_pending) or len(errors) > 0,
         )
-        self._local_dict_cache_set(self._comment_cache, versioned_cache_key, payload)
         self._shared_dict_cache_set("comment", cache_key, cache_version, payload, COMMENT_CACHE_SECONDS)
-        return payload
+        resolved_payload = self._shared_dict_cache_get("comment", cache_key, cache_version) or payload
+        self._local_dict_cache_set(self._comment_cache, versioned_cache_key, resolved_payload)
+        return resolved_payload
 
     def reply_comment(
         self,
@@ -17297,6 +18777,9 @@ class DashboardService:
 
         config = self.read_config()
         client = self.build_client(config)
+        plan_material_requests_per_minute = self._material_hot_plan_material_requests_per_minute_default()
+        if plan_material_requests_per_minute > 0:
+            client.configure_plan_material_rate_limit(plan_material_requests_per_minute)
         with self.db() as conn:
             job = conn.execute("SELECT * FROM material_upload_jobs WHERE id = ? LIMIT 1", (int(job_id),)).fetchone()
             if not job:
@@ -17343,6 +18826,7 @@ class DashboardService:
                     SELECT target_id, file_id
                     FROM material_upload_job_target_assets
                     WHERE job_id = ?
+                      AND status IN ('queued', 'running')
                     ORDER BY target_id ASC, file_id ASC
                     """,
                     (int(job_id),),
@@ -17350,6 +18834,7 @@ class DashboardService:
             ]
 
         plan_context_map = self._latest_plan_context_map([int(item["ad_id"]) for item in target_rows])
+        plan_context_map = self._hydrate_upload_plan_context_map(client, target_rows, plan_context_map)
         advertiser_plan_map: dict[int, list[dict[str, Any]]] = {}
         target_lookup = {int(item["id"]): item for item in target_rows}
         for target in target_rows:
@@ -17357,6 +18842,7 @@ class DashboardService:
 
         target_file_id_map: dict[int, set[int]] = {}
         file_advertiser_id_map: dict[int, set[int]] = {}
+        scoped_target_asset_rows = bool(target_asset_rows)
         if target_asset_rows:
             for row in target_asset_rows:
                 target_id = int(row.get("target_id", 0) or 0)
@@ -17372,11 +18858,154 @@ class DashboardService:
             for file_row in file_rows:
                 file_advertiser_id_map[int(file_row["id"])] = set(all_advertiser_ids)
 
+        upload_concurrency = self._material_upload_library_concurrency()
+        if upload_concurrency > 1:
+            with self.db() as conn:
+                self._update_material_upload_job(
+                    conn,
+                    int(job_id),
+                    note=f"{running_note} 千川素材库上传并发 {upload_concurrency}。",
+                    updated_at=now_text(),
+                )
         file_assets: dict[tuple[int, int], dict[str, str]] = {}
+        file_upload_states: dict[int, dict[str, Any]] = {}
+        upload_work_items: list[dict[str, Any]] = []
+
+        def apply_upload_result(result: dict[str, Any]) -> None:
+            file_id = int(result.get("file_id", 0) or 0)
+            advertiser_id = int(result.get("advertiser_id", 0) or 0)
+            state = file_upload_states.get(file_id)
+            if not state:
+                return
+            state["processed_advertisers"] = int(state.get("processed_advertisers", 0) or 0) + 1
+            if str(result.get("status") or "") == "success":
+                asset = {
+                    "material_id": str(result.get("material_id") or ""),
+                    "video_id": str(result.get("video_id") or ""),
+                    "video_url": str(result.get("video_url") or ""),
+                }
+                file_assets[(file_id, advertiser_id)] = asset
+                if not state.get("first_asset"):
+                    state["first_asset"] = asset
+                state["success_advertisers"] = int(state.get("success_advertisers", 0) or 0) + 1
+                return
+            state["failed_advertisers"] = int(state.get("failed_advertisers", 0) or 0) + 1
+            message = str(result.get("message") or "上传失败。")
+            advertiser_label = str(result.get("advertiser_name") or advertiser_id)
+            state.setdefault("file_errors", []).append(f"{advertiser_label}: {message}")
+
+        def upload_library_asset(item: dict[str, Any]) -> dict[str, Any]:
+            file_row = dict(item.get("file_row") or {})
+            file_id = int(item.get("file_id", 0) or 0)
+            advertiser_id = int(item.get("advertiser_id", 0) or 0)
+            advertiser_name = str(item.get("advertiser_name") or "")
+            file_path = Path(str(item.get("file_path") or ""))
+            probe_summary = str(item.get("probe_summary") or "")
+            started_monotonic = time.monotonic()
+            try:
+                upload_response = client.upload_local_video(
+                    advertiser_id=advertiser_id,
+                    material_name=str(file_row.get("original_name") or ""),
+                    file_path=file_path,
+                    video_signature=str(file_row.get("file_md5") or ""),
+                    mime_type=str(file_row.get("mime_type") or "video/mp4"),
+                )
+                data = upload_response.get("data") or {}
+                asset = {
+                    "material_id": str(data.get("material_id") or ""),
+                    "video_id": str(data.get("video_id") or ""),
+                    "video_url": str(data.get("video_url") or ""),
+                }
+                if not asset["video_id"]:
+                    raise RuntimeError(f"upload response missing video_id: {upload_response}")
+                elapsed_seconds = max(time.monotonic() - started_monotonic, 0.0)
+                message = f"{upload_success_message} 用时 {elapsed_seconds:.1f} 秒。"
+                with self.db() as conn:
+                    self._upsert_advertiser_material_asset_locked(
+                        conn,
+                        advertiser_id,
+                        str(file_row.get("file_sha256") or ""),
+                        asset["material_id"],
+                        asset["video_id"],
+                        asset["video_url"],
+                        str(file_row.get("original_name") or ""),
+                    )
+                    self._upsert_material_upload_file_asset_locked(
+                        conn,
+                        int(job_id),
+                        file_id,
+                        advertiser_id,
+                        advertiser_name,
+                        "success",
+                        material_id=asset["material_id"],
+                        video_id=asset["video_id"],
+                        video_url=asset["video_url"],
+                        message=message,
+                    )
+                LOGGER.info(
+                    "material library upload success: job_id=%s file_id=%s advertiser_id=%s elapsed=%.1fs size=%s",
+                    int(job_id),
+                    file_id,
+                    advertiser_id,
+                    elapsed_seconds,
+                    int(file_row.get("file_size", 0) or 0),
+                )
+                return {
+                    "status": "success",
+                    "file_id": file_id,
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": advertiser_name,
+                    **asset,
+                    "message": message,
+                    "elapsed_seconds": elapsed_seconds,
+                }
+            except Exception as exc:  # noqa: BLE001
+                elapsed_seconds = max(time.monotonic() - started_monotonic, 0.0)
+                message = self._append_upload_probe_summary(str(exc), probe_summary)
+                with self.db() as conn:
+                    self._upsert_material_upload_file_asset_locked(
+                        conn,
+                        int(job_id),
+                        file_id,
+                        advertiser_id,
+                        advertiser_name,
+                        "failed",
+                        message=message,
+                    )
+                LOGGER.warning(
+                    "material library upload failed: job_id=%s file_id=%s advertiser_id=%s elapsed=%.1fs error=%s",
+                    int(job_id),
+                    file_id,
+                    advertiser_id,
+                    elapsed_seconds,
+                    message,
+                )
+                return {
+                    "status": "failed",
+                    "file_id": file_id,
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": advertiser_name,
+                    "message": message,
+                    "elapsed_seconds": elapsed_seconds,
+                }
+
         for file_row in file_rows:
             file_id = int(file_row["id"])
+            if scoped_target_asset_rows and file_id not in file_advertiser_id_map:
+                continue
             file_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
             retry_advertiser_ids = sorted(file_advertiser_id_map.get(file_id) or advertiser_plan_map.keys())
+            state: dict[str, Any] = {
+                "file_row": file_row,
+                "retry_advertiser_ids": retry_advertiser_ids,
+                "probe_summary": "",
+                "success_advertisers": 0,
+                "failed_advertisers": 0,
+                "processed_advertisers": 0,
+                "first_asset": None,
+                "file_errors": [],
+            }
+            file_upload_states[file_id] = state
             if not file_path.exists():
                 with self.db() as conn:
                     for advertiser_id in retry_advertiser_ids:
@@ -17391,28 +19020,21 @@ class DashboardService:
                             "failed",
                             message=missing_file_message,
                         )
-                    conn.execute(
-                        """
-                        UPDATE material_upload_job_files
-                        SET status = 'failed', message = ?, processed_advertisers = ?, success_advertisers = 0, failed_advertisers = ?, updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            missing_file_message,
-                            len(retry_advertiser_ids),
-                            len(retry_advertiser_ids),
-                            now_text(),
-                            file_id,
-                        ),
+                for advertiser_id in retry_advertiser_ids:
+                    targets = advertiser_plan_map.get(advertiser_id) or []
+                    apply_upload_result(
+                        {
+                            "status": "failed",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": str(targets[0].get("advertiser_name") or "") if targets else "",
+                            "message": missing_file_message,
+                        }
                     )
-                    self._recompute_material_upload_job_locked(conn, int(job_id))
                 continue
 
             probe_summary, preflight_failure_message = self._probe_upload_video(file_row, file_path)
-            success_advertisers = 0
-            failed_advertisers = 0
-            first_asset: dict[str, str] | None = None
-            file_errors: list[str] = []
+            state["probe_summary"] = probe_summary
             for advertiser_id in retry_advertiser_ids:
                 targets = advertiser_plan_map.get(advertiser_id) or []
                 if not targets:
@@ -17430,9 +19052,6 @@ class DashboardService:
                         "video_id": str(cached.get("video_id") or ""),
                         "video_url": str(cached.get("video_url") or ""),
                     }
-                    file_assets[(file_id, advertiser_id)] = asset
-                    first_asset = first_asset or asset
-                    success_advertisers += 1
                     with self.db() as conn:
                         self._upsert_material_upload_file_asset_locked(
                             conn,
@@ -17446,67 +19065,28 @@ class DashboardService:
                             video_url=asset["video_url"],
                             message=reuse_message,
                         )
-                    continue
-                if preflight_failure_message:
-                    failed_advertisers += 1
-                    message = preflight_failure_message
-                    file_errors.append(f"{advertiser_name or advertiser_id}: {message}")
-                    with self.db() as conn:
-                        self._upsert_material_upload_file_asset_locked(
-                            conn,
-                            int(job_id),
-                            file_id,
-                            advertiser_id,
-                            advertiser_name,
-                            "failed",
-                            message=message,
-                        )
-                    continue
-                try:
-                    upload_response = client.upload_local_video(
-                        advertiser_id=advertiser_id,
-                        material_name=str(file_row.get("original_name") or ""),
-                        file_path=file_path,
-                        video_signature=str(file_row.get("file_md5") or ""),
-                        mime_type=str(file_row.get("mime_type") or "video/mp4"),
+                    apply_upload_result(
+                        {
+                            "status": "success",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            **asset,
+                            "message": reuse_message,
+                        }
                     )
-                    data = upload_response.get("data") or {}
-                    asset = {
-                        "material_id": str(data.get("material_id") or ""),
-                        "video_id": str(data.get("video_id") or ""),
-                        "video_url": str(data.get("video_url") or ""),
-                    }
-                    if not asset["video_id"]:
-                        raise RuntimeError(f"upload response missing video_id: {upload_response}")
-                    file_assets[(file_id, advertiser_id)] = asset
-                    first_asset = first_asset or asset
-                    success_advertisers += 1
-                    with self.db() as conn:
-                        self._upsert_advertiser_material_asset_locked(
-                            conn,
-                            advertiser_id,
-                            str(file_row.get("file_sha256") or ""),
-                            asset["material_id"],
-                            asset["video_id"],
-                            asset["video_url"],
-                            str(file_row.get("original_name") or ""),
-                        )
-                        self._upsert_material_upload_file_asset_locked(
-                            conn,
-                            int(job_id),
-                            file_id,
-                            advertiser_id,
-                            advertiser_name,
-                            "success",
-                            material_id=asset["material_id"],
-                            video_id=asset["video_id"],
-                            video_url=asset["video_url"],
-                            message=upload_success_message,
-                        )
-                except Exception as exc:
-                    failed_advertisers += 1
-                    message = self._append_upload_probe_summary(str(exc), probe_summary)
-                    file_errors.append(f"{advertiser_name or advertiser_id}: {message}")
+                    continue
+                with self.db() as conn:
+                    self._upsert_material_upload_file_asset_locked(
+                        conn,
+                        int(job_id),
+                        file_id,
+                        advertiser_id,
+                        advertiser_name,
+                        "running",
+                        message="正在上传素材。",
+                    )
+                if preflight_failure_message:
                     with self.db() as conn:
                         self._upsert_material_upload_file_asset_locked(
                             conn,
@@ -17515,16 +19095,66 @@ class DashboardService:
                             advertiser_id,
                             advertiser_name,
                             "failed",
-                            message=message,
+                            message=preflight_failure_message,
                         )
+                    apply_upload_result(
+                        {
+                            "status": "failed",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            "message": preflight_failure_message,
+                        }
+                    )
+                    continue
+                upload_work_items.append(
+                    {
+                        "file_row": file_row,
+                        "file_id": file_id,
+                        "advertiser_id": advertiser_id,
+                        "advertiser_name": advertiser_name,
+                        "file_path": str(file_path),
+                        "probe_summary": probe_summary,
+                    }
+                )
 
+        if upload_work_items:
+            worker_count = min(upload_concurrency, len(upload_work_items))
+            if worker_count > 1:
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    future_map = {pool.submit(upload_library_asset, item): item for item in upload_work_items}
+                    for future in as_completed(future_map):
+                        item = future_map[future]
+                        try:
+                            result = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            result = {
+                                "status": "failed",
+                                "file_id": int(item.get("file_id", 0) or 0),
+                                "advertiser_id": int(item.get("advertiser_id", 0) or 0),
+                                "advertiser_name": str(item.get("advertiser_name") or ""),
+                                "message": str(exc),
+                            }
+                        apply_upload_result(result)
+            else:
+                for item in upload_work_items:
+                    apply_upload_result(upload_library_asset(item))
+
+        for file_id in sorted(file_upload_states):
+            state = file_upload_states[file_id]
+            file_row = dict(state.get("file_row") or {})
+            success_advertisers = int(state.get("success_advertisers", 0) or 0)
+            failed_advertisers = int(state.get("failed_advertisers", 0) or 0)
+            first_asset = state.get("first_asset") or {}
+            probe_summary = str(state.get("probe_summary") or "")
+            file_errors = list(state.get("file_errors") or [])
             file_status = "success" if failed_advertisers == 0 and success_advertisers > 0 else "failed"
             if success_advertisers > 0 and failed_advertisers > 0:
                 file_status = "partial"
-            file_message = upload_success_message if file_status == "success" else "?".join(file_errors[:3]) or "\u4e0a\u4f20\u5931\u8d25\u3002"
+            file_message = upload_success_message if file_status == "success" else "；".join(file_errors[:3]) or "上传失败。"
             if probe_summary and (
                 file_status != "success"
-                or not probe_summary.startswith("\u89c6\u9891\u5143\u6570\u636e\u63a2\u6d4b\u5931\u8d25")
+                or not probe_summary.startswith("视频元数据探测失败")
             ):
                 file_message = self._append_upload_probe_summary(file_message, probe_summary)
             with self.db() as conn:
@@ -17545,13 +19175,165 @@ class DashboardService:
                         success_advertisers,
                         failed_advertisers,
                         now_text(),
-                        file_id,
+                        int(file_row.get("id", file_id) or file_id),
                     ),
                 )
                 self._recompute_material_upload_job_locked(conn, int(job_id))
 
+        cover_image_material_cache: dict[tuple[int, str, str], list[dict[str, Any]]] = {}
+        cover_image_material_locks: dict[tuple[int, str, str], threading.Lock] = {}
+        cover_image_material_locks_guard = threading.Lock()
+        bind_concurrency = self._material_upload_bind_concurrency()
+        all_files_received = len(file_rows) >= int(job.get("total_files", 0) or 0)
+        advertiser_bind_locks = {
+            int(advertiser_id): threading.Semaphore(1) for advertiser_id in advertiser_plan_map.keys()
+        }
+        if bind_concurrency > 1:
+            with self.db() as conn:
+                bind_note = f"{running_note} 千川素材库上传并发 {upload_concurrency}，计划绑定并发 {bind_concurrency}"
+                if plan_material_requests_per_minute > 0:
+                    bind_note = f"{bind_note}，计划素材接口限速 {plan_material_requests_per_minute} rpm。"
+                else:
+                    bind_note = f"{bind_note}。"
+                self._update_material_upload_job(
+                    conn,
+                    int(job_id),
+                    note=bind_note,
+                    updated_at=now_text(),
+                )
+
+        def prepare_generated_cover_image_material(
+            advertiser_id: int,
+            file_path: Path,
+            context: dict[str, Any],
+            material_title: str,
+            video_material_defaults: dict[str, str],
+        ) -> list[dict[str, Any]]:
+            image_mode = str(video_material_defaults.get("image_mode") or "").strip().upper()
+            cache_key = (int(advertiser_id), str(file_path), image_mode)
+            with cover_image_material_locks_guard:
+                cache_lock = cover_image_material_locks.setdefault(cache_key, threading.Lock())
+            with cache_lock:
+                return self._build_cover_image_material(
+                    client,
+                    advertiser_id,
+                    file_path,
+                    context,
+                    material_title,
+                    cover_image_material_cache,
+                )
+
+        def mark_target_asset_status(target_id: int, file_id: int, status_text: str, message: str) -> None:
+            with self.db() as conn:
+                self._upsert_material_upload_target_asset_locked(
+                    conn,
+                    int(job_id),
+                    int(target_id),
+                    int(file_id),
+                    status_text,
+                    message,
+                )
+
+        def mark_target_asset_statuses(target_id: int, file_ids: list[int], status_text: str, message: str) -> None:
+            normalized_file_ids = [int(file_id) for file_id in file_ids if int(file_id or 0) > 0]
+            if not normalized_file_ids:
+                return
+            with self.db() as conn:
+                for file_id in normalized_file_ids:
+                    self._upsert_material_upload_target_asset_locked(
+                        conn,
+                        int(job_id),
+                        int(target_id),
+                        int(file_id),
+                        status_text,
+                        message,
+                    )
+
+        def bind_target_assets(item: dict[str, Any]) -> dict[str, Any]:
+            target = dict(item.get("target") or {})
+            advertiser_id = int(target.get("advertiser_id", 0) or 0)
+            ad_id = int(target.get("ad_id", 0) or 0)
+            target_id = int(target.get("id", 0) or 0)
+            context = dict(item.get("context") or {})
+            marketing_goal = str(context.get("marketing_goal") or "").strip()
+            reused_image_material = [dict(entry) for entry in item.get("reused_image_material") or []]
+            video_material_defaults = dict(item.get("video_material_defaults") or {})
+            candidate_file_rows = [dict(row) for row in item.get("file_rows") or []]
+            stop_message = ""
+            stopped_due_to_limit = False
+            for row_index, file_row in enumerate(candidate_file_rows):
+                file_id = int(file_row.get("id", 0) or 0)
+                file_name = str(file_row.get("original_name") or file_row.get("stored_name") or file_id)
+                if stop_message:
+                    remaining_ids = [file_id]
+                    remaining_ids.extend(
+                        int(dict(remaining).get("id", 0) or 0)
+                        for remaining in candidate_file_rows[row_index + 1 :]
+                    )
+                    mark_target_asset_statuses(
+                        target_id,
+                        remaining_ids,
+                        "failed",
+                        self._material_upload_target_limit_skip_message(stop_message),
+                    )
+                    break
+                asset = dict(file_assets.get((file_id, advertiser_id)) or {})
+                if not str(asset.get("video_id") or ""):
+                    mark_target_asset_status(target_id, file_id, "failed", missing_asset_message)
+                    continue
+                mark_target_asset_status(target_id, file_id, "running", "正在绑定计划。")
+                try:
+                    material_title = self._material_title_from_filename(str(file_row.get("original_name") or ""))
+                    bind_image_material = (
+                        []
+                        if marketing_goal == "VIDEO_PROM_GOODS"
+                        else [dict(entry) for entry in reused_image_material]
+                    )
+                    file_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
+                    bind_video_cover_id = str(video_material_defaults.get("video_cover_id") or "")
+                    needs_generated_image_material = not bind_image_material and marketing_goal != "VIDEO_PROM_GOODS"
+                    if (not bind_video_cover_id or needs_generated_image_material) and file_path.exists():
+                        generated_cover_image_material = prepare_generated_cover_image_material(
+                            advertiser_id,
+                            file_path,
+                            context,
+                            material_title,
+                            video_material_defaults,
+                        )
+                        if not bind_video_cover_id:
+                            bind_video_cover_id = self._first_image_id_from_image_material(generated_cover_image_material)
+                        if needs_generated_image_material:
+                            bind_image_material = [dict(entry) for entry in generated_cover_image_material]
+                    advertiser_lock = advertiser_bind_locks.setdefault(advertiser_id, threading.Semaphore(1))
+                    with advertiser_lock:
+                        client.add_plan_material(
+                            advertiser_id=advertiser_id,
+                            ad_id=ad_id,
+                            material_title=material_title,
+                            video_id=str(asset.get("video_id") or ""),
+                            marketing_goal=marketing_goal,
+                            product_id=str(context.get("product_id") or ""),
+                            image_material=bind_image_material,
+                            video_image_mode=str(video_material_defaults.get("image_mode") or ""),
+                            video_cover_id=bind_video_cover_id,
+                        )
+                    mark_target_asset_status(target_id, file_id, "success", bind_success_message)
+                except Exception as exc:  # noqa: BLE001
+                    message = str(exc)
+                    mark_target_asset_status(target_id, file_id, "failed", message)
+                    if self._is_material_upload_target_limit_error(message):
+                        stop_message = message
+                        stopped_due_to_limit = True
+            return {"target_id": target_id, "stopped_due_to_limit": stopped_due_to_limit}
+
+        bind_work_items: list[dict[str, Any]] = []
+        target_ids_to_aggregate: set[int] = set()
+        skip_aggregate_target_ids: set[int] = set()
         for target in target_rows:
             target_id = int(target["id"])
+            if scoped_target_asset_rows and target_id not in target_file_id_map:
+                continue
+            target_ids_to_aggregate.add(target_id)
             advertiser_id = int(target["advertiser_id"])
             ad_id = int(target["ad_id"])
             allowed_file_ids = target_file_id_map.get(target_id)
@@ -17570,6 +19352,7 @@ class DashboardService:
                         (no_target_material_message, now_text(), target_id),
                     )
                     self._recompute_material_upload_job_locked(conn, int(job_id))
+                skip_aggregate_target_ids.add(target_id)
                 continue
 
             context = plan_context_map.get(ad_id) or {}
@@ -17595,74 +19378,85 @@ class DashboardService:
                     self._recompute_material_upload_job_locked(conn, int(job_id))
                 continue
 
-            success_count = 0
-            failed_count = 0
-            bind_errors: list[str] = []
             marketing_goal = str(context.get("marketing_goal") or "").strip()
             reused_image_material = self._extract_plan_image_material(context)
             video_material_defaults = self._extract_plan_video_material_defaults(context)
-            for file_row in candidate_file_rows:
-                file_id = int(file_row["id"])
-                asset = file_assets.get((file_id, advertiser_id))
-                if not asset or not str(asset.get("video_id") or ""):
-                    failed_count += 1
-                    bind_errors.append(f"{file_row.get('original_name') or file_row.get('stored_name')}: {missing_asset_message}")
-                    with self.db() as conn:
-                        self._upsert_material_upload_target_asset_locked(
-                            conn,
-                            int(job_id),
-                            target_id,
-                            file_id,
-                            "failed",
-                            missing_asset_message,
-                        )
-                    continue
-                try:
-                    material_title = self._material_title_from_filename(str(file_row.get("original_name") or ""))
-                    bind_image_material = [] if marketing_goal == "VIDEO_PROM_GOODS" else [dict(item) for item in reused_image_material]
-                    bind_video_cover_id = str(video_material_defaults.get("video_cover_id") or "")
-                    client.add_plan_material(
-                        advertiser_id=advertiser_id,
-                        ad_id=ad_id,
-                        material_title=material_title,
-                        video_id=str(asset.get("video_id") or ""),
-                        marketing_goal=marketing_goal,
-                        product_id=str(context.get("product_id") or ""),
-                        image_material=bind_image_material,
-                        video_image_mode=str(video_material_defaults.get("image_mode") or ""),
-                        video_cover_id=bind_video_cover_id,
-                    )
-                    success_count += 1
-                    with self.db() as conn:
-                        self._upsert_material_upload_target_asset_locked(
-                            conn,
-                            int(job_id),
-                            target_id,
-                            file_id,
-                            "success",
-                            bind_success_message,
-                        )
-                except Exception as exc:
-                    failed_count += 1
-                    message = str(exc)
-                    bind_errors.append(f"{file_row.get('original_name') or file_row.get('stored_name')}: {message}")
-                    with self.db() as conn:
-                        self._upsert_material_upload_target_asset_locked(
-                            conn,
-                            int(job_id),
-                            target_id,
-                            file_id,
-                            "failed",
-                            message,
-                        )
+            bind_work_items.append(
+                {
+                    "target": target,
+                    "file_rows": candidate_file_rows,
+                    "context": context,
+                    "reused_image_material": reused_image_material,
+                    "video_material_defaults": video_material_defaults,
+                }
+            )
 
-            target_status = "success" if failed_count == 0 and success_count > 0 else "failed"
-            if success_count > 0 and failed_count > 0:
-                target_status = "partial"
-            summary = f"\u6210\u529f {success_count} / \u5931\u8d25 {failed_count}"
-            if bind_errors:
-                summary = f"{summary}\uff1b{bind_errors[0]}"
+        if bind_work_items:
+            worker_count = min(bind_concurrency, len(bind_work_items))
+            if worker_count > 1:
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    # Process each target sequentially so an over-limit response can short-circuit later files.
+                    future_map = {pool.submit(bind_target_assets, item): item for item in bind_work_items}
+                    for future in as_completed(future_map):
+                        item = future_map[future]
+                        try:
+                            future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            target = dict(item.get("target") or {})
+                            target_id = int(target.get("id", 0) or 0)
+                            for file_row in item.get("file_rows") or []:
+                                file_id = int(dict(file_row).get("id", 0) or 0)
+                                mark_target_asset_status(target_id, file_id, "failed", str(exc))
+            else:
+                for item in bind_work_items:
+                    bind_target_assets(item)
+
+        for target in target_rows:
+            target_id = int(target["id"])
+            if target_id not in target_ids_to_aggregate or target_id in skip_aggregate_target_ids:
+                continue
             with self.db() as conn:
+                aggregate_rows = conn.execute(
+                    """
+                    SELECT status, message
+                    FROM material_upload_job_target_assets
+                    WHERE job_id = ? AND target_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (int(job_id), target_id),
+                ).fetchall()
+                success_count = sum(1 for row in aggregate_rows if str(row["status"] or "") == "success")
+                failed_count = sum(1 for row in aggregate_rows if str(row["status"] or "") == "failed")
+                processed_count = success_count + failed_count
+                total_target_assets = len(aggregate_rows)
+                pending_count = sum(
+                    1 for row in aggregate_rows if str(row["status"] or "") in {"queued", "running"}
+                )
+                if total_target_assets <= 0:
+                    target_status = "failed" if all_files_received else "queued"
+                    summary = no_target_material_message if all_files_received else "等待更多视频。"
+                elif not all_files_received or pending_count > 0:
+                    target_status = "running" if processed_count > 0 else "queued"
+                    summary = (
+                        f"已处理 {processed_count}/{total_target_assets}，等待更多视频。"
+                        if not all_files_received
+                        else f"处理中：成功 {success_count} / 失败 {failed_count}"
+                    )
+                else:
+                    target_status = "success" if failed_count == 0 and success_count > 0 else "failed"
+                    if success_count > 0 and failed_count > 0:
+                        target_status = "partial"
+                    summary = f"成功 {success_count} / 失败 {failed_count}"
+                    first_error = next(
+                        (
+                            str(row["message"] or "").strip()
+                            for row in aggregate_rows
+                            if str(row["status"] or "") == "failed" and str(row["message"] or "").strip()
+                        ),
+                        "",
+                    )
+                    if first_error:
+                        summary = f"{summary}；{first_error}"
                 conn.execute(
                     """
                     UPDATE material_upload_job_targets
@@ -17675,6 +19469,49 @@ class DashboardService:
 
         with self.db() as conn:
             counts = self._recompute_material_upload_job_locked(conn, int(job_id))
+            job_row = conn.execute(
+                "SELECT total_files FROM material_upload_jobs WHERE id = ? LIMIT 1",
+                (int(job_id),),
+            ).fetchone()
+            total_files = int((job_row or {}).get("total_files", 0) or 0)
+            received_files = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                    (int(job_id),),
+                ).fetchone()["count"]
+            )
+            pending_target_assets = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM material_upload_job_target_assets
+                    WHERE job_id = ?
+                      AND status IN ('queued', 'running')
+                    """,
+                    (int(job_id),),
+                ).fetchone()["count"]
+            )
+            if received_files < total_files or pending_target_assets > 0:
+                interim_status = "receiving" if received_files < total_files else "running"
+                interim_note = (
+                    f"已接收 {received_files}/{total_files} 个视频，后台会优先处理已上传的视频。"
+                    if received_files < total_files
+                    else "视频已全部上传到服务器，后台正在处理绑定。"
+                )
+                self._update_material_upload_job(
+                    conn,
+                    int(job_id),
+                    status=interim_status,
+                    note=interim_note,
+                    completed_at="",
+                    updated_at=now_text(),
+                )
+                return {
+                    "job_id": int(job_id),
+                    "status": interim_status,
+                    "pending_target_assets": pending_target_assets,
+                    **counts,
+                }
             target_status_rows = conn.execute(
                 "SELECT status FROM material_upload_job_targets WHERE job_id = ?",
                 (int(job_id),),
@@ -17699,6 +19536,238 @@ class DashboardService:
             **counts,
         }
 
+    def prepare_material_upload_job(
+        self,
+        user: dict[str, Any],
+        scope: str,
+        query: str,
+        target_plan_ids: list[int],
+        file_count: int,
+    ) -> dict[str, Any]:
+        normalized_file_count = int(file_count or 0)
+        if normalized_file_count <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少选择一个视频文件")
+        max_files = self._material_upload_max_files()
+        if normalized_file_count > max_files:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"单次最多上传 {max_files} 个视频")
+        normalized_scope, target_plans = self._material_upload_targets_for_request(
+            user,
+            scope,
+            query,
+            target_plan_ids,
+        )
+        now = now_text()
+        with self.db() as conn:
+            job_row = conn.execute(
+                """
+                INSERT INTO material_upload_jobs (
+                    created_by_user_id, scope, query_text, status, total_files, total_targets,
+                    uploaded_files, processed_files, success_files, failed_files,
+                    processed_targets, success_targets, failed_targets, note, created_at, updated_at
+                ) VALUES (?, ?, ?, 'receiving', ?, ?, 0, 0, 0, 0, 0, 0, 0, ?, ?, ?)
+                RETURNING *
+                """,
+                (
+                    int(user.get("id", 0) or 0),
+                    normalized_scope,
+                    str(query or "").strip(),
+                    normalized_file_count,
+                    len(target_plans),
+                    "任务已创建，正在上传视频到服务器。",
+                    now,
+                    now,
+                ),
+            ).fetchone()
+            job_id = int(job_row["id"])
+            (UPLOAD_DIR / str(job_id)).mkdir(parents=True, exist_ok=True)
+            conn.executemany(
+                """
+                INSERT INTO material_upload_job_targets (
+                    job_id, advertiser_id, advertiser_name, ad_id, ad_name, status, message, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'queued', '', ?, ?)
+                """,
+                [
+                    (
+                        job_id,
+                        int(item["advertiser_id"]),
+                        str(item["advertiser_name"]),
+                        int(item["ad_id"]),
+                        str(item["ad_name"]),
+                        now,
+                        now,
+                    )
+                    for item in target_plans
+                ],
+            )
+        return {
+            "id": job_id,
+            "status": "receiving",
+            "scope": normalized_scope,
+            "query_text": str(query or "").strip(),
+            "total_files": normalized_file_count,
+            "uploaded_files": 0,
+            "total_targets": len(target_plans),
+            "note": "任务已创建，正在上传视频到服务器。",
+            "created_at": now,
+        }
+
+    async def receive_material_upload_job_file(
+        self,
+        user: dict[str, Any],
+        job_id: int,
+        upload: UploadFile,
+    ) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        if not upload or not str(upload.filename or "").strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少选择一个视频文件")
+
+        incoming_dir = UPLOAD_DIR / "_incoming"
+        incoming_dir.mkdir(parents=True, exist_ok=True)
+        sha256 = hashlib.sha256()
+        md5 = hashlib.md5()
+        file_size = 0
+        suffix = Path(str(upload.filename or "")).suffix or ".mp4"
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix=f"upload_job_{int(job_id)}_{int(user.get('id', 0) or 0)}_",
+            suffix=suffix,
+            dir=incoming_dir,
+        )
+        os.close(temp_fd)
+        temp_path = Path(temp_name)
+        source: dict[str, Any] = {}
+        try:
+            with temp_path.open("wb") as handle:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    file_size += len(chunk)
+                    sha256.update(chunk)
+                    md5.update(chunk)
+            source = {
+                "original_name": str(upload.filename or ""),
+                "mime_type": str(upload.content_type or ""),
+                "source_path": temp_path,
+                "file_size": file_size,
+                "file_sha256": sha256.hexdigest(),
+                "file_md5": md5.hexdigest(),
+                "move_source": True,
+            }
+            with self.db() as conn:
+                job = self._material_upload_job_row_for_user_locked(conn, user, int(job_id))
+                if not job:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="upload job not found")
+                status_text = str(job.get("status") or "").strip().lower()
+                if status_text not in {"receiving", "queued", "running"}:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该任务当前不能继续接收视频")
+                total_files = max(1, int(job.get("total_files", 0) or 0))
+                existing = conn.execute(
+                    """
+                    SELECT id
+                    FROM material_upload_job_files
+                    WHERE job_id = ? AND original_name = ? AND file_sha256 = ?
+                    LIMIT 1
+                    """,
+                    (int(job_id), str(upload.filename or ""), sha256.hexdigest()),
+                ).fetchone()
+                received_before = int(
+                    conn.execute(
+                    "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                    (int(job_id),),
+                ).fetchone()["count"]
+                )
+                created_file_id = 0
+                if not existing and received_before >= total_files:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该任务的视频文件已上传完成")
+                if not existing:
+                    file_row = self._store_material_upload_file_source(
+                        int(job_id),
+                        received_before + 1,
+                        source,
+                        now_text(),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO material_upload_job_files (
+                            job_id, original_name, stored_name, relative_path, file_size, mime_type,
+                            file_sha256, file_md5, updated_at, status, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        file_row,
+                    )
+                    created_file_row = conn.execute(
+                        """
+                        SELECT id
+                        FROM material_upload_job_files
+                        WHERE job_id = ? AND original_name = ? AND file_sha256 = ?
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (int(job_id), str(upload.filename or ""), sha256.hexdigest()),
+                    ).fetchone()
+                    created_file_id = int((created_file_row or {}).get("id", 0) or 0)
+                    if created_file_id > 0:
+                        target_rows = conn.execute(
+                            """
+                            SELECT id
+                            FROM material_upload_job_targets
+                            WHERE job_id = ?
+                            ORDER BY id ASC
+                            """,
+                            (int(job_id),),
+                        ).fetchall()
+                        for target_row in target_rows:
+                            self._upsert_material_upload_target_asset_locked(
+                                conn,
+                                int(job_id),
+                                int(target_row["id"] or 0),
+                                created_file_id,
+                                "queued",
+                            )
+                    source["move_source"] = False
+                received_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                        (int(job_id),),
+                    ).fetchone()["count"]
+                )
+                ready_to_queue = received_count >= total_files
+                should_queue = created_file_id > 0
+                next_status = status_text if status_text in {"queued", "running"} else "receiving"
+                if ready_to_queue and next_status == "receiving":
+                    next_status = "queued"
+                next_note = (
+                    "视频已全部上传到服务器，后台处理中。"
+                    if ready_to_queue
+                    else f"正在上传视频到服务器：{received_count}/{total_files}，后台会优先处理已上传的视频。"
+                )
+                self._update_material_upload_job(
+                    conn,
+                    int(job_id),
+                    status=next_status,
+                    uploaded_files=received_count,
+                    note=next_note,
+                    updated_at=now_text(),
+                )
+            return {
+                "id": int(job_id),
+                "status": next_status,
+                "uploaded_files": received_count,
+                "total_files": total_files,
+                "ready_to_queue": ready_to_queue,
+                "should_queue": should_queue,
+                "note": next_note,
+            }
+        finally:
+            if bool(source.get("move_source", True)):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     async def create_material_upload_job(
         self,
         user: dict[str, Any],
@@ -17707,46 +19776,79 @@ class DashboardService:
         target_plan_ids: list[int],
         files: list[UploadFile],
     ) -> dict[str, Any]:
-        role = str(user.get("role") or "")
-        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
-        normalized_scope = "account" if str(scope or "").strip() == "account" else "plan"
-        normalized_target_ids = sorted({int(item) for item in target_plan_ids if int(item or 0) > 0})
-        if not normalized_target_ids:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少选择一个计划")
+        normalized_scope, target_plans = self._material_upload_targets_for_request(
+            user,
+            scope,
+            query,
+            target_plan_ids,
+        )
         valid_files = [item for item in files if item and str(item.filename or "").strip()]
         if not valid_files:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少选择一个视频文件")
-        if len(valid_files) > 50:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="单次最多上传 50 个视频")
+        max_files = self._material_upload_max_files()
+        if len(valid_files) > max_files:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"单次最多上传 {max_files} 个视频")
 
-        visible = self._visible_upload_targets(user, normalized_scope, query)
-        visible_plan_map = {int(item["ad_id"]): item for item in visible.get("plans", [])}
-        target_plans = [visible_plan_map[item] for item in normalized_target_ids if item in visible_plan_map]
-        if not target_plans:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="所选计划不在当前可用范围内")
-
-        file_sources = []
-        for upload in valid_files:
-            content = await upload.read()
-            file_sources.append(
-                {
-                    "original_name": str(upload.filename or ""),
-                    "mime_type": str(upload.content_type or ""),
-                    "content": content,
-                }
-            )
-        with self.db() as conn:
-            return self._create_material_upload_job_locked(
-                conn,
-                int(user.get("id", 0) or 0),
-                normalized_scope,
-                str(query or "").strip(),
-                target_plans,
-                file_sources,
-                "上传任务已创建，等待后台执行。",
-            )
-
+        incoming_dir = UPLOAD_DIR / "_incoming"
+        incoming_dir.mkdir(parents=True, exist_ok=True)
+        file_sources: list[dict[str, Any]] = []
+        try:
+            for index, upload in enumerate(valid_files, start=1):
+                sha256 = hashlib.sha256()
+                md5 = hashlib.md5()
+                file_size = 0
+                suffix = Path(str(upload.filename or "")).suffix or ".mp4"
+                temp_fd, temp_name = tempfile.mkstemp(
+                    prefix=f"upload_{int(user.get('id', 0) or 0)}_{index}_",
+                    suffix=suffix,
+                    dir=incoming_dir,
+                )
+                os.close(temp_fd)
+                temp_path = Path(temp_name)
+                try:
+                    with temp_path.open("wb") as handle:
+                        while True:
+                            chunk = await upload.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            handle.write(chunk)
+                            file_size += len(chunk)
+                            sha256.update(chunk)
+                            md5.update(chunk)
+                except Exception:
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise
+                file_sources.append(
+                    {
+                        "original_name": str(upload.filename or ""),
+                        "mime_type": str(upload.content_type or ""),
+                        "source_path": temp_path,
+                        "file_size": file_size,
+                        "file_sha256": sha256.hexdigest(),
+                        "file_md5": md5.hexdigest(),
+                        "move_source": True,
+                    }
+                )
+            with self.db() as conn:
+                return self._create_material_upload_job_locked(
+                    conn,
+                    int(user.get("id", 0) or 0),
+                    normalized_scope,
+                    str(query or "").strip(),
+                    target_plans,
+                    file_sources,
+                    "上传任务已创建，等待后台执行。",
+                )
+        finally:
+            for source in file_sources:
+                if bool(source.get("move_source")):
+                    try:
+                        Path(str(source.get("source_path") or "")).unlink(missing_ok=True)
+                    except Exception:
+                        pass
     def _previous_plan_order_map(self, conn: Any, snapshot_time: str) -> dict[int, int]:
         customer_center_id = self._current_customer_center_id()
         previous = conn.execute(
@@ -17789,7 +19891,7 @@ class DashboardService:
 
     def _latest_summary_meta(self, conn: Any, customer_center_id: str | None = None) -> Any:
         target_customer_center_id = str(customer_center_id or self._current_customer_center_id() or "").strip()
-        return conn.execute(
+        row = conn.execute(
             """
             SELECT snapshot_time, window_start, window_end
             FROM summary_snapshots
@@ -17799,6 +19901,34 @@ class DashboardService:
             """,
             (target_customer_center_id,),
         ).fetchone()
+        if row:
+            return row
+        if db_table_exists(conn, "summary_current"):
+            row = conn.execute(
+                """
+                SELECT snapshot_time, window_start, window_end
+                FROM summary_current
+                WHERE customer_center_id = ?
+                LIMIT 1
+                """,
+                (target_customer_center_id,),
+            ).fetchone()
+            if row:
+                return row
+        if db_table_exists(conn, "summary_daily"):
+            return conn.execute(
+                """
+                SELECT snapshot_time,
+                       biz_date || ' 00:00:00' AS window_start,
+                       biz_date || ' 23:59:59' AS window_end
+                FROM summary_daily
+                WHERE customer_center_id = ?
+                ORDER BY biz_date DESC, snapshot_time DESC
+                LIMIT 1
+                """,
+                (target_customer_center_id,),
+            ).fetchone()
+        return None
 
     def _snapshot_plans(self, conn: Any, snapshot_time: str, customer_center_id: str | None = None) -> list[dict[str, Any]]:
         target_customer_center_id = str(customer_center_id or self._current_customer_center_id() or "").strip()
@@ -18493,6 +20623,16 @@ class DashboardService:
         }
 
     @staticmethod
+    def _account_daily_row_has_performance(row: dict[str, Any] | None) -> bool:
+        if not row:
+            return False
+        return (
+            abs(round(float(row.get("stat_cost", 0.0) or 0.0), 2)) > 0.005
+            or abs(round(float(row.get("pay_amount", 0.0) or 0.0), 2)) > 0.005
+            or int(float(row.get("order_count", 0) or 0)) != 0
+        )
+
+    @staticmethod
     def _plan_rows_by_ad_id_for_day(
         conn: Any,
         customer_center_id: str,
@@ -18521,6 +20661,183 @@ class DashboardService:
                 if ad_id > 0:
                     rows_by_ad_id[ad_id] = dict(row)
         return rows_by_ad_id
+
+    @staticmethod
+    def _plan_daily_rows_for_day(
+        conn: Any,
+        customer_center_id: str,
+        target_date: str,
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM plan_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+            """,
+            (customer_center_id, target_date),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _plan_row_counts_by_advertiser_for_day(
+        conn: Any,
+        customer_center_id: str,
+        target_date: str,
+        advertiser_ids: set[int] | list[int] | tuple[int, ...],
+    ) -> dict[int, int]:
+        normalized_advertiser_ids = sorted({int(item or 0) for item in advertiser_ids if int(item or 0) > 0})
+        if not normalized_advertiser_ids:
+            return {}
+        counts: dict[int, int] = {}
+        for start in range(0, len(normalized_advertiser_ids), 400):
+            chunk = normalized_advertiser_ids[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT advertiser_id, COUNT(*) AS row_count
+                FROM plan_daily
+                WHERE customer_center_id = ?
+                  AND biz_date = ?
+                  AND advertiser_id IN ({placeholders})
+                GROUP BY advertiser_id
+                """,
+                [customer_center_id, target_date, *chunk],
+            ).fetchall()
+            for row in rows:
+                advertiser_id = int(row["advertiser_id"] or 0)
+                if advertiser_id > 0:
+                    counts[advertiser_id] = int(row["row_count"] or 0)
+        return counts
+
+    @staticmethod
+    def _performance_history_day_counts(
+        conn: Any,
+        customer_center_id: str,
+        target_date: str,
+    ) -> dict[str, Any]:
+        counts_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS account_row_count,
+                COALESCE(SUM(stat_cost), 0) AS stat_cost,
+                COALESCE(SUM(pay_amount), 0) AS pay_amount,
+                COALESCE(SUM(order_count), 0) AS order_count
+            FROM account_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+            """,
+            (customer_center_id, target_date),
+        ).fetchone()
+        plan_row = conn.execute(
+            """
+            SELECT COUNT(*) AS plan_row_count
+            FROM plan_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+            """,
+            (customer_center_id, target_date),
+        ).fetchone()
+        summary_row = conn.execute(
+            """
+            SELECT account_count, plan_count, snapshot_time
+            FROM summary_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+            LIMIT 1
+            """,
+            (customer_center_id, target_date),
+        ).fetchone()
+        summary_payload = dict(summary_row or {})
+        return {
+            "account_row_count": int((counts_row or {}).get("account_row_count") or 0),
+            "plan_row_count": int((plan_row or {}).get("plan_row_count") or 0),
+            "stat_cost": round(float((counts_row or {}).get("stat_cost") or 0.0), 2),
+            "pay_amount": round(float((counts_row or {}).get("pay_amount") or 0.0), 2),
+            "order_count": int(float((counts_row or {}).get("order_count") or 0) or 0),
+            "summary_account_count": int(summary_payload.get("account_count") or 0),
+            "summary_plan_count": int(summary_payload.get("plan_count") or 0),
+            "summary_snapshot_time": str(summary_payload.get("snapshot_time") or "").strip(),
+        }
+
+    @staticmethod
+    def _performance_payload_day_counts(payload: dict[str, Any]) -> dict[str, Any]:
+        summary = dict(payload.get("summary") or {})
+        return {
+            "account_row_count": max(
+                int(summary.get("account_count", 0) or 0),
+                len(payload.get("accounts") or []),
+            ),
+            "plan_row_count": max(
+                int(summary.get("plan_count", 0) or 0),
+                len(payload.get("plans") or []),
+            ),
+            "stat_cost": round(float(summary.get("stat_cost", 0.0) or 0.0), 2),
+            "pay_amount": round(float(summary.get("pay_amount", 0.0) or 0.0), 2),
+            "order_count": int(float(summary.get("order_count", 0) or 0) or 0),
+        }
+
+    @classmethod
+    def _should_replace_performance_history_day(
+        cls,
+        existing_counts: dict[str, Any],
+        new_counts: dict[str, Any],
+        *,
+        error_count: int = 0,
+    ) -> tuple[bool, str]:
+        existing_account_rows = max(
+            int(existing_counts.get("account_row_count", 0) or 0),
+            int(existing_counts.get("summary_account_count", 0) or 0),
+        )
+        existing_plan_rows = max(
+            int(existing_counts.get("plan_row_count", 0) or 0),
+            int(existing_counts.get("summary_plan_count", 0) or 0),
+        )
+        existing_stat_cost = round(float(existing_counts.get("stat_cost", 0.0) or 0.0), 2)
+        existing_pay_amount = round(float(existing_counts.get("pay_amount", 0.0) or 0.0), 2)
+        existing_order_count = int(float(existing_counts.get("order_count", 0) or 0) or 0)
+        new_account_rows = max(int(new_counts.get("account_row_count", 0) or 0), 0)
+        new_plan_rows = max(int(new_counts.get("plan_row_count", 0) or 0), 0)
+        new_stat_cost = round(float(new_counts.get("stat_cost", 0.0) or 0.0), 2)
+        new_pay_amount = round(float(new_counts.get("pay_amount", 0.0) or 0.0), 2)
+        new_order_count = int(float(new_counts.get("order_count", 0) or 0) or 0)
+        existing_has_rows = any((existing_account_rows, existing_plan_rows, existing_stat_cost, existing_pay_amount, existing_order_count))
+        if not existing_has_rows:
+            return True, "empty_local"
+        if int(error_count or 0) > 0:
+            return False, "upstream_errors_preserve_existing"
+        if new_account_rows < existing_account_rows:
+            return False, "account_count_regressed"
+        if new_plan_rows < existing_plan_rows:
+            return False, "plan_count_regressed"
+        if new_stat_cost + 0.01 < existing_stat_cost:
+            return False, "stat_cost_regressed"
+        if new_pay_amount + 0.01 < existing_pay_amount:
+            return False, "pay_amount_regressed"
+        if new_order_count < existing_order_count:
+            return False, "order_count_regressed"
+        return True, "expanded_or_equal"
+
+    @classmethod
+    def _should_preserve_existing_performance_account(
+        cls,
+        *,
+        summary: AccountSummary | None,
+        existing_row: dict[str, Any] | None,
+        existing_plan_count: int,
+        fetched_plan_rows: list[PlanSummary],
+        plan_error: str = "",
+    ) -> tuple[bool, str]:
+        if str(plan_error or "").strip():
+            return True, "plan_refresh_error"
+        if fetched_plan_rows:
+            return False, ""
+        existing_has_rows = max(int(existing_plan_count or 0), 0) > 0 or cls._account_daily_row_has_performance(existing_row)
+        if summary is None or not bool(summary.ok):
+            return (True, "account_probe_failed_empty_plan_result") if existing_has_rows else (False, "")
+        if cls._account_summary_has_performance(summary):
+            return (True, "official_empty_plan_result") if existing_has_rows else (False, "")
+        return (True, "local_rows_present_official_empty") if existing_has_rows else (False, "")
 
     def _replace_performance_daily_account_subset(
         self,
@@ -18754,6 +21071,7 @@ class DashboardService:
                 "mode": "account_diff",
                 "changed_plans": 0,
                 "material_refreshed_days": 0,
+                "material_index_refresh_days": 0,
                 "material_plan_fetch_count": 0,
                 "material_rows_written": 0,
             }
@@ -18770,6 +21088,7 @@ class DashboardService:
         plan_rows_written = 0
         changed_plans = 0
         material_refreshed_days = 0
+        material_index_refresh_days = 0
         material_plan_fetch_count = 0
         material_rows_written = 0
         errors: list[dict[str, Any]] = []
@@ -18791,6 +21110,7 @@ class DashboardService:
                     "changed_accounts": 0,
                     "plan_refreshed_accounts": 0,
                     "changed_plans": 0,
+                    "material_index_refresh_days": 0,
                     "material_plan_fetch_count": 0,
                     "material_rows_written": 0,
                 },
@@ -18839,6 +21159,18 @@ class DashboardService:
                         customer_center_id,
                         target_date,
                     )
+                if not accounts_by_id:
+                    error_count += 1
+                    stats["error_count"] += 1
+                    errors.append(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_date,
+                            "stage": "performance_account_probe",
+                            "error": "official_account_list_empty_preserved_existing",
+                        }
+                    )
+                    continue
 
                 direct_summaries: list[AccountSummary] = []
                 plan_refresh_accounts: list[dict[str, Any]] = []
@@ -18864,8 +21196,22 @@ class DashboardService:
                 changed_accounts += len(changed_fields_by_account)
                 stats["changed_accounts"] += len(changed_fields_by_account)
                 plan_rows: list[PlanSummary] = []
+                plan_rows_by_advertiser: dict[int, list[PlanSummary]] = {}
                 plan_errors_by_advertiser: dict[int, str] = {}
+                existing_plan_counts: dict[int, int] = {}
                 if plan_refresh_accounts:
+                    plan_refresh_advertiser_ids = {
+                        int(account.get("advertiser_id", 0) or 0)
+                        for account in plan_refresh_accounts
+                        if int(account.get("advertiser_id", 0) or 0) > 0
+                    }
+                    with self.db() as conn:
+                        existing_plan_counts = self._plan_row_counts_by_advertiser_for_day(
+                            conn,
+                            customer_center_id,
+                            target_date,
+                            plan_refresh_advertiser_ids,
+                        )
                     plan_workers = max(1, int(scoped_config.get("plan_max_workers", 3) or 3))
                     with ThreadPoolExecutor(max_workers=min(plan_workers, len(plan_refresh_accounts))) as pool:
                         future_map = {
@@ -18889,17 +21235,61 @@ class DashboardService:
                             except Exception as exc:  # noqa: BLE001
                                 account_plans, plan_error = [], str(exc)
                             plan_rows.extend(account_plans)
+                            plan_rows_by_advertiser[advertiser_id] = list(account_plans or [])
                             if plan_error:
                                 plan_errors_by_advertiser[advertiser_id] = str(plan_error)
 
-                successful_plan_accounts = [
-                    account
-                    for account in plan_refresh_accounts
-                    if int(account.get("advertiser_id", 0) or 0) not in plan_errors_by_advertiser
-                ]
+                if not changed_fields_by_account:
+                    no_change_days += 1
+                    stats["no_change_days"] += 1
+                    continue
+
+                trusted_plan_accounts: list[dict[str, Any]] = []
+                trusted_plan_rows: list[PlanSummary] = []
+                blocked_accounts: list[dict[str, Any]] = []
+                for account in plan_refresh_accounts:
+                    advertiser_id = int(account.get("advertiser_id", 0) or 0)
+                    if advertiser_id <= 0:
+                        continue
+                    summary = account_summaries.get(advertiser_id)
+                    existing_row = existing_accounts.get(advertiser_id)
+                    preserve_existing, preserve_reason = self._should_preserve_existing_performance_account(
+                        summary=summary,
+                        existing_row=existing_row,
+                        existing_plan_count=existing_plan_counts.get(advertiser_id, 0),
+                        fetched_plan_rows=plan_rows_by_advertiser.get(advertiser_id, []),
+                        plan_error=plan_errors_by_advertiser.get(advertiser_id, ""),
+                    )
+                    if preserve_existing:
+                        blocked_accounts.append(
+                            {
+                                "advertiser_id": advertiser_id,
+                                "error": preserve_reason,
+                                "account_probe_error": account_errors.get(advertiser_id, ""),
+                                "changed_fields": changed_fields_by_account.get(advertiser_id, []),
+                            }
+                        )
+                        continue
+                    trusted_plan_accounts.append(account)
+                    trusted_plan_rows.extend(plan_rows_by_advertiser.get(advertiser_id, []))
+
+                if blocked_accounts:
+                    for item in blocked_accounts:
+                        error_count += 1
+                        stats["error_count"] += 1
+                        errors.append(
+                            {
+                                "customer_center_id": customer_center_id,
+                                "target_day": target_date,
+                                "stage": "performance_preserve_existing",
+                                **item,
+                            }
+                        )
+                    continue
+
                 successful_plan_advertiser_ids = {
                     int(account.get("advertiser_id", 0) or 0)
-                    for account in successful_plan_accounts
+                    for account in trusted_plan_accounts
                     if int(account.get("advertiser_id", 0) or 0) > 0
                 }
                 changed_plan_ids: set[int] = set()
@@ -18914,7 +21304,7 @@ class DashboardService:
                         )
                     new_plan_rows_by_ad_id = {
                         int(row.ad_id or 0): row
-                        for row in plan_rows
+                        for row in trusted_plan_rows
                         if int(row.ad_id or 0) > 0
                     }
                     for ad_id, plan_row in new_plan_rows_by_ad_id.items():
@@ -18927,87 +21317,92 @@ class DashboardService:
                     for ad_id in existing_plan_rows:
                         if ad_id not in new_plan_rows_by_ad_id:
                             changed_plan_ids.add(ad_id)
-                account_rollup_rows, _failures = build_account_summaries_from_plan_rollups(
-                    successful_plan_accounts,
-                    plan_rows,
-                    plan_errors_by_advertiser={},
+                if not trusted_plan_accounts:
+                    no_change_days += 1
+                    stats["no_change_days"] += 1
+                    continue
+
+                full_refresh_result = self.refresh_performance_history_targets(
+                    [
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_date": target_date,
+                        }
+                    ],
+                    account_diff_only=False,
                 )
-                update_account_rows = [*direct_summaries, *account_rollup_rows]
-                if update_account_rows:
-                    with self.db() as conn:
-                        write_result = self._replace_performance_daily_account_subset(
-                            conn,
+                refresh_error_count = int(full_refresh_result.get("error_count", 0) or 0)
+                if refresh_error_count:
+                    error_count += refresh_error_count
+                    stats["error_count"] += refresh_error_count
+                    errors.extend(list(full_refresh_result.get("errors") or []))
+                if int(full_refresh_result.get("refreshed_days", 0) or 0) > 0:
+                    refreshed += 1
+                    stats["refreshed_days"] += 1
+                    direct_account_updates += len(direct_summaries)
+                    plan_refreshed_accounts += len(trusted_plan_accounts)
+                    stats["plan_refreshed_accounts"] += len(trusted_plan_accounts)
+                    plan_rows_written += len(trusted_plan_rows)
+                    if changed_plan_ids:
+                        material_result = self._refresh_material_history_for_changed_plans(
+                            client=client,
                             customer_center_id=customer_center_id,
                             target_date=target_date,
                             snapshot_time=snapshot_time,
-                            account_rows=update_account_rows,
-                            plan_rows=plan_rows,
+                            window_start=day_start.strftime("%Y-%m-%d %H:%M:%S"),
+                            window_end=day_end.strftime("%Y-%m-%d %H:%M:%S"),
+                            scoped_config=scoped_config,
+                            changed_plan_ids=changed_plan_ids,
+                            changed_plan_rows=list(changed_plan_rows_by_ad_id.values()),
                         )
-                    if bool(write_result.get("updated")):
-                        refreshed += 1
-                        stats["refreshed_days"] += 1
-                        direct_account_updates += len(direct_summaries)
-                        plan_refreshed_accounts += len(successful_plan_accounts)
-                        stats["plan_refreshed_accounts"] += len(successful_plan_accounts)
-                        plan_rows_written += int(write_result.get("plan_count", 0) or 0)
-                        if changed_plan_ids:
-                            material_result = self._refresh_material_history_for_changed_plans(
-                                client=client,
-                                customer_center_id=customer_center_id,
-                                target_date=target_date,
-                                snapshot_time=snapshot_time,
-                                window_start=day_start.strftime("%Y-%m-%d %H:%M:%S"),
-                                window_end=day_end.strftime("%Y-%m-%d %H:%M:%S"),
-                                scoped_config=scoped_config,
-                                changed_plan_ids=changed_plan_ids,
-                                changed_plan_rows=list(changed_plan_rows_by_ad_id.values()),
-                            )
-                            changed_plans += int(material_result.get("changed_plan_count", 0) or 0)
-                            stats["changed_plans"] += int(material_result.get("changed_plan_count", 0) or 0)
-                            material_plan_fetch_count += int(material_result.get("material_plan_fetch_count", 0) or 0)
-                            stats["material_plan_fetch_count"] += int(
-                                material_result.get("material_plan_fetch_count", 0) or 0
-                            )
-                            material_rows_written += int(material_result.get("material_snapshot_row_count", 0) or 0)
-                            stats["material_rows_written"] += int(
-                                material_result.get("material_snapshot_row_count", 0) or 0
-                            )
-                            if int(material_result.get("changed_plan_count", 0) or 0) > 0:
-                                material_refreshed_days += 1
-                            material_error_count = int(material_result.get("error_count", 0) or 0)
-                            if material_error_count:
-                                error_count += material_error_count
-                                stats["error_count"] += material_error_count
-                                for material_error in material_result.get("errors") or []:
-                                    errors.append(
-                                        {
-                                            "customer_center_id": customer_center_id,
-                                            "target_day": target_date,
-                                            "stage": "history_changed_plan_materials",
-                                            **dict(material_error),
-                                        }
-                                    )
-                    else:
-                        no_change_days += 1
-                        stats["no_change_days"] += 1
-                else:
+                        changed_plans += int(material_result.get("changed_plan_count", 0) or 0)
+                        stats["changed_plans"] += int(material_result.get("changed_plan_count", 0) or 0)
+                        material_plan_fetch_count += int(material_result.get("material_plan_fetch_count", 0) or 0)
+                        stats["material_plan_fetch_count"] += int(
+                            material_result.get("material_plan_fetch_count", 0) or 0
+                        )
+                        material_rows_written += int(material_result.get("material_snapshot_row_count", 0) or 0)
+                        stats["material_rows_written"] += int(
+                            material_result.get("material_snapshot_row_count", 0) or 0
+                        )
+                        if int(material_result.get("changed_plan_count", 0) or 0) > 0:
+                            material_refreshed_days += 1
+                            material_index_result = self._refresh_material_ranking_indexes_after_history_days([target_date])
+                            if bool(material_index_result.get("ok", True)):
+                                material_index_refresh_days += 1
+                                stats["material_index_refresh_days"] += 1
+                            else:
+                                error_count += 1
+                                stats["error_count"] += 1
+                                errors.append(
+                                    {
+                                        "customer_center_id": customer_center_id,
+                                        "target_day": target_date,
+                                        "stage": "history_changed_plan_material_indexes",
+                                        "error": str(
+                                            material_index_result.get("reason")
+                                            or material_index_result.get("error")
+                                            or "material_index_refresh_failed"
+                                        ),
+                                        "detail": dict(material_index_result),
+                                    }
+                                )
+                        material_error_count = int(material_result.get("error_count", 0) or 0)
+                        if material_error_count:
+                            error_count += material_error_count
+                            stats["error_count"] += material_error_count
+                            for material_error in material_result.get("errors") or []:
+                                errors.append(
+                                    {
+                                        "customer_center_id": customer_center_id,
+                                        "target_day": target_date,
+                                        "stage": "history_changed_plan_materials",
+                                        **dict(material_error),
+                                    }
+                                )
+                elif refresh_error_count <= 0:
                     no_change_days += 1
                     stats["no_change_days"] += 1
-
-                for advertiser_id, plan_error in plan_errors_by_advertiser.items():
-                    error_count += 1
-                    stats["error_count"] += 1
-                    errors.append(
-                        {
-                            "customer_center_id": customer_center_id,
-                            "target_day": target_date,
-                            "advertiser_id": advertiser_id,
-                            "stage": "performance_plan_refresh",
-                            "account_probe_error": account_errors.get(advertiser_id, ""),
-                            "changed_fields": changed_fields_by_account.get(advertiser_id, []),
-                            "error": plan_error,
-                        }
-                    )
             except Exception as exc:  # noqa: BLE001
                 error_count += 1
                 stats["error_count"] += 1
@@ -19059,6 +21454,7 @@ class DashboardService:
             "plan_rows_written": plan_rows_written,
             "changed_plans": changed_plans,
             "material_refreshed_days": material_refreshed_days,
+            "material_index_refresh_days": material_index_refresh_days,
             "material_plan_fetch_count": material_plan_fetch_count,
             "material_rows_written": material_rows_written,
         }
@@ -19153,11 +21549,38 @@ class DashboardService:
                     payload["errors"]["balances"] = []
                 account_error_count = len(payload["errors"].get("accounts") or [])
                 plan_error_count = len(payload["errors"].get("plans") or [])
-                error_count += account_error_count + plan_error_count
-                stats["error_count"] += account_error_count + plan_error_count
-                self.persist_snapshot(payload)
-                refreshed += 1
-                stats["refreshed_days"] += 1
+                with self.db() as conn:
+                    existing_counts = self._performance_history_day_counts(
+                        conn,
+                        customer_center_id,
+                        target_date,
+                    )
+                new_counts = self._performance_payload_day_counts(payload)
+                should_write, write_decision = self._should_replace_performance_history_day(
+                    existing_counts,
+                    new_counts,
+                    error_count=account_error_count + plan_error_count,
+                )
+                if should_write:
+                    error_count += account_error_count + plan_error_count
+                    stats["error_count"] += account_error_count + plan_error_count
+                    self.persist_snapshot(payload)
+                    refreshed += 1
+                    stats["refreshed_days"] += 1
+                else:
+                    error_count += 1
+                    stats["error_count"] += 1
+                    errors.append(
+                        {
+                            "customer_center_id": customer_center_id,
+                            "target_day": target_date,
+                            "stage": "performance_refresh_preserve_existing",
+                            "error": write_decision,
+                            "existing_counts": existing_counts,
+                            "new_counts": new_counts,
+                            "upstream_error_count": account_error_count + plan_error_count,
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001
                 error_count += 1
                 stats["error_count"] += 1
@@ -19437,9 +21860,20 @@ class DashboardService:
                 continue
             try:
                 with self.db() as conn:
+                    target_plans = self._plan_daily_rows_for_day(
+                        conn,
+                        customer_center_id,
+                        target_date,
+                    )
+                    if not target_plans:
+                        target_plans = self._snapshot_plans(
+                            conn,
+                            str(meta.get("snapshot_time") or ""),
+                            customer_center_id,
+                        )
                     target_plans = [
                         row
-                        for row in self._snapshot_plans(conn, str(meta.get("snapshot_time") or ""), customer_center_id)
+                        for row in target_plans
                         if str(row.get("plan_source") or "").strip().upper()
                         in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC}
                         and self._plan_row_has_material_activity(row)
@@ -19727,6 +22161,18 @@ class DashboardService:
                     "material_daily_row_count": material_daily_row_count,
                     "material_relation_row_count": len(collected_material_relation_rows),
                     "material_snapshot_row_count": len(deduped_material_snapshot_rows),
+                    "material_daily_stat_cost": round(
+                        sum(float(row[12] or 0.0) for row in merged_rollup_rows),
+                        2,
+                    ),
+                    "material_relation_non_title_stat_cost": round(
+                        sum(
+                            float(row[16] or 0.0)
+                            for row in collected_material_relation_rows
+                            if str(row[7] or "").strip().upper() != "TITLE"
+                        ),
+                        2,
+                    ),
                 }
                 if new_material_counts["material_snapshot_row_count"] > 0 or new_material_counts["material_daily_row_count"] > 0:
                     with self.db() as conn:
@@ -21020,47 +23466,23 @@ class DashboardService:
                     )
                 raise
             finished_at = now_text()
-            def resolve_extended_success(
-                conn: Any,
-                targets: list[dict[str, Any]],
-            ) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
-                success_keys: set[tuple[str, str]] = set()
-                snapshot_time_map: dict[tuple[str, str], str] = {}
-                for item in targets:
-                    customer_center_id = str(item.get("customer_center_id") or "").strip()
-                    target_date = str(item.get("target_date") or "").strip()
-                    if not customer_center_id or not target_date:
-                        continue
-                    target_day = datetime.strptime(target_date, "%Y-%m-%d")
-                    is_complete, snapshot_time = self._extended_history_day_complete_for_customer_center(
-                        conn,
-                        customer_center_id,
-                        target_day,
-                    )
-                    if is_complete:
-                        success_keys.add((customer_center_id, target_date))
-                        if snapshot_time:
-                            snapshot_time_map[(customer_center_id, target_date)] = snapshot_time
-                return success_keys, snapshot_time_map
             with self.db() as conn:
-                performance_success_keys: set[tuple[str, str]] = set()
-                performance_snapshot_time_map: dict[tuple[str, str], str] = {}
-                for item in performance_targets:
-                    customer_center_id = str(item.get("customer_center_id") or "").strip()
-                    target_date = str(item.get("target_date") or "").strip()
-                    if not customer_center_id or not target_date:
-                        continue
-                    target_day = datetime.strptime(target_date, "%Y-%m-%d")
-                    meta = self._summary_meta_for_customer_center_day(conn, target_day, customer_center_id)
-                    if meta:
-                        performance_success_keys.add((customer_center_id, target_date))
-                        performance_snapshot_time_map[(customer_center_id, target_date)] = str(
-                            meta.get("snapshot_time") or ""
-                        ).strip()
-
-                extended_success_keys, extended_snapshot_time_map = resolve_extended_success(conn, extended_targets)
-                finalize_success_keys, finalize_snapshot_time_map = resolve_extended_success(conn, finalize_targets)
-                reconcile_success_keys, reconcile_snapshot_time_map = resolve_extended_success(conn, reconcile_targets)
+                performance_success_keys, performance_snapshot_time_map = self._resolve_performance_history_target_success(
+                    conn,
+                    performance_targets,
+                )
+                extended_success_keys, extended_snapshot_time_map = self._resolve_extended_history_target_success(
+                    conn,
+                    extended_targets,
+                )
+                finalize_success_keys, finalize_snapshot_time_map = self._resolve_extended_history_target_success(
+                    conn,
+                    finalize_targets,
+                )
+                reconcile_success_keys, reconcile_snapshot_time_map = self._resolve_extended_history_target_success(
+                    conn,
+                    reconcile_targets,
+                )
 
             if performance_targets:
                 self._mark_history_refresh_state_targets(
@@ -21126,12 +23548,32 @@ class DashboardService:
                     snapshot_time_map=reconcile_snapshot_time_map,
                 )
 
+            material_index_result: dict[str, Any] = {
+                "ok": True,
+                "skipped": True,
+                "reason": "no_material_history_success_days",
+            }
+            material_index_days = sorted(
+                {
+                    target_date
+                    for _, target_date in (
+                        set(extended_success_keys)
+                        | set(finalize_success_keys)
+                        | set(reconcile_success_keys)
+                    )
+                    if str(target_date or "").strip()
+                }
+            )
+            if material_index_days:
+                material_index_result = self._refresh_material_ranking_indexes_after_history_days(material_index_days)
+
             ok = (
                 int(performance_result.get("error_count", 0) or 0) == 0
                 and int(extended_result.get("error_count", 0) or 0) == 0
                 and int(metadata_result.get("error_count", 0) or 0) == 0
                 and int(finalize_result.get("error_count", 0) or 0) == 0
                 and int(reconcile_result.get("error_count", 0) or 0) == 0
+                and bool(material_index_result.get("ok", True))
             )
             result_payload = {
                 "gap_summary": gap_summary,
@@ -21140,6 +23582,7 @@ class DashboardService:
                 "material_metadata": metadata_result,
                 "material_finalize": finalize_result,
                 "material_reconcile": reconcile_result,
+                "material_index": material_index_result,
                 "batch": extended_batch_summary,
                 "correction_summary": correction_summary,
                 "correction_batch": correction_batch_summary,
@@ -21199,6 +23642,439 @@ class DashboardService:
                 "started_at": started_at,
                 "finished_at": finished_at,
             }
+
+    def _finalize_performance_history_targets_from_local_snapshots(
+        self,
+        targets: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], set[tuple[str, str]], dict[tuple[str, str], str]]:
+        normalized_targets = self._normalize_history_refresh_targets(targets)
+        empty_result = {
+            "refresh_days": 0,
+            "refreshed_days": 0,
+            "skipped_current_day": 0,
+            "error_count": 0,
+            "customer_center_count": 0,
+            "customer_centers": [],
+            "errors": [],
+            "range_start": "",
+            "range_end": "",
+            "mode": "official_closed_day_finalize",
+        }
+        if not normalized_targets:
+            return empty_result, set(), {}
+        refresh_result = self.refresh_performance_history_targets(
+            normalized_targets,
+            account_diff_only=False,
+        )
+        with self.db() as conn:
+            success_keys, snapshot_time_map = self._resolve_performance_history_target_success(
+                conn,
+                normalized_targets,
+            )
+        return (
+            {
+                **empty_result,
+                **dict(refresh_result),
+                "mode": "official_closed_day_finalize",
+            },
+            success_keys,
+            snapshot_time_map,
+        )
+
+    def _finalize_material_history_targets_from_local_snapshots(
+        self,
+        targets: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], set[tuple[str, str]], dict[tuple[str, str], str]]:
+        normalized_targets = self._normalize_history_refresh_targets(targets)
+        empty_result = {
+            "refresh_days": 0,
+            "refreshed_days": 0,
+            "skipped_current_day": 0,
+            "error_count": 0,
+            "customer_center_count": 0,
+            "customer_centers": [],
+            "errors": [],
+            "range_start": "",
+            "range_end": "",
+            "mode": "official_closed_day_finalize",
+        }
+        if not normalized_targets:
+            return empty_result, set(), {}
+        refresh_result = self.refresh_extended_history_targets(
+            normalized_targets,
+            material_collection_mode="full_snapshot",
+            workers_override=max(int(settings.nightly_history_workers or 0), 1),
+            plan_material_requests_per_minute_override=self._nightly_plan_material_requests_per_minute_default(),
+            plan_material_batch_size_override=self._nightly_plan_material_batch_size_default(),
+            plan_material_batch_sleep_seconds_override=self._nightly_plan_material_batch_sleep_seconds_default(),
+        )
+        with self.db() as conn:
+            success_keys, snapshot_time_map = self._resolve_extended_history_target_success(
+                conn,
+                normalized_targets,
+            )
+        return (
+            {
+                **empty_result,
+                **dict(refresh_result),
+                "mode": "official_closed_day_finalize",
+            },
+            success_keys,
+            snapshot_time_map,
+        )
+
+    def finalize_yesterday_daily(
+        self,
+        *,
+        task_id: str = "",
+        trigger: str = "day_cut",
+        target_date: str = "",
+    ) -> dict[str, Any]:
+        trigger_text = str(trigger or "day_cut").strip().lower() or "day_cut"
+        timezone_name = str(self.read_config().get("timezone") or TIMEZONE).strip() or TIMEZONE
+        tz = ZoneInfo(timezone_name)
+        today = datetime.now(tz).date()
+        target_date_text = str(target_date or "").strip()
+        if target_date_text:
+            target_day = datetime.strptime(target_date_text, "%Y-%m-%d").date()
+        else:
+            target_day = today - timedelta(days=1)
+            target_date_text = target_day.strftime("%Y-%m-%d")
+        if target_day >= today:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "target_date_is_not_closed",
+                "trigger": trigger_text,
+                "target_date": target_date_text,
+            }
+
+        customer_center_ids = self.bound_customer_center_ids() or [self._current_customer_center_id()]
+        normalized_customer_center_ids = [
+            customer_center_id
+            for customer_center_id in dict.fromkeys(str(item or "").strip() for item in customer_center_ids)
+            if customer_center_id
+        ]
+        if not normalized_customer_center_ids:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "no_customer_centers",
+                "trigger": trigger_text,
+                "target_date": target_date_text,
+            }
+
+        targets = self._normalize_history_refresh_targets(
+            [
+                {
+                    "customer_center_id": customer_center_id,
+                    "target_date": target_date_text,
+                }
+                for customer_center_id in normalized_customer_center_ids
+            ]
+        )
+
+        with self._distributed_runtime_lock(
+            "full-refresh",
+            timeout_seconds=self._full_refresh_lock_ttl_seconds(),
+        ) as acquired:
+            if not acquired:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "history refresh already running",
+                    "trigger": trigger_text,
+                    "target_date": target_date_text,
+                    "customer_center_ids": normalized_customer_center_ids,
+                }
+
+            started_at = now_text()
+            detail_base = {
+                "mode": "day_cut_finalize",
+                "target_date": target_date_text,
+                "data_source": "official_closed_day",
+                "customer_center_ids": normalized_customer_center_ids,
+            }
+            performance_result: dict[str, Any] = {
+                "ok": True,
+                "skipped": True,
+                "reason": "not_started",
+            }
+            finalize_result: dict[str, Any] = {
+                "ok": True,
+                "skipped": True,
+                "reason": "not_started",
+            }
+            material_index_result: dict[str, Any] = {
+                "ok": True,
+                "skipped": True,
+                "reason": "not_started",
+            }
+            performance_finished_at = ""
+            finalize_started_at = ""
+
+            if task_id:
+                self.update_full_refresh_status(
+                    task_id=task_id,
+                    trigger=trigger_text,
+                    status="running",
+                    stage="performance",
+                    stage_label="day_cut_finalize",
+                    message=f"昨日落库中 {target_date_text}",
+                    queued_at=started_at,
+                    started_at=started_at,
+                    updated_at=started_at,
+                    finished_at="",
+                    progress={
+                        "completed_steps": 0,
+                        "total_steps": 2,
+                        "stage_completed_steps": 0,
+                        "stage_total_steps": max(len(targets), 1),
+                    },
+                    stages={
+                        "performance": {"status": "running", "message": f"昨日账户/计划落库 {target_date_text}", "result": {}},
+                        "material_finalize": {"status": "queued", "message": f"等待昨日素材固化 {target_date_text}", "result": {}},
+                    },
+                    result=detail_base,
+                )
+
+            self._mark_history_refresh_state_targets(
+                targets,
+                stage="performance",
+                status="running",
+                trigger=trigger_text,
+                detail=detail_base,
+                started_at=started_at,
+            )
+            try:
+                performance_result, performance_success_keys, performance_snapshot_time_map = (
+                    self._finalize_performance_history_targets_from_local_snapshots(targets)
+                )
+                performance_finished_at = now_text()
+                self._mark_history_refresh_state_targets(
+                    targets,
+                    stage="performance",
+                    status="ok" if int(performance_result.get("error_count", 0) or 0) == 0 else "error",
+                    trigger=trigger_text,
+                    detail=performance_result,
+                    error_message=str(
+                        (performance_result.get("errors") or [{}])[0].get("error")
+                        or performance_result.get("reason")
+                        or ""
+                    ).strip(),
+                    started_at=started_at,
+                    finished_at=performance_finished_at,
+                    success_target_keys=performance_success_keys,
+                    snapshot_time_map=performance_snapshot_time_map,
+                )
+
+                finalize_started_at = performance_finished_at or now_text()
+                if task_id:
+                    self.update_full_refresh_status(
+                        task_id=task_id,
+                        trigger=trigger_text,
+                        status="running",
+                        stage="material_finalize",
+                        stage_label="day_cut_finalize",
+                        message=f"昨日素材固化中 {target_date_text}",
+                        queued_at=started_at,
+                        started_at=started_at,
+                        updated_at=finalize_started_at,
+                        finished_at="",
+                        progress={
+                            "completed_steps": 1,
+                            "total_steps": 2,
+                            "stage_completed_steps": 0,
+                            "stage_total_steps": max(len(targets), 1),
+                        },
+                        stages={
+                            "performance": {
+                                "status": "completed"
+                                if int(performance_result.get("error_count", 0) or 0) == 0
+                                else "error",
+                                "message": str(
+                                    (performance_result.get("errors") or [{}])[0].get("error")
+                                    or performance_result.get("reason")
+                                    or ""
+                                ).strip(),
+                                "result": performance_result,
+                            },
+                            "material_finalize": {
+                                "status": "running",
+                                "message": f"昨日素材固化 {target_date_text}",
+                                "result": {},
+                            },
+                        },
+                        result={
+                            **detail_base,
+                            "performance": performance_result,
+                        },
+                    )
+
+                self._mark_history_refresh_state_targets(
+                    targets,
+                    stage="material_finalize",
+                    status="running",
+                    trigger=trigger_text,
+                    detail={
+                        **detail_base,
+                        "performance": performance_result,
+                    },
+                    started_at=finalize_started_at,
+                )
+                finalize_result, finalize_success_keys, finalize_snapshot_time_map = (
+                    self._finalize_material_history_targets_from_local_snapshots(targets)
+                )
+                finalize_finished_at = now_text()
+                self._mark_history_refresh_state_targets(
+                    targets,
+                    stage="material_finalize",
+                    status="ok" if int(finalize_result.get("error_count", 0) or 0) == 0 else "error",
+                    trigger=trigger_text,
+                    detail=finalize_result,
+                    error_message=str(
+                        (finalize_result.get("errors") or [{}])[0].get("error")
+                        or finalize_result.get("reason")
+                        or ""
+                    ).strip(),
+                    started_at=finalize_started_at,
+                    finished_at=finalize_finished_at,
+                    success_target_keys=finalize_success_keys,
+                    snapshot_time_map=finalize_snapshot_time_map,
+                )
+
+                material_index_result = self._refresh_material_ranking_indexes_after_history_days([target_date_text])
+                finished_at = now_text()
+                ok = (
+                    int(performance_result.get("error_count", 0) or 0) == 0
+                    and int(finalize_result.get("error_count", 0) or 0) == 0
+                    and bool(material_index_result.get("ok", True))
+                )
+                result = {
+                    "ok": ok,
+                    "skipped": False,
+                    "reason": "" if ok else "day_cut_finalize_completed_with_errors",
+                    "trigger": trigger_text,
+                    "target_date": target_date_text,
+                    "customer_center_count": len(normalized_customer_center_ids),
+                    "customer_center_ids": normalized_customer_center_ids,
+                    "performance": performance_result,
+                    "material_finalize": finalize_result,
+                    "material_index": material_index_result,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                }
+                if task_id:
+                    self.update_full_refresh_status(
+                        task_id=task_id,
+                        trigger=trigger_text,
+                        status="completed" if ok else "failed",
+                        stage="",
+                        stage_label="",
+                        message=f"昨日落库完成 {target_date_text}" if ok else f"昨日落库存在错误 {target_date_text}",
+                        queued_at=started_at,
+                        started_at=started_at,
+                        updated_at=finished_at,
+                        finished_at=finished_at,
+                        progress={
+                            "completed_steps": 2,
+                            "total_steps": 2,
+                            "stage_completed_steps": 0,
+                            "stage_total_steps": 0,
+                        },
+                        stages={
+                            "performance": {
+                                "status": "completed"
+                                if int(performance_result.get("error_count", 0) or 0) == 0
+                                else "error",
+                                "message": str(
+                                    (performance_result.get("errors") or [{}])[0].get("error")
+                                    or performance_result.get("reason")
+                                    or ""
+                                ).strip(),
+                                "result": performance_result,
+                            },
+                            "material_finalize": {
+                                "status": "completed"
+                                if int(finalize_result.get("error_count", 0) or 0) == 0
+                                else "error",
+                                "message": str(
+                                    (finalize_result.get("errors") or [{}])[0].get("error")
+                                    or finalize_result.get("reason")
+                                    or ""
+                                ).strip(),
+                                "result": finalize_result,
+                            },
+                        },
+                        result=result,
+                    )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                failed_at = now_text()
+                error_message = str(exc)
+                if not performance_finished_at:
+                    self._mark_history_refresh_state_targets(
+                        targets,
+                        stage="performance",
+                        status="error",
+                        trigger=trigger_text,
+                        detail=detail_base,
+                        error_message=error_message,
+                        started_at=started_at,
+                        finished_at=failed_at,
+                    )
+                else:
+                    self._mark_history_refresh_state_targets(
+                        targets,
+                        stage="material_finalize",
+                        status="error",
+                        trigger=trigger_text,
+                        detail={
+                            **detail_base,
+                            "performance": performance_result,
+                        },
+                        error_message=error_message,
+                        started_at=finalize_started_at or performance_finished_at or started_at,
+                        finished_at=failed_at,
+                    )
+                if task_id:
+                    self.update_full_refresh_status(
+                        task_id=task_id,
+                        trigger=trigger_text,
+                        status="failed",
+                        stage="material_finalize" if performance_finished_at else "performance",
+                        stage_label="day_cut_finalize",
+                        message=error_message,
+                        queued_at=started_at,
+                        started_at=started_at,
+                        updated_at=failed_at,
+                        finished_at=failed_at,
+                        progress={
+                            "completed_steps": 1 if performance_finished_at else 0,
+                            "total_steps": 2,
+                            "stage_completed_steps": 0,
+                            "stage_total_steps": max(len(targets), 1),
+                        },
+                        stages={
+                            "performance": {
+                                "status": "completed" if performance_finished_at else "error",
+                                "message": "",
+                                "result": performance_result,
+                            },
+                            "material_finalize": {
+                                "status": "error" if performance_finished_at else "queued",
+                                "message": error_message if performance_finished_at else "",
+                                "result": finalize_result,
+                            },
+                        },
+                        result={
+                            **detail_base,
+                            "performance": performance_result,
+                            "material_finalize": finalize_result,
+                            "material_index": material_index_result,
+                        },
+                    )
+                raise
 
     def persist_snapshot(self, payload: dict[str, Any]) -> None:
         customer_center_id = str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip()
@@ -22834,6 +25710,7 @@ class DashboardService:
         customer_center_id: str | None = None,
         plan_ids_filter: set[int] | None = None,
         advertiser_ids_filter: set[int] | None = None,
+        full_plan_scan: bool = False,
         workers_override: int | None = None,
         plan_material_requests_per_minute_override: int | None = None,
         plan_material_batch_size_override: int | None = None,
@@ -22866,17 +25743,29 @@ class DashboardService:
                 if str(row.get("plan_source") or "").strip().upper() in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC}
             ]
             if str(meta.get("source") or "").strip().lower() == "current":
-                plan_selection = self._select_material_sync_plans(
+                base_plan_selection = self._select_material_sync_plans(
                     conn,
                     target_customer_center_id,
                     eligible_plans,
                     config,
                 )
-                plans = [dict(item) for item in plan_selection.get("plans") or []]
+                if full_plan_scan:
+                    plans = [dict(item) for item in eligible_plans]
+                    plan_selection = {
+                        **base_plan_selection,
+                        "selection_mode": "current_full",
+                        "selected_hot_plan_count": int(base_plan_selection.get("hot_plan_count", 0) or 0),
+                        "selected_warm_plan_count": int(base_plan_selection.get("warm_plan_count", 0) or 0),
+                        "selected_cold_plan_count": int(base_plan_selection.get("cold_plan_count", 0) or 0),
+                        "selected_plan_count": len(plans),
+                        "selected_priority_counts": {"current_full": len(plans)} if plans else {},
+                        "plans": plans,
+                    }
+                else:
+                    plan_selection = base_plan_selection
+                    plans = [dict(item) for item in plan_selection.get("plans") or []]
             else:
                 plans = list(eligible_plans)
-                if plan_limit > 0:
-                    plans = plans[:plan_limit]
                 plan_selection = {
                     "selection_mode": "snapshot_full",
                     "eligible_plan_count": len(eligible_plans),
@@ -22914,6 +25803,8 @@ class DashboardService:
                 "selected_priority_counts": {"snapshot_full": len(plans)} if plans else {},
             }
         material_types = self._detail_material_types(config)
+        if "VIDEO" in material_types and "TITLE" not in material_types:
+            material_types = [*material_types, "TITLE"]
         if workers_override is None:
             workers = self._material_sync_workers(config)
         else:
@@ -23321,6 +26212,7 @@ class DashboardService:
         self,
         force_refresh: bool = False,
         customer_center_id: str | None = None,
+        full_plan_scan: bool = False,
         workers_override: int | None = None,
         plan_material_requests_per_minute_override: int | None = None,
         plan_material_batch_size_override: int | None = None,
@@ -23363,6 +26255,7 @@ class DashboardService:
         return self._collect_material_snapshot_for_meta(
             payload_meta,
             target_customer_center_id,
+            full_plan_scan=full_plan_scan,
             workers_override=workers_override,
             plan_material_requests_per_minute_override=plan_material_requests_per_minute_override,
             plan_material_batch_size_override=plan_material_batch_size_override,
@@ -23589,33 +26482,74 @@ class DashboardService:
                 str(payload.get("window_end") or ""),
                 material_source_rows,
             )
-            self._replace_material_current_rows(conn, customer_center_id, material_rollup_rows)
-            self._replace_material_relation_current_rows(conn, customer_center_id, material_relation_rows)
-            self._replace_material_snapshot_rows(
-                conn,
-                customer_center_id,
-                normalized_material_rows,
-                snapshot_time=snapshot_time,
-                replace_same_day=True,
-            )
             day_key = snapshot_time[:10]
-            if day_key:
-                self._replace_material_daily_rows(conn, customer_center_id, day_key, material_rollup_rows)
-                self._replace_material_relation_daily_rows(conn, customer_center_id, day_key, material_relation_rows)
-            self._upsert_material_relation_edges(
-                conn,
-                customer_center_id,
-                material_source_rows,
-                updated_at=updated_at,
-                snapshot_time=snapshot_time,
+            plan_selection_mode = str(payload.get("plan_selection_mode") or "").strip().lower()
+            selected_plan_ids = sorted(
+                {
+                    int(item.get("ad_id", 0) or 0)
+                    for item in (payload.get("plan_sync_results") or [])
+                    if int(item.get("ad_id", 0) or 0) > 0
+                }
             )
-            self._upsert_material_profile_rows(
-                conn,
-                customer_center_id,
-                material_rollup_rows,
-                updated_at=updated_at,
-                write_mode="hot_minimal",
+            if not selected_plan_ids:
+                selected_plan_ids = sorted(
+                    {
+                        int(row.get("ad_id", 0) or 0)
+                        for row in material_source_rows
+                        if int(row.get("ad_id", 0) or 0) > 0
+                    }
+                )
+            use_snapshot_subset_restore = bool(
+                day_key
+                and selected_plan_ids
+                and plan_selection_mode in {"current_hot_warm_cold", "current_full"}
             )
+            if use_snapshot_subset_restore:
+                if plan_selection_mode == "current_full":
+                    self._replace_material_snapshot_rows(
+                        conn,
+                        customer_center_id,
+                        normalized_material_rows,
+                        snapshot_time=snapshot_time,
+                        replace_same_day=True,
+                    )
+                else:
+                    self._replace_material_snapshot_plan_subset(
+                        conn,
+                        customer_center_id,
+                        day_key,
+                        selected_plan_ids,
+                        normalized_material_rows,
+                    )
+                self._restore_material_current_from_all_same_day_snapshots(
+                    conn,
+                    customer_center_id,
+                    day_key,
+                )
+            else:
+                self._replace_material_current_rows(conn, customer_center_id, material_rollup_rows)
+                self._replace_material_relation_current_rows(conn, customer_center_id, material_relation_rows)
+                self._replace_material_snapshot_rows(
+                    conn,
+                    customer_center_id,
+                    normalized_material_rows,
+                    snapshot_time=snapshot_time,
+                    replace_same_day=True,
+                )
+                self._upsert_material_relation_edges(
+                    conn,
+                    customer_center_id,
+                    material_source_rows,
+                    updated_at=updated_at,
+                    snapshot_time=snapshot_time,
+                )
+                self._upsert_material_profile_rows(
+                    conn,
+                    customer_center_id,
+                    material_rollup_rows,
+                    updated_at=updated_at,
+                    write_mode="hot_minimal",
+                )
             self._upsert_extended_sync_run_record(
                 conn,
                 customer_center_id=customer_center_id,
@@ -24405,6 +27339,7 @@ class DashboardService:
                 if isinstance(value, list):
                     raw_rows = value
                     break
+        metric_fields = ("click_cnt", "dy_like", "dy_comment", "dy_follow", "user_lose_cnt")
         grouped: dict[int, dict[str, float]] = {}
         for raw_row in raw_rows:
             if not isinstance(raw_row, dict):
@@ -24416,12 +27351,11 @@ class DashboardService:
                 second,
                 {
                     "second": float(second),
-                    "click_cnt": 0.0,
-                    "user_lose_cnt": 0.0,
+                    **{field: 0.0 for field in metric_fields},
                 },
             )
-            point["click_cnt"] += self._material_curve_metric_value(raw_row, "click_cnt")
-            point["user_lose_cnt"] += self._material_curve_metric_value(raw_row, "user_lose_cnt")
+            for field in metric_fields:
+                point[field] += self._material_curve_metric_value(raw_row, field)
         return [grouped[key] for key in sorted(grouped)]
 
     def _material_preview_requested_window(
@@ -24950,7 +27884,10 @@ class DashboardService:
         merged_row = self._merge_material_preview_seed_row(resolved_row, seed_row)
 
         current_video_url = self._normalize_media_url(merged_row.get("video_url"))
-        resolved_current_video_url = self._resolve_preview_video_url(current_video_url)
+        resolved_current_video_url = self._resolve_preview_video_url(
+            current_video_url,
+            timeout=MATERIAL_PREVIEW_SOURCE_RESOLVE_TIMEOUT_SECONDS,
+        )
         cover_url = self._normalize_media_url(merged_row.get("cover_url"))
         aweme_item_id = str(merged_row.get("aweme_item_id") or "").strip()
         video_id = str(merged_row.get("video_id") or "").strip()
@@ -24962,6 +27899,7 @@ class DashboardService:
             normalized_cover_url = self._normalize_media_url(payload.get("cover_url"))
             normalized_video_url = self._normalize_media_url(payload.get("video_url"))
             normalized_public_video_url = self._normalize_media_url(payload.get("public_video_url"))
+            normalized_browser_video_url = self._normalize_media_url(payload.get("browser_video_url"))
             payload["cover_url"] = (
                 normalized_cover_url if self._is_public_preview_cover_url(normalized_cover_url) else ""
             )
@@ -24973,6 +27911,14 @@ class DashboardService:
                 if self._is_public_preview_video_url(normalized_public_video_url)
                 else payload["video_url"]
             )
+            payload["browser_video_url"] = (
+                normalized_browser_video_url
+                if self._is_browser_preview_video_candidate_url(normalized_browser_video_url)
+                else ""
+            )
+            payload["browser_video_source"] = str(
+                payload.get("browser_video_source") or (source_text if payload["browser_video_url"] else "")
+            ).strip()
             payload["is_public_video_url"] = bool(payload["video_url"])
             payload["cover_source"] = str(
                 payload.get("cover_source") or (source_text if payload["cover_url"] else "")
@@ -24981,9 +27927,19 @@ class DashboardService:
                 payload.get("video_source") or (source_text if payload["video_url"] else "")
             ).strip()
             payload["preview_available"] = bool(
-                payload["cover_url"] or payload["video_url"] or payload["public_video_url"] or aweme_item_id
+                payload["cover_url"]
+                or payload["video_url"]
+                or payload["public_video_url"]
+                or payload["browser_video_url"]
+                or aweme_item_id
             )
             return payload
+
+        def finish(payload: dict[str, Any], *, cacheable: bool = True) -> dict[str, Any]:
+            finalized = finalize_result(payload)
+            if cacheable and cache_key and isinstance(finalized, dict):
+                self._store_material_preview_source_cache(cache_key, cache_version, finalized)
+            return finalized
 
         result = {
             "material_key": str(merged_row.get("material_key") or "").strip(),
@@ -24993,12 +27949,16 @@ class DashboardService:
             "aweme_item_id": aweme_item_id,
             "video_url": public_video_url if self._is_public_preview_video_url(public_video_url) else "",
             "public_video_url": public_video_url if self._is_public_preview_video_url(public_video_url) else "",
+            "browser_video_url": current_video_url
+            if self._is_browser_preview_video_candidate_url(current_video_url)
+            else "",
+            "browser_video_source": "current_material_payload"
+            if self._is_browser_preview_video_candidate_url(current_video_url)
+            else "",
             "is_public_video_url": self._is_public_preview_video_url(public_video_url),
             "source": "current_material_payload",
             "reason": "",
         }
-        if result["is_public_video_url"]:
-            return finalize_result(result)
         deferred_proxy_video_url = ""
         if self._should_defer_material_preview_proxy(current_video_url):
             deferred_proxy_video_url = self.build_material_preview_proxy_url(current_video_url)
@@ -25009,7 +27969,6 @@ class DashboardService:
                 result["public_video_url"] = current_proxy_video_url
                 result["is_public_video_url"] = True
                 result["source"] = "current_material_payload_proxy"
-                return finalize_result(result)
 
         start_text = str(start_date or "").strip()
         end_text = str(end_date or "").strip()
@@ -25027,6 +27986,24 @@ class DashboardService:
                 start_text = requested_start_dt.strftime("%Y-%m-%d")
                 end_text = requested_end_dt.strftime("%Y-%m-%d")
 
+        cache_key = build_material_preview_source_cache_key(
+            merged_row,
+            range_key,
+            start_text,
+            end_text,
+            snapshot_time,
+            allowed_advertiser_ids,
+            self._material_preview_cache_customer_center_id(display_scope),
+        )
+        cache_version = self._shared_cache_version("material-preview-source") if cache_key else "1"
+        if cache_key:
+            cached_payload = self._material_preview_source_cached_payload(cache_key, cache_version)
+            if cached_payload is not None:
+                return cached_payload
+
+        if result["is_public_video_url"]:
+            return finish(result)
+
         resolved_sources = self._material_curve_source_candidates(
             merged_row,
             start_text,
@@ -25034,7 +28011,7 @@ class DashboardService:
             snapshot_time,
             allowed_advertiser_ids,
             search_all_customer_centers=search_all_customer_centers,
-        )
+        )[:MATERIAL_PREVIEW_SOURCE_MAX_CANDIDATES]
         if not resolved_sources:
             result["reason"] = "当前素材未定位到可解析的预览来源。"
             if current_video_url and self._needs_preview_video_redirect_resolution(current_video_url):
@@ -25049,9 +28026,9 @@ class DashboardService:
             elif not current_video_url and cover_url:
                 result["reason"] = "当前素材仅返回封面图，未返回可直接播放的视频地址。"
                 result["source"] = "cover_only"
-            return finalize_result(result)
+            return finish(result)
 
-        attempted_sources = 0
+        attempted_sources = []
         any_source_material_id = False
         for resolved_source in resolved_sources:
             customer_center_id = str(resolved_source.get("customer_center_id") or "").strip()
@@ -25062,11 +28039,83 @@ class DashboardService:
                 any_source_material_id = True
             if not customer_center_id or advertiser_id <= 0:
                 continue
-            attempted_sources += 1
+            attempted_sources.append(f"{customer_center_id}:{advertiser_id}:{source_video_id}")
             client = self._build_scoped_customer_center_client(customer_center_id)
             if source_video_id:
                 try:
-                    uploaded_video = client.get_uploaded_video(advertiser_id, source_video_id)
+                    video_rows = client.list_qianchuan_videos(
+                        advertiser_id=advertiser_id,
+                        filtering={"video_ids": [source_video_id]},
+                        page_size=10,
+                        max_pages=1,
+                        attempts=MATERIAL_PREVIEW_SOURCE_LOOKUP_ATTEMPTS,
+                    )
+                    for item in video_rows:
+                        resolved_library_video_id = str(item.get("id") or item.get("video_id") or item.get("videoId") or "").strip()
+                        if resolved_library_video_id and resolved_library_video_id != source_video_id:
+                            continue
+                        candidate_video_url = self._preferred_video_url_from_values(
+                            item.get("url"),
+                            item.get("video_url"),
+                            item.get("videoUrl"),
+                            item.get("play_url"),
+                            item.get("playUrl"),
+                            current_video_url,
+                        )
+                        resolved_library_video_url = self._resolve_preview_video_url(
+                            candidate_video_url,
+                            timeout=MATERIAL_PREVIEW_SOURCE_RESOLVE_TIMEOUT_SECONDS,
+                        )
+                        if self._is_public_preview_video_url(resolved_library_video_url):
+                            result["video_url"] = resolved_library_video_url
+                            result["public_video_url"] = resolved_library_video_url
+                            result["is_public_video_url"] = True
+                            result["source"] = "qianchuan_video_get"
+                            result["reason"] = ""
+                            poster_url = self._coerce_public_preview_cover_url(
+                                item.get("poster_url") or item.get("posterUrl") or cover_url
+                            )
+                            if poster_url:
+                                result["cover_url"] = poster_url
+                            return finish(result)
+                        proxy_video_url = self.build_material_preview_proxy_url(candidate_video_url)
+                        if proxy_video_url:
+                            result["video_url"] = proxy_video_url
+                            result["public_video_url"] = proxy_video_url
+                            result["is_public_video_url"] = True
+                            result["source"] = "qianchuan_video_get_proxy"
+                            result["reason"] = ""
+                            poster_url = self._coerce_public_preview_cover_url(
+                                item.get("poster_url") or item.get("posterUrl") or cover_url
+                            )
+                            if poster_url:
+                                result["cover_url"] = poster_url
+                            return finish(result)
+                        if self._is_browser_preview_video_candidate_url(candidate_video_url):
+                            result["browser_video_url"] = candidate_video_url
+                            result["browser_video_source"] = "qianchuan_video_get"
+                            result["source"] = "qianchuan_video_get_browser_candidate"
+                            result["reason"] = ""
+                            poster_url = self._coerce_public_preview_cover_url(
+                                item.get("poster_url") or item.get("posterUrl") or cover_url
+                            )
+                            if poster_url:
+                                result["cover_url"] = poster_url
+                            return finish(result)
+                        poster_url = self._coerce_public_preview_cover_url(
+                            item.get("poster_url") or item.get("posterUrl") or cover_url
+                        )
+                        if poster_url and not result["cover_url"]:
+                            result["cover_url"] = poster_url
+                except Exception:
+                    pass
+                try:
+                    uploaded_video = client.get_uploaded_video(
+                        advertiser_id,
+                        source_video_id,
+                        attempts=MATERIAL_PREVIEW_SOURCE_LOOKUP_ATTEMPTS,
+                        base_delay=0.25,
+                    )
                     candidate_video_url = self._preferred_video_url_from_values(
                         uploaded_video.get("url"),
                         uploaded_video.get("video_url"),
@@ -25081,7 +28130,10 @@ class DashboardService:
                         uploaded_video.get("materialUrl"),
                         current_video_url,
                     )
-                    resolved_public_video_url = self._resolve_preview_video_url(candidate_video_url)
+                    resolved_public_video_url = self._resolve_preview_video_url(
+                        candidate_video_url,
+                        timeout=MATERIAL_PREVIEW_SOURCE_RESOLVE_TIMEOUT_SECONDS,
+                    )
                     if self._is_public_preview_video_url(resolved_public_video_url):
                         result["video_url"] = resolved_public_video_url
                         result["public_video_url"] = resolved_public_video_url
@@ -25093,7 +28145,7 @@ class DashboardService:
                         )
                         if poster_url:
                             result["cover_url"] = poster_url
-                        return finalize_result(result)
+                        return finish(result)
                     proxy_video_url = self.build_material_preview_proxy_url(candidate_video_url)
                     if proxy_video_url:
                         result["video_url"] = proxy_video_url
@@ -25106,7 +28158,18 @@ class DashboardService:
                         )
                         if poster_url:
                             result["cover_url"] = poster_url
-                        return finalize_result(result)
+                        return finish(result)
+                    if self._is_browser_preview_video_candidate_url(candidate_video_url):
+                        result["browser_video_url"] = candidate_video_url
+                        result["browser_video_source"] = "file_video_ad_get"
+                        result["source"] = "file_video_ad_get_browser_candidate"
+                        result["reason"] = ""
+                        poster_url = self._coerce_public_preview_cover_url(
+                            uploaded_video.get("poster_url") or uploaded_video.get("posterUrl")
+                        )
+                        if poster_url:
+                            result["cover_url"] = poster_url
+                        return finish(result)
                 except Exception as exc:  # noqa: BLE001
                     message = str(exc)
                     lowered = message.lower()
@@ -25116,69 +28179,17 @@ class DashboardService:
                     elif ("refresh_token" in lowered or "40103" in message or "已过期" in message) and not result["reason"]:
                         result["reason"] = "素材所属客服中心授权已过期，当前无法解析可外部访问的预览地址。"
                         result["source"] = "file_video_ad_get_token_expired"
-                try:
-                    video_rows = client.list_qianchuan_videos(
-                        advertiser_id=advertiser_id,
-                        filtering={"video_ids": [source_video_id]},
-                        page_size=20,
-                        max_pages=1,
-                    )
-                    for item in video_rows:
-                        resolved_library_video_id = str(item.get("id") or item.get("video_id") or item.get("videoId") or "").strip()
-                        if resolved_library_video_id and resolved_library_video_id != source_video_id:
-                            continue
-                        candidate_video_url = self._preferred_video_url_from_values(
-                            item.get("url"),
-                            item.get("video_url"),
-                            item.get("videoUrl"),
-                            item.get("play_url"),
-                            item.get("playUrl"),
-                            current_video_url,
-                        )
-                        resolved_library_video_url = self._resolve_preview_video_url(candidate_video_url)
-                        if self._is_public_preview_video_url(resolved_library_video_url):
-                            result["video_url"] = resolved_library_video_url
-                            result["public_video_url"] = resolved_library_video_url
-                            result["is_public_video_url"] = True
-                            result["source"] = "qianchuan_video_get"
-                            result["reason"] = ""
-                            poster_url = self._coerce_public_preview_cover_url(
-                                item.get("poster_url") or item.get("posterUrl") or cover_url
-                            )
-                            if poster_url:
-                                result["cover_url"] = poster_url
-                            return finalize_result(result)
-                        proxy_video_url = self.build_material_preview_proxy_url(candidate_video_url)
-                        if proxy_video_url:
-                            result["video_url"] = proxy_video_url
-                            result["public_video_url"] = proxy_video_url
-                            result["is_public_video_url"] = True
-                            result["source"] = "qianchuan_video_get_proxy"
-                            result["reason"] = ""
-                            poster_url = self._coerce_public_preview_cover_url(
-                                item.get("poster_url") or item.get("posterUrl") or cover_url
-                            )
-                            if poster_url:
-                                result["cover_url"] = poster_url
-                            return finalize_result(result)
-                        poster_url = self._coerce_public_preview_cover_url(
-                            item.get("poster_url") or item.get("posterUrl") or cover_url
-                        )
-                        if poster_url and not result["cover_url"]:
-                            result["cover_url"] = poster_url
-                except Exception:
-                    pass
 
         if deferred_proxy_video_url:
             result["video_url"] = deferred_proxy_video_url
             result["public_video_url"] = deferred_proxy_video_url
             result["is_public_video_url"] = True
             result["source"] = "current_material_payload_proxy_fallback"
-            return finalize_result(result)
+            return finish(result)
 
-        if attempted_sources <= 0:
+        if not attempted_sources:
             result["reason"] = "当前素材缺少可解析的预览来源配置。"
-            return finalize_result(result)
+            return finish(result)
 
         if current_video_url and self._needs_preview_video_redirect_resolution(current_video_url):
             result["reason"] = result["reason"] or "当前素材返回的是千川中转预览地址，无法直接在浏览器中播放。"
@@ -25194,7 +28205,7 @@ class DashboardService:
             result["source"] = "cover_only"
         elif any_source_material_id:
             result["reason"] = result["reason"] or "已尝试解析公网直链，但当前接口未返回可外部访问的视频文件地址。"
-        return finalize_result(result)
+        return finish(result)
 
     def material_preview_curve(
         self,
@@ -25208,6 +28219,7 @@ class DashboardService:
         display_scope: str = DISPLAY_SCOPE_CURRENT,
     ) -> dict[str, Any]:
         material_key_text = str(material_key or "").strip()
+        curve_metric_fields = ("click_cnt", "dy_like", "dy_comment", "dy_follow", "user_lose_cnt")
         requested_start_dt, requested_end_dt, requested_range_label = self._material_preview_requested_window(
             range_key,
             start_date,
@@ -25252,15 +28264,13 @@ class DashboardService:
                 "notice": "",
                 "message": "Selected material is no longer present in the current rankings. Refresh the material list and retry.",
                 "series": [],
-                "totals": {
-                    "click_cnt": 0,
-                    "user_lose_cnt": 0,
-                },
+                "metrics": list(curve_metric_fields),
+                "totals": {field: 0 for field in curve_metric_fields},
                 "peak": {
                     "second": 0,
-                    "click_cnt": 0,
-                    "user_lose_cnt": 0,
+                    **{field: 0 for field in curve_metric_fields},
                 },
+                "peaks": {field: {"second": 0, "value": 0} for field in curve_metric_fields},
                 "duration_seconds": 0,
                 "point_count": 0,
             }
@@ -25314,15 +28324,13 @@ class DashboardService:
             "notice": "",
             "message": "",
             "series": [],
-            "totals": {
-                "click_cnt": 0,
-                "user_lose_cnt": 0,
-            },
+            "metrics": list(curve_metric_fields),
+            "totals": {field: 0 for field in curve_metric_fields},
             "peak": {
                 "second": 0,
-                "click_cnt": 0,
-                "user_lose_cnt": 0,
+                **{field: 0 for field in curve_metric_fields},
             },
+            "peaks": {field: {"second": 0, "value": 0} for field in curve_metric_fields},
             "duration_seconds": 0,
             "point_count": 0,
         }
@@ -25354,7 +28362,7 @@ class DashboardService:
         response_payload["query_end_date"] = query_end_dt.strftime("%Y-%m-%d")
         response_payload["is_clamped_to_yesterday"] = clamped
 
-        resolved_source = self._resolve_material_curve_source(
+        resolved_sources = self._material_curve_source_candidates(
             row,
             response_payload["query_start_date"],
             response_payload["query_end_date"],
@@ -25362,6 +28370,7 @@ class DashboardService:
             allowed_advertiser_ids,
             search_all_customer_centers=search_all_customer_centers,
         )
+        resolved_source = dict(resolved_sources[0]) if resolved_sources else None
         if resolved_source:
             response_payload["curve_material_id"] = str(resolved_source.get("material_id") or "")
             response_payload["curve_advertiser_id"] = int(resolved_source.get("advertiser_id", 0) or 0)
@@ -25384,38 +28393,80 @@ class DashboardService:
             else:
                 notices.append("该素材被多个账户复用，当前仅展示其中一个账户的曲线。")
 
-        curve_customer_center_id = str((resolved_source or {}).get("customer_center_id") or "").strip() or self._current_customer_center_id()
-        client = self._build_scoped_customer_center_client(curve_customer_center_id)
-        response = client.get_video_user_lose(
-            advertiser_id=int(response_payload["curve_advertiser_id"]),
-            material_id=response_payload["curve_material_id"],
-            start_date=response_payload["query_start_date"],
-            end_date=response_payload["query_end_date"],
-        )
-        points = self._normalize_video_user_lose_rows(response)
+        source_limit = max(min(int(os.environ.get("MATERIAL_PREVIEW_CURVE_SOURCE_LIMIT") or "20"), 50), 1)
+        points: list[dict[str, float]] = []
+        tried_sources = 0
+        last_error = ""
+        for candidate_source in resolved_sources[:source_limit]:
+            candidate_material_id = str(candidate_source.get("material_id") or "").strip()
+            candidate_advertiser_id = int(candidate_source.get("advertiser_id", 0) or 0)
+            if not candidate_material_id or candidate_advertiser_id <= 0:
+                continue
+            tried_sources += 1
+            curve_customer_center_id = (
+                str(candidate_source.get("customer_center_id") or "").strip()
+                or self._current_customer_center_id()
+            )
+            client = self._build_scoped_customer_center_client(curve_customer_center_id)
+            try:
+                response = client.get_video_user_lose(
+                    advertiser_id=candidate_advertiser_id,
+                    material_id=candidate_material_id,
+                    start_date=response_payload["query_start_date"],
+                    end_date=response_payload["query_end_date"],
+                )
+                candidate_points = self._normalize_video_user_lose_rows(response)
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                continue
+            if not candidate_points:
+                continue
+            points = candidate_points
+            resolved_source = dict(candidate_source)
+            response_payload["curve_material_id"] = candidate_material_id
+            response_payload["curve_advertiser_id"] = candidate_advertiser_id
+            response_payload["curve_ad_id"] = int(candidate_source.get("ad_id", 0) or 0)
+            response_payload["material_id_source"] = str(candidate_source.get("source") or "")
+            break
         response_payload["series"] = [
             {
                 "second": int(point["second"]),
-                "click_cnt": int(round(point["click_cnt"])),
-                "user_lose_cnt": int(round(point["user_lose_cnt"])),
+                **{field: int(round(point.get(field, 0.0) or 0.0)) for field in curve_metric_fields},
             }
             for point in points
         ]
         response_payload["duration_seconds"] = int(max((point["second"] for point in points), default=0))
         response_payload["point_count"] = len(points)
         response_payload["totals"] = {
-            "click_cnt": int(round(sum(point["click_cnt"] for point in points))),
-            "user_lose_cnt": int(round(sum(point["user_lose_cnt"] for point in points))),
+            field: int(round(sum(float(point.get(field, 0.0) or 0.0) for point in points)))
+            for field in curve_metric_fields
+        }
+        response_payload["peaks"] = {
+            field: max(
+                (
+                    {
+                        "second": int(item.get("second", 0) or 0),
+                        "value": int(item.get(field, 0) or 0),
+                    }
+                    for item in response_payload["series"]
+                ),
+                key=lambda item: (int(item["value"]), -int(item["second"])),
+                default={"second": 0, "value": 0},
+            )
+            for field in curve_metric_fields
         }
         peak_point = max(
             response_payload["series"],
-            key=lambda item: (int(item["user_lose_cnt"]), int(item["click_cnt"]), -int(item["second"])),
-            default={"second": 0, "click_cnt": 0, "user_lose_cnt": 0},
+            key=lambda item: (
+                max(int(item.get(field, 0) or 0) for field in curve_metric_fields),
+                int(item.get("click_cnt", 0) or 0),
+                -int(item["second"]),
+            ),
+            default={"second": 0, **{field: 0 for field in curve_metric_fields}},
         )
         response_payload["peak"] = {
             "second": int(peak_point["second"]),
-            "click_cnt": int(peak_point["click_cnt"]),
-            "user_lose_cnt": int(peak_point["user_lose_cnt"]),
+            **{field: int(peak_point.get(field, 0) or 0) for field in curve_metric_fields},
         }
         if not response_payload["series"]:
             response_payload["message"] = "接口未返回该素材的秒级互动分布数据。"
@@ -27601,6 +30652,184 @@ class DashboardService:
             sort_dirs=sort_dirs,
         )
 
+    def _material_history_index_refresh_end_day(self, target_days: list[str]) -> str:
+        normalized_days = sorted({str(day or "").strip()[:10] for day in target_days if str(day or "").strip()})
+        config = self.read_config()
+        tz_name = str(config.get("timezone") or TIMEZONE).strip() or TIMEZONE
+        yesterday_key = (datetime.now(ZoneInfo(tz_name)).date() - timedelta(days=1)).strftime("%Y-%m-%d")
+        candidates = [yesterday_key, *normalized_days]
+        try:
+            with self.db() as conn:
+                row = conn.execute(
+                    "SELECT MAX(day_key) AS max_day FROM material_ranking_day_prefix"
+                ).fetchone()
+            max_prefix_day = str((row or {}).get("max_day") or "").strip()
+            if max_prefix_day:
+                candidates.append(max_prefix_day)
+        except Exception:
+            LOGGER.exception("failed to inspect material day prefix max day")
+        return max(candidates) if candidates else yesterday_key
+
+    def _refresh_material_ranking_indexes_after_history_days(
+        self,
+        target_days: list[str] | set[str] | tuple[str, ...],
+    ) -> dict[str, Any]:
+        config = self.read_config()
+        tz_name = str(config.get("timezone") or TIMEZONE).strip() or TIMEZONE
+        yesterday_key = (datetime.now(ZoneInfo(tz_name)).date() - timedelta(days=1)).strftime("%Y-%m-%d")
+        normalized_days = sorted(
+            {
+                str(day or "").strip()[:10]
+                for day in target_days
+                if str(day or "").strip() and str(day or "").strip()[:10] <= yesterday_key
+            }
+        )
+        if not normalized_days:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "no_closed_history_days",
+                "yesterday": yesterday_key,
+            }
+
+        day_index_results: list[dict[str, Any]] = []
+        index_scope_flags = [False]
+        try:
+            current_scope = material_ranking_index.scope_key(self, all_customer_centers=False)
+            all_scope = material_ranking_index.scope_key(self, all_customer_centers=True)
+            if all_scope and all_scope != current_scope:
+                index_scope_flags.append(True)
+        except Exception:
+            LOGGER.exception("failed to resolve material ranking index scopes")
+
+        for day_key in normalized_days:
+            for all_customer_centers in index_scope_flags:
+                try:
+                    day_index_results.append(
+                        self.refresh_material_ranking_index_for_window(
+                            start_day=day_key,
+                            end_day=day_key,
+                            range_key="day",
+                            all_customer_centers=all_customer_centers,
+                            sort_keys=material_ranking_index.SORT_KEYS,
+                            sort_dirs=("desc", "asc"),
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception("failed to rebuild material day index for %s", day_key)
+                    day_index_results.append(
+                        {
+                            "ok": False,
+                            "day": day_key,
+                            "all_customer_centers": bool(all_customer_centers),
+                            "error": str(exc),
+                        }
+                    )
+
+        start_day = normalized_days[0]
+        end_day = self._material_history_index_refresh_end_day(normalized_days)
+        prefix_results: list[dict[str, Any]] = []
+        rolling_index_results: list[dict[str, Any]] = []
+        try:
+            prefix_results.append(
+                material_ranking_index.rebuild_day_prefix_range(
+                    self,
+                    start_day=start_day,
+                    end_day=end_day,
+                    all_customer_centers=False,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("failed to rebuild current material day prefix from %s to %s", start_day, end_day)
+            prefix_results.append(
+                {
+                    "ok": False,
+                    "scope": "current",
+                    "start_day": start_day,
+                    "end_day": end_day,
+                    "error": str(exc),
+                }
+            )
+        try:
+            prefix_results.append(
+                material_ranking_index.rebuild_day_prefix_range(
+                    self,
+                    start_day=start_day,
+                    end_day=end_day,
+                    all_customer_centers=True,
+                    force_scope_key=material_ranking_index.SCOPE_ALL,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("failed to rebuild all material day prefix from %s to %s", start_day, end_day)
+            prefix_results.append(
+                {
+                    "ok": False,
+                    "scope": material_ranking_index.SCOPE_ALL,
+                    "start_day": start_day,
+                    "end_day": end_day,
+                    "error": str(exc),
+                }
+            )
+
+        rolling_end_day = end_day
+        rolling_window_specs = [
+            (
+                "week",
+                (datetime.strptime(rolling_end_day, "%Y-%m-%d").date() - timedelta(days=6)).strftime("%Y-%m-%d"),
+                rolling_end_day,
+            ),
+            (
+                "month",
+                (datetime.strptime(rolling_end_day, "%Y-%m-%d").date() - timedelta(days=29)).strftime("%Y-%m-%d"),
+                rolling_end_day,
+            ),
+        ]
+        for range_key_value, rolling_start_day, rolling_end_day_value in rolling_window_specs:
+            for all_customer_centers in index_scope_flags:
+                try:
+                    rolling_index_results.append(
+                        self.refresh_material_ranking_index_for_window(
+                            start_day=rolling_start_day,
+                            end_day=rolling_end_day_value,
+                            range_key=range_key_value,
+                            all_customer_centers=all_customer_centers,
+                            sort_keys=material_ranking_index.SORT_KEYS,
+                            sort_dirs=("desc", "asc"),
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception(
+                        "failed to rebuild material %s index for %s-%s",
+                        range_key_value,
+                        rolling_start_day,
+                        rolling_end_day_value,
+                    )
+                    rolling_index_results.append(
+                        {
+                            "ok": False,
+                            "range_key": range_key_value,
+                            "start_day": rolling_start_day,
+                            "end_day": rolling_end_day_value,
+                            "all_customer_centers": bool(all_customer_centers),
+                            "error": str(exc),
+                        }
+                    )
+
+        self.clear_material_runtime_caches(scope="all")
+        ok = all(bool(item.get("ok")) for item in [*day_index_results, *prefix_results, *rolling_index_results])
+        return {
+            "ok": ok,
+            "target_days": normalized_days,
+            "start_day": start_day,
+            "end_day": end_day,
+            "day_index_result_count": len(day_index_results),
+            "day_index_results": day_index_results[-10:],
+            "prefix_results": prefix_results,
+            "rolling_index_result_count": len(rolling_index_results),
+            "rolling_index_results": rolling_index_results,
+        }
+
     def _material_ranking_index_build_key(
         self,
         *,
@@ -28009,13 +31238,17 @@ class DashboardService:
             if not source_queries:
                 return empty_payload()
 
-            uses_day_rollup_index = start_day != end_day
+            today_key_for_index = datetime.now(ZoneInfo(str(tz_name or TIMEZONE))).strftime("%Y-%m-%d")
+            window_includes_today = start_day <= today_key_for_index <= end_day
+            uses_day_rollup_index = (start_day != end_day or end_day < today_key_for_index) and not window_includes_today
             index_range_key = (
                 ""
                 if uses_day_rollup_index
                 else material_ranking_index.index_range_key(normalized, start_day, end_day)
             )
             can_use_ranking_index = (
+                not window_includes_today
+                and
                 (uses_day_rollup_index or bool(index_range_key))
                 and allowed_advertiser_ids is None
                 and not material_name_patterns
@@ -28023,12 +31256,70 @@ class DashboardService:
                 and normalized_sort_key in material_ranking_index.SORT_KEYS
                 and (not search_text or uses_day_rollup_index)
             )
-            if can_use_ranking_index:
+            can_use_live_overlay_index = (
+                window_includes_today
+                and start_day < today_key_for_index
+                and allowed_advertiser_ids is None
+                and not material_name_patterns
+                and rank_zero_metrics_last
+                and normalized_sort_key in material_ranking_index.SORT_KEYS
+                and not search_text
+            )
+            can_use_current_live_index = (
+                window_includes_today
+                and start_day == today_key_for_index
+                and end_day == today_key_for_index
+                and allowed_advertiser_ids is None
+                and not material_name_patterns
+                and rank_zero_metrics_last
+                and normalized_sort_key in material_ranking_index.SORT_KEYS
+                and not search_text
+            )
+            if can_use_current_live_index or can_use_live_overlay_index or can_use_ranking_index:
                 scope_key_value = material_ranking_index.scope_key(
                     self,
                     all_customer_centers=all_customer_centers,
                 )
-                if uses_day_rollup_index:
+                if can_use_current_live_index:
+                    with self.db() as index_conn:
+                        indexed_payload = material_ranking_index.payload_from_current_index(
+                            self,
+                            index_conn,
+                            start_day=start_day,
+                            end_day=end_day,
+                            normalized=normalized,
+                            range_label=range_label,
+                            page=normalized_page,
+                            page_size=normalized_page_size,
+                            sort_key=normalized_sort_key,
+                            sort_dir=normalized_sort_dir,
+                            tz_name=tz_name,
+                            all_customer_centers=all_customer_centers,
+                        )
+                    if indexed_payload is not None:
+                        return indexed_payload
+                elif can_use_live_overlay_index:
+                    with self.db() as index_conn:
+                        indexed_payload = material_ranking_index.payload_from_live_overlay_index(
+                            self,
+                            index_conn,
+                            scope_key_value=scope_key_value,
+                            start_day=start_day,
+                            end_day=end_day,
+                            normalized=normalized,
+                            range_label=range_label,
+                            start_dt=start_dt,
+                            end_dt=end_dt,
+                            tz_name=tz_name,
+                            page=normalized_page,
+                            page_size=normalized_page_size,
+                            sort_key=normalized_sort_key,
+                            sort_dir=normalized_sort_dir,
+                            all_customer_centers=all_customer_centers,
+                        )
+                    if indexed_payload is not None:
+                        return indexed_payload
+                elif uses_day_rollup_index:
                     with self.db() as index_conn:
                         indexed_payload = material_ranking_index.payload_from_day_rollup_index(
                             self,
@@ -30946,6 +34237,77 @@ class DashboardService:
                 )
         return sorted(options.values(), key=lambda item: (str(item.get("advertiser_name") or ""), int(item.get("advertiser_id", 0) or 0)))
 
+    @staticmethod
+    def _compact_account_rows_for_payload(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        allowed_keys = {
+            "advertiser_id",
+            "advertiser_name",
+            "ok",
+            "error",
+            "snapshot_time",
+            "stat_cost",
+            "pay_amount",
+            "total_pay_amount",
+            "settled_pay_amount",
+            "roi",
+            "settled_roi",
+            "order_count",
+            "settled_order_count",
+            "pay_order_cost",
+            "settled_amount_rate",
+            "refund_amount_1h",
+            "refund_rate_1h",
+            "plan_count",
+            "top_plan_name",
+            "status_text",
+        }
+        compact_rows: list[dict[str, Any]] = []
+        for raw in rows or []:
+            row = dict(raw or {})
+            compact_rows.append({key: row.get(key) for key in allowed_keys if key in row})
+        return compact_rows
+
+    @staticmethod
+    def _compact_plan_rows_for_payload(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        allowed_keys = {
+            "ad_id",
+            "ad_name",
+            "advertiser_id",
+            "advertiser_name",
+            "snapshot_time",
+            "product_id",
+            "product_name",
+            "anchor_name",
+            "marketing_goal",
+            "marketing_goal_text",
+            "plan_source",
+            "plan_delivery_type",
+            "plan_source_text",
+            "status",
+            "opt_status",
+            "opt_status_label",
+            "status_code_text",
+            "status_text",
+            "roi_goal",
+            "stat_cost",
+            "pay_amount",
+            "total_pay_amount",
+            "settled_pay_amount",
+            "roi",
+            "settled_roi",
+            "order_count",
+            "settled_order_count",
+            "pay_order_cost",
+            "settled_amount_rate",
+            "refund_amount_1h",
+            "refund_rate_1h",
+        }
+        compact_rows: list[dict[str, Any]] = []
+        for raw in rows or []:
+            row = dict(raw or {})
+            compact_rows.append({key: row.get(key) for key in allowed_keys if key in row})
+        return compact_rows
+
     def trim_performance_payload_for_section(
         self,
         payload: dict[str, Any],
@@ -30959,7 +34321,9 @@ class DashboardService:
         accounts = [dict(item or {}) for item in list(next_payload.get("accounts") or [])]
         plans = [dict(item or {}) for item in list(next_payload.get("plans") or [])]
         if normalized_section == "account":
-            next_payload["accounts"] = self._enrich_account_rows_for_query(accounts, plans)
+            next_payload["accounts"] = self._compact_account_rows_for_payload(
+                self._enrich_account_rows_for_query(accounts, plans)
+            )
             next_payload["plans"] = []
             next_payload["products"] = []
             next_payload["employees"] = []
@@ -30970,8 +34334,9 @@ class DashboardService:
             next_payload["requested_section"] = "account"
             return next_payload
         if normalized_section == "plan":
-            next_payload["accounts"] = accounts
+            next_payload["accounts"] = []
             next_payload["plan_accounts"] = self._plan_account_options(accounts, plans)
+            next_payload["plans"] = self._compact_plan_rows_for_payload(plans)
             next_payload["products"] = []
             next_payload["employees"] = []
             next_payload["operators"] = []
@@ -31173,10 +34538,14 @@ class DashboardService:
         query_text = self._query_text(search)
         normalized_page = self._query_page_value(page)
         if normalized_section == "account":
-            rows = self._enrich_account_rows_for_query(
-                list(next_payload.get("accounts") or []),
-                list(next_payload.get("plans") or []),
-            )
+            raw_accounts = [dict(item or {}) for item in list(next_payload.get("accounts") or [])]
+            if str(next_payload.get("requested_section") or "").strip().lower() == "account":
+                rows = raw_accounts
+            else:
+                rows = self._enrich_account_rows_for_query(
+                    raw_accounts,
+                    list(next_payload.get("plans") or []),
+                )
             if query_text:
                 rows = [
                     row
@@ -31533,9 +34902,19 @@ class DashboardService:
         versioned_cache_key = self._versioned_cache_key(cache_version, cache_key)
         def build_payload() -> dict[str, Any]:
             if self._display_scope_uses_all_customer_centers(display_scope):
-                payload = self._performance_snapshot_from_db_all_customer_centers(start_dt, end_dt, prefer_daily=prefer_daily)
+                payload = self._performance_snapshot_from_db_all_customer_centers(
+                    start_dt,
+                    end_dt,
+                    prefer_daily=prefer_daily,
+                    section=normalized_section,
+                )
             else:
-                payload = self._performance_snapshot_from_db(start_dt, end_dt, prefer_daily=prefer_daily)
+                payload = self._performance_snapshot_from_db(
+                    start_dt,
+                    end_dt,
+                    prefer_daily=prefer_daily,
+                    section=normalized_section,
+                )
             payload["range_key"] = normalized
             payload["range_label"] = range_label
             payload["query_start_date"] = start_dt.strftime("%Y-%m-%d")
@@ -31549,9 +34928,8 @@ class DashboardService:
                     all_customer_centers=self._display_scope_uses_all_customer_centers(display_scope),
                 )
             )
-            if normalized_section != "account":
-                decorated_plans = [self._decorate_plan_item(item) for item in payload.get("plans", [])]
-                payload["plans"] = self._apply_employee_attribution(decorated_plans, payload["accounts"])
+            if normalized_section in {"all", "breakdown"}:
+                payload["plans"] = self._apply_employee_attribution(list(payload.get("plans") or []), payload["accounts"])
                 if normalized_section in {"all", "breakdown"}:
                     payload["summary"], payload["products"], payload["employees"], payload["operators"] = self._rankings_bundle(
                         payload["summary"],
@@ -31568,6 +34946,10 @@ class DashboardService:
                     payload["products"] = []
                     payload["employees"] = []
                     payload["operators"] = []
+            elif normalized_section == "plan":
+                payload["products"] = []
+                payload["employees"] = []
+                payload["operators"] = []
             payload = self.trim_performance_payload_for_section(payload, normalized_section)
             summary = dict(payload.get("summary") or {})
             return self._attach_freshness(
@@ -32007,6 +35389,7 @@ class DashboardService:
         self,
         force_refresh: bool = False,
         progress_callback: Any | None = None,
+        full_plan_scan: bool = False,
         workers_override: int | None = None,
         plan_material_requests_per_minute_override: int | None = None,
         plan_material_batch_size_override: int | None = None,
@@ -32017,6 +35400,7 @@ class DashboardService:
         return self.collect_material_hot_and_store_all_customer_centers(
             force_refresh=force_refresh,
             progress_callback=progress_callback,
+            full_plan_scan=full_plan_scan,
             workers_override=workers_override,
             plan_material_requests_per_minute_override=plan_material_requests_per_minute_override,
             plan_material_batch_size_override=plan_material_batch_size_override,
@@ -32029,6 +35413,7 @@ class DashboardService:
         self,
         force_refresh: bool = False,
         progress_callback: Any | None = None,
+        full_plan_scan: bool = False,
         workers_override: int | None = None,
         plan_material_requests_per_minute_override: int | None = None,
         plan_material_batch_size_override: int | None = None,
@@ -32053,6 +35438,7 @@ class DashboardService:
             if not customer_center_ids:
                 payload = self.collect_material_snapshot(
                     force_refresh=force_refresh,
+                    full_plan_scan=full_plan_scan,
                     workers_override=workers_override,
                     plan_material_requests_per_minute_override=plan_material_requests_per_minute_override,
                     plan_material_batch_size_override=plan_material_batch_size_override,
@@ -32105,6 +35491,7 @@ class DashboardService:
                     payload = self.collect_material_snapshot(
                         force_refresh=force_refresh,
                         customer_center_id=customer_center_id,
+                        full_plan_scan=full_plan_scan,
                         workers_override=workers_override,
                         plan_material_requests_per_minute_override=plan_material_requests_per_minute_override,
                         plan_material_batch_size_override=plan_material_batch_size_override,
@@ -32206,6 +35593,7 @@ class DashboardService:
     def collect_material_and_store(
         self,
         force_refresh: bool = False,
+        full_plan_scan: bool = False,
         workers_override: int | None = None,
         plan_material_requests_per_minute_override: int | None = None,
         plan_material_batch_size_override: int | None = None,
@@ -32214,6 +35602,7 @@ class DashboardService:
     ) -> dict[str, Any]:
         return self.collect_material_hot_and_store(
             force_refresh=force_refresh,
+            full_plan_scan=full_plan_scan,
             workers_override=workers_override,
             plan_material_requests_per_minute_override=plan_material_requests_per_minute_override,
             plan_material_batch_size_override=plan_material_batch_size_override,
@@ -32224,6 +35613,7 @@ class DashboardService:
     def collect_material_hot_and_store(
         self,
         force_refresh: bool = False,
+        full_plan_scan: bool = False,
         workers_override: int | None = None,
         plan_material_requests_per_minute_override: int | None = None,
         plan_material_batch_size_override: int | None = None,
@@ -32244,6 +35634,7 @@ class DashboardService:
                 }
             payload = self.collect_material_snapshot(
                 force_refresh=force_refresh,
+                full_plan_scan=full_plan_scan,
                 workers_override=workers_override,
                 plan_material_requests_per_minute_override=plan_material_requests_per_minute_override,
                 plan_material_batch_size_override=plan_material_batch_size_override,
@@ -32324,6 +35715,7 @@ class DashboardService:
     async def start(self) -> None:
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         self.init_db()
+        self.assert_runtime_client_compatibility()
         if str(SESSION_SECRET or "").strip().lower() in {"", "replace-me"}:
             print(
                 "[security] SESSION_SECRET is using the default placeholder; set a unique value before exposing this service.",

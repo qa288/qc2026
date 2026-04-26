@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -20,39 +21,18 @@ def _prepare() -> None:
     with _PREPARE_LOCK:
         if _PREPARED:
             return
+        service.assert_runtime_client_compatibility()
         service.init_db_once()
         service.bootstrap_token_store()
         _PREPARED = True
 
 
-def _hot_sync_block_payload(reason: str) -> dict:
+def _hot_sync_pause_payload(reason: str) -> dict:
     return {
         "ok": True,
         "skipped": True,
-        "reason": str(reason or "hot sync blocked"),
+        "reason": str(reason or "hot syncs paused"),
     }
-
-
-def _active_history_refresh_stage() -> str:
-    status = service.full_refresh_status()
-    running = service.runtime_lock_active("full-refresh") or str(status.get("status") or "").strip().lower() in {
-        "queued",
-        "running",
-    }
-    if not running:
-        return ""
-    return str(status.get("stage") or "").strip().lower()
-
-
-def _hot_sync_block_reason(task_name: str = "") -> str | None:
-    stage = _active_history_refresh_stage()
-    if stage:
-        if stage in {"material_metrics", "material_metadata", "material_finalize", "material_reconcile"}:
-            return None
-        return "history refresh running"
-    if service.runtime_lock_active("full-refresh"):
-        return "history refresh running"
-    return None
 
 
 def _configured_performance_days(days: int | None = None) -> int:
@@ -74,9 +54,8 @@ def _material_history_days() -> int:
 @celery_app.task(name="dashboard.sync")
 def sync_dashboard() -> dict:
     _prepare()
-    hot_sync_block_reason = _hot_sync_block_reason("dashboard.sync")
-    if hot_sync_block_reason:
-        return _hot_sync_block_payload(hot_sync_block_reason)
+    if service.hot_syncs_paused():
+        return _hot_sync_pause_payload("hot syncs paused for nightly history rebuild")
     payload = service.collect_and_store_all_customer_centers()
     return {
         "snapshot_time": payload.get("snapshot_time", ""),
@@ -90,16 +69,12 @@ def sync_dashboard() -> dict:
 
 @celery_app.task(name="dashboard.detail_sync")
 def sync_dashboard_detail(force_refresh: bool = False) -> dict:
-    return sync_dashboard_material_hot(force_refresh=force_refresh)
-
-
-@celery_app.task(name="dashboard.material_hot_sync")
-def sync_dashboard_material_hot(force_refresh: bool = False) -> dict:
     _prepare()
-    hot_sync_block_reason = _hot_sync_block_reason("dashboard.material_hot_sync")
-    if hot_sync_block_reason:
-        return _hot_sync_block_payload(hot_sync_block_reason)
-    payload = service.collect_material_hot_and_store_all_customer_centers(force_refresh=bool(force_refresh))
+    if service.hot_syncs_paused():
+        return _hot_sync_pause_payload("hot syncs paused for nightly history rebuild")
+    payload = service.collect_material_hot_and_store_all_customer_centers(
+        force_refresh=bool(force_refresh),
+    )
     return {
         "snapshot_time": payload.get("snapshot_time", ""),
         "synced_customer_center_count": int(payload.get("synced_customer_center_count", 0) or 0),
@@ -109,13 +84,21 @@ def sync_dashboard_material_hot(force_refresh: bool = False) -> dict:
     }
 
 
-@celery_app.task(name="dashboard.material_ranking_index_refresh")
-def refresh_material_ranking_index(days: int = 60, all_customer_centers: bool = False) -> dict:
+@celery_app.task(name="dashboard.material_hot_sync")
+def sync_dashboard_material_hot(force_refresh: bool = False) -> dict:
     _prepare()
-    return service.rebuild_material_ranking_indexes(
-        days=max(int(days or 60), 1),
-        all_customer_centers=bool(all_customer_centers),
+    if service.hot_syncs_paused():
+        return _hot_sync_pause_payload("hot syncs paused for nightly history rebuild")
+    payload = service.collect_material_hot_and_store_all_customer_centers(
+        force_refresh=bool(force_refresh),
     )
+    return {
+        "snapshot_time": payload.get("snapshot_time", ""),
+        "synced_customer_center_count": int(payload.get("synced_customer_center_count", 0) or 0),
+        "skipped": bool(payload.get("skipped", False)),
+        "reason": str(payload.get("reason") or ""),
+        "error_count": int(payload.get("error_count", 0) or 0),
+    }
 
 
 @celery_app.task(name="dashboard.full_refresh")
@@ -140,32 +123,138 @@ def nightly_history_refresh_dashboard(
     detail_days: int = 0,
     force_detail_refresh: bool = True,
 ) -> dict:
-    _prepare()
-    _ = int(detail_days or 0)
-    _ = bool(force_detail_refresh)
     task_id = str(getattr(nightly_history_refresh_dashboard.request, "id", "") or "")
-    return service.history_catchup_probe(
+    return _history_refresh_dashboard_v3(
         task_id=task_id,
+        performance_days=performance_days,
+        detail_days=detail_days,
+        force_detail_refresh=force_detail_refresh,
         trigger="nightly",
-        performance_days=int(performance_days or 0) or None,
-        extended_days=int(settings.extended_history_refresh_days or 0) or None,
     )
 
 
-@celery_app.task(name="dashboard.history_catchup_probe")
-def history_catchup_probe_dashboard(
-    trigger: str = "probe",
-    performance_days: int = 0,
-    extended_days: int = 0,
-) -> dict:
+@celery_app.task(name="dashboard.material_day_backfill")
+def material_day_backfill_dashboard(target_date: str) -> dict:
     _prepare()
-    task_id = str(getattr(history_catchup_probe_dashboard.request, "id", "") or "")
-    return service.history_catchup_probe(
-        task_id=task_id,
-        trigger=str(trigger or "probe").strip().lower() or "probe",
-        performance_days=int(performance_days or 0) or None,
-        extended_days=int(extended_days or 0) or None,
-    )
+    task_id = str(getattr(material_day_backfill_dashboard.request, "id", "") or "")
+    target_text = str(target_date or "").strip()
+    if not target_text:
+        raise ValueError("target_date is required")
+
+    current_status = service.material_day_backfill_status()
+    if service.runtime_lock_active("material-day-backfill"):
+        return {
+            "ok": True,
+            "queued": False,
+            "running": True,
+            "task_id": current_status.get("task_id", ""),
+            "task_name": "dashboard.material_day_backfill",
+            "status": current_status,
+        }
+
+    queued_at = service.material_day_backfill_status().get("queued_at") or now_text()
+
+    with service._distributed_runtime_lock("material-day-backfill", timeout_seconds=21600) as acquired:
+        if not acquired:
+            current_status = service.material_day_backfill_status()
+            return {
+                "ok": True,
+                "queued": False,
+                "running": True,
+                "task_id": current_status.get("task_id", ""),
+                "task_name": "dashboard.material_day_backfill",
+                "status": current_status,
+            }
+
+        started_at = now_text()
+        service.update_material_day_backfill_status(
+            task_id=task_id,
+            target_date=target_text,
+            status="running",
+            message=f"{target_text} 单天素材回补开始执行。",
+            queued_at=queued_at,
+            started_at=started_at,
+            updated_at=started_at,
+            finished_at="",
+            progress={
+                "completed_steps": 0,
+                "total_steps": 0,
+            },
+            result={},
+        )
+        service.pause_hot_syncs("material_day_backfill")
+        try:
+            def progress_callback(payload: dict | None) -> None:
+                progress_payload = payload if isinstance(payload, dict) else {}
+                timestamp = now_text()
+                service.update_material_day_backfill_status(
+                    task_id=task_id,
+                    target_date=target_text,
+                    status="running",
+                    message=str(progress_payload.get("message") or f"{target_text} 单天素材回补执行中").strip(),
+                    queued_at=queued_at,
+                    started_at=started_at,
+                    updated_at=timestamp,
+                    progress={
+                        "completed_steps": int(progress_payload.get("completed_steps", 0) or 0),
+                        "total_steps": int(progress_payload.get("total_steps", 0) or 0),
+                    },
+                    result={
+                        "customer_center_id": str(progress_payload.get("customer_center_id") or "").strip(),
+                        "target_day": str(progress_payload.get("target_day") or target_text).strip(),
+                    },
+                )
+
+            result = service.backfill_material_day(target_text, progress_callback=progress_callback)
+            finish_timestamp = now_text()
+            final_status = "completed" if int(result.get("error_count", 0) or 0) == 0 else "failed"
+            service.update_material_day_backfill_status(
+                task_id=task_id,
+                target_date=target_text,
+                status=final_status,
+                message=(
+                    f"{target_text} 单天素材回补完成。"
+                    if final_status == "completed"
+                    else f"{target_text} 单天素材回补完成，但存在错误。"
+                ),
+                queued_at=queued_at,
+                started_at=started_at,
+                updated_at=finish_timestamp,
+                finished_at=finish_timestamp,
+                progress={
+                    "completed_steps": int((result.get("customer_center_count", 0) or 0) * 3),
+                    "total_steps": int((result.get("customer_center_count", 0) or 0) * 3),
+                },
+                result=result,
+            )
+            return {
+                "ok": final_status == "completed",
+                "task_id": task_id,
+                "task_name": "dashboard.material_day_backfill",
+                "status": service.material_day_backfill_status(),
+                "result": result,
+            }
+        except Exception as exc:  # noqa: BLE001
+            finish_timestamp = now_text()
+            service.update_material_day_backfill_status(
+                task_id=task_id,
+                target_date=target_text,
+                status="failed",
+                message=str(exc),
+                queued_at=queued_at,
+                started_at=started_at,
+                updated_at=finish_timestamp,
+                finished_at=finish_timestamp,
+            )
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "task_name": "dashboard.material_day_backfill",
+                "status": service.material_day_backfill_status(),
+                "error": str(exc),
+            }
+        finally:
+            service.resume_hot_syncs()
 
 
 def _history_refresh_dashboard_v3(
@@ -338,10 +427,7 @@ def _execute_full_refresh_overwrite(
 
         return callback
 
-    with service._distributed_runtime_lock(
-        "full-refresh",
-        timeout_seconds=service._full_refresh_lock_ttl_seconds(),
-    ) as acquired:
+    with service._distributed_runtime_lock("full-refresh", timeout_seconds=21600) as acquired:
         if not acquired:
             status_payload = service.full_refresh_status()
             return {
@@ -359,7 +445,7 @@ def _execute_full_refresh_overwrite(
             status="running",
             stage="performance",
             stage_label=stage_labels.get("performance", "performance"),
-            message=f"{trigger_label}已开始：补齐最近 {performance_days} 个已结束自然日的历史表现",
+            message=f"{trigger_label} started; refreshing the last {performance_days} completed performance days",
             queued_at=queued_at,
             started_at=start_timestamp,
             updated_at=start_timestamp,
@@ -374,69 +460,73 @@ def _execute_full_refresh_overwrite(
             result={},
         )
 
-        performance_payload = run_stage(
-            "performance",
-            service.refresh_recent_performance_history,
-            performance_days,
-            progress_callback=build_stage_progress_callback(
+        service.pause_hot_syncs("nightly_history")
+        try:
+            performance_payload = run_stage(
                 "performance",
-                0,
-                f"补齐最近 {performance_days} 个已结束自然日的历史表现",
-            ),
-        )
-        update_stage_status(
-            "material_metrics",
-            stage_status="running",
-            message=str(
-                performance_payload.get("error")
-                or "历史表现已补齐，开始刷新素材阶段指标"
-            ),
-            completed_steps=1,
-            result=performance_payload.get("result") or {},
-        )
-
-        material_metrics_payload = run_stage(
-            "material_metrics",
-            service.refresh_recent_material_history,
-            material_history_days,
-            workers_override=nightly_material_workers,
-            prefer_report_metrics=nightly_use_report_metrics,
-            plan_material_requests_per_minute_override=nightly_plan_material_requests_per_minute,
-            plan_material_batch_size_override=nightly_plan_material_batch_size,
-            plan_material_batch_sleep_seconds_override=nightly_plan_material_batch_sleep_seconds,
-            progress_callback=build_stage_progress_callback(
+                service.refresh_recent_performance_history,
+                performance_days,
+                progress_callback=build_stage_progress_callback(
+                    "performance",
+                    0,
+                    f"refreshing the last {performance_days} completed performance days",
+                ),
+            )
+            update_stage_status(
                 "material_metrics",
-                1,
-                "刷新素材阶段指标",
-            ),
-        )
-        material_metrics_result = dict(material_metrics_payload.get("result") or {})
-        material_metrics_result["start_date"] = material_start_date
-        material_metrics_result["requested_days"] = material_history_days
-        material_metrics_payload["result"] = material_metrics_result
+                stage_status="running",
+                message=str(
+                    performance_payload.get("error")
+                    or "recent performance history refreshed; refreshing current-plan material inventory"
+                ),
+                completed_steps=1,
+                result=performance_payload.get("result") or {},
+            )
 
-        update_stage_status(
-            "material_metadata",
-            stage_status="running",
-            message=str(
-                material_metrics_payload.get("error")
-                or "素材阶段指标已刷新，开始补齐素材资产档案"
-            ),
-            completed_steps=2,
-            result=material_metrics_payload.get("result") or {},
-        )
+            material_metrics_payload = run_stage(
+                "material_metrics",
+                service.refresh_recent_material_history,
+                material_history_days,
+                workers_override=nightly_material_workers,
+                prefer_report_metrics=nightly_use_report_metrics,
+                plan_material_requests_per_minute_override=nightly_plan_material_requests_per_minute,
+                plan_material_batch_size_override=nightly_plan_material_batch_size,
+                plan_material_batch_sleep_seconds_override=nightly_plan_material_batch_sleep_seconds,
+                progress_callback=build_stage_progress_callback(
+                    "material_metrics",
+                    1,
+                    "refreshing current-plan material inventory",
+                ),
+            )
+            material_metrics_result = dict(material_metrics_payload.get("result") or {})
+            material_metrics_result["start_date"] = material_start_date
+            material_metrics_result["requested_days"] = material_history_days
+            material_metrics_payload["result"] = material_metrics_result
 
-        material_metadata_payload = run_stage(
-            "material_metadata",
-            service.refresh_material_metadata_history,
-            material_start_date,
-            progress_callback=build_stage_progress_callback(
+            update_stage_status(
                 "material_metadata",
-                2,
-                "补齐素材资产档案",
-            ),
-        )
-        cache_clear_payload = run_stage("cache_clear", clear_dashboard_caches)
+                stage_status="running",
+                message=str(
+                    material_metrics_payload.get("error")
+                    or "current-plan material inventory refreshed; rebuilding material metadata"
+                ),
+                completed_steps=2,
+                result=material_metrics_payload.get("result") or {},
+            )
+
+            material_metadata_payload = run_stage(
+                "material_metadata",
+                service.refresh_material_metadata_history,
+                material_start_date,
+                progress_callback=build_stage_progress_callback(
+                    "material_metadata",
+                    2,
+                    "rebuilding current-plan material metadata",
+                ),
+            )
+            cache_clear_payload = run_stage("cache_clear", clear_dashboard_caches)
+        finally:
+            service.resume_hot_syncs()
 
         stage_errors = [
             payload["error"]
@@ -471,8 +561,8 @@ def _execute_full_refresh_overwrite(
                 "; ".join(stage_errors)
                 if stage_errors
                 else (
-                    f"{trigger_label}已完成：最近 {performance_days} 个已结束自然日的历史表现、"
-                    "素材阶段指标和素材资产档案已按上游数据补齐"
+                    f"{trigger_label} completed; recent {performance_days} completed performance days, "
+                    "current-plan material inventory and material metadata were rebuilt from upstream"
                 )
             ),
             queued_at=service.full_refresh_status().get("queued_at") or finish_timestamp,
@@ -524,6 +614,12 @@ def _execute_full_refresh_overwrite(
 @celery_app.task(name="dashboard.oauth_token_refresh")
 def refresh_dashboard_oauth_tokens() -> dict:
     _prepare()
+    if settings.disable_oceanengine_token_refresh or not settings.enable_oauth_token_refresh:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "oauth token refresh disabled",
+        }
     return service.refresh_customer_center_tokens()
 
 
@@ -555,9 +651,6 @@ def sync_dashboard_comments(
 @celery_app.task(name="dashboard.comment_sync_hot")
 def sync_dashboard_comments_hot() -> dict:
     _prepare()
-    hot_sync_block_reason = _hot_sync_block_reason("dashboard.comment_sync_hot")
-    if hot_sync_block_reason:
-        return _hot_sync_block_payload(hot_sync_block_reason)
     tz = ZoneInfo(service.read_config()["timezone"])
     today = datetime.now(tz).date().isoformat()
     return service.sync_comments_for_dates(
@@ -575,11 +668,60 @@ def dispatch_dashboard_alerts() -> dict:
     return dispatch_once()
 
 
+def _material_upload_job_runtime_state(job_id: int) -> dict[str, int | str | bool]:
+    with service.db() as conn:
+        job = conn.execute(
+            "SELECT status, total_files FROM material_upload_jobs WHERE id = ? LIMIT 1",
+            (int(job_id),),
+        ).fetchone()
+        received_files = int(
+            conn.execute(
+                "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                (int(job_id),),
+            ).fetchone()["count"]
+        )
+        pending_target_assets = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM material_upload_job_target_assets
+                WHERE job_id = ?
+                  AND status IN ('queued', 'running')
+                """,
+                (int(job_id),),
+            ).fetchone()["count"]
+        )
+    status_text = str((job or {}).get("status") or "").strip().lower()
+    total_files = int((job or {}).get("total_files", 0) or 0)
+    return {
+        "status": status_text,
+        "total_files": total_files,
+        "received_files": received_files,
+        "pending_target_assets": pending_target_assets,
+        "terminal": status_text in {"success", "failed", "partial"},
+    }
+
+
 @celery_app.task(name="dashboard.material_upload")
 def process_material_upload(job_id: int) -> dict:
     _prepare()
-    try:
-        return service.process_material_upload_job(int(job_id))
-    except Exception as exc:
-        service.mark_material_upload_job_failed(int(job_id), f"上传任务失败：{exc}")
-        raise
+    with service._distributed_runtime_lock(f"material-upload-job:{int(job_id)}", timeout_seconds=21600) as acquired:
+        if not acquired:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "material upload already running",
+                "job_id": int(job_id),
+            }
+        try:
+            result: dict = {"job_id": int(job_id), "status": "queued"}
+            for _ in range(24):
+                result = service.process_material_upload_job(int(job_id))
+                runtime_state = _material_upload_job_runtime_state(int(job_id))
+                if int(runtime_state.get("pending_target_assets", 0) or 0) <= 0:
+                    break
+                time.sleep(0.1)
+            return result
+        except Exception as exc:
+            service.mark_material_upload_job_failed(int(job_id), f"上传任务失败：{exc}")
+            raise

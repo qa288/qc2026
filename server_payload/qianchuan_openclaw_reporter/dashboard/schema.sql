@@ -315,7 +315,7 @@ CREATE TABLE IF NOT EXISTS material_snapshots (
     settled_order_count INTEGER NOT NULL DEFAULT 0,
     roi REAL NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL,
-    PRIMARY KEY (customer_center_id, snapshot_time, advertiser_id, ad_id, material_type, material_key)
+    PRIMARY KEY (customer_center_id, snapshot_time, ad_id, material_type, material_key)
 );
 
 CREATE TABLE IF NOT EXISTS material_rollups (
@@ -403,21 +403,6 @@ CREATE TABLE IF NOT EXISTS material_current (
 );
 CREATE INDEX IF NOT EXISTS idx_material_current_snapshot
 ON material_current (snapshot_time, customer_center_id, material_key);
-CREATE INDEX IF NOT EXISTS idx_material_current_stat_cost_nonzero
-ON material_current (customer_center_id, stat_cost DESC, material_key)
-WHERE stat_cost > 0;
-CREATE INDEX IF NOT EXISTS idx_material_current_total_pay_nonzero
-ON material_current (customer_center_id, total_pay_amount DESC, material_key)
-WHERE total_pay_amount > 0;
-CREATE INDEX IF NOT EXISTS idx_material_current_settled_pay_nonzero
-ON material_current (customer_center_id, settled_pay_amount DESC, material_key)
-WHERE settled_pay_amount > 0;
-CREATE INDEX IF NOT EXISTS idx_material_current_pay_nonzero
-ON material_current (customer_center_id, pay_amount DESC, material_key)
-WHERE pay_amount > 0;
-CREATE INDEX IF NOT EXISTS idx_material_current_order_nonzero
-ON material_current (customer_center_id, order_count DESC, material_key)
-WHERE order_count > 0;
 
 CREATE TABLE IF NOT EXISTS material_daily (
     customer_center_id TEXT NOT NULL DEFAULT '',
@@ -463,101 +448,6 @@ CREATE TABLE IF NOT EXISTS material_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_material_daily_date
 ON material_daily (biz_date, customer_center_id, material_key);
-CREATE INDEX IF NOT EXISTS idx_material_daily_stat_cost_nonzero
-ON material_daily (biz_date, customer_center_id, stat_cost DESC, material_key)
-WHERE stat_cost > 0;
-CREATE INDEX IF NOT EXISTS idx_material_daily_total_pay_nonzero
-ON material_daily (biz_date, customer_center_id, total_pay_amount DESC, material_key)
-WHERE total_pay_amount > 0;
-CREATE INDEX IF NOT EXISTS idx_material_daily_settled_pay_nonzero
-ON material_daily (biz_date, customer_center_id, settled_pay_amount DESC, material_key)
-WHERE settled_pay_amount > 0;
-CREATE INDEX IF NOT EXISTS idx_material_daily_pay_nonzero
-ON material_daily (biz_date, customer_center_id, pay_amount DESC, material_key)
-WHERE pay_amount > 0;
-CREATE INDEX IF NOT EXISTS idx_material_daily_order_nonzero
-ON material_daily (biz_date, customer_center_id, order_count DESC, material_key)
-WHERE order_count > 0;
-
-CREATE TABLE IF NOT EXISTS material_ranking_index (
-    scope_key TEXT NOT NULL DEFAULT '',
-    range_key TEXT NOT NULL DEFAULT '',
-    start_date TEXT NOT NULL DEFAULT '',
-    end_date TEXT NOT NULL DEFAULT '',
-    sort_key TEXT NOT NULL DEFAULT '',
-    sort_dir TEXT NOT NULL DEFAULT 'desc',
-    material_key TEXT NOT NULL DEFAULT '',
-    rank_no INTEGER NOT NULL DEFAULT 0,
-    page_no INTEGER NOT NULL DEFAULT 0,
-    metric_value REAL NOT NULL DEFAULT 0,
-    stat_cost REAL NOT NULL DEFAULT 0,
-    pay_amount REAL NOT NULL DEFAULT 0,
-    total_pay_amount REAL NOT NULL DEFAULT 0,
-    settled_pay_amount REAL NOT NULL DEFAULT 0,
-    order_count INTEGER NOT NULL DEFAULT 0,
-    settled_order_count INTEGER NOT NULL DEFAULT 0,
-    overall_show_count INTEGER NOT NULL DEFAULT 0,
-    overall_click_count INTEGER NOT NULL DEFAULT 0,
-    refund_amount_1h REAL NOT NULL DEFAULT 0,
-    plan_count INTEGER NOT NULL DEFAULT 0,
-    advertiser_count INTEGER NOT NULL DEFAULT 0,
-    snapshot_time TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (scope_key, range_key, start_date, end_date, sort_key, sort_dir, material_key)
-);
-CREATE INDEX IF NOT EXISTS idx_material_ranking_index_page
-ON material_ranking_index (scope_key, range_key, start_date, end_date, sort_key, sort_dir, rank_no);
-CREATE INDEX IF NOT EXISTS idx_material_ranking_index_retention
-ON material_ranking_index (end_date, scope_key);
-
-CREATE TABLE IF NOT EXISTS material_ranking_summary (
-    scope_key TEXT NOT NULL DEFAULT '',
-    range_key TEXT NOT NULL DEFAULT '',
-    start_date TEXT NOT NULL DEFAULT '',
-    end_date TEXT NOT NULL DEFAULT '',
-    total_count INTEGER NOT NULL DEFAULT 0,
-    aggregate_stat_cost REAL NOT NULL DEFAULT 0,
-    aggregate_pay_amount REAL NOT NULL DEFAULT 0,
-    aggregate_total_pay_amount REAL NOT NULL DEFAULT 0,
-    aggregate_settled_pay_amount REAL NOT NULL DEFAULT 0,
-    aggregate_order_count INTEGER NOT NULL DEFAULT 0,
-    aggregate_settled_order_count INTEGER NOT NULL DEFAULT 0,
-    aggregate_overall_show_count INTEGER NOT NULL DEFAULT 0,
-    aggregate_overall_click_count INTEGER NOT NULL DEFAULT 0,
-    aggregate_refund_amount_1h REAL NOT NULL DEFAULT 0,
-    aggregate_plan_count INTEGER NOT NULL DEFAULT 0,
-    aggregate_advertiser_count INTEGER NOT NULL DEFAULT 0,
-    snapshot_time TEXT NOT NULL DEFAULT '',
-    snapshot_count INTEGER NOT NULL DEFAULT 0,
-    customer_center_count INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (scope_key, range_key, start_date, end_date)
-);
-CREATE INDEX IF NOT EXISTS idx_material_ranking_summary_retention
-ON material_ranking_summary (end_date, scope_key);
-
-CREATE TABLE IF NOT EXISTS material_ranking_day_prefix (
-    scope_key TEXT NOT NULL DEFAULT '',
-    day_key TEXT NOT NULL DEFAULT '',
-    material_key TEXT NOT NULL DEFAULT '',
-    snapshot_time TEXT NOT NULL DEFAULT '',
-    active_day_count INTEGER NOT NULL DEFAULT 0,
-    stat_cost REAL NOT NULL DEFAULT 0,
-    pay_amount REAL NOT NULL DEFAULT 0,
-    total_pay_amount REAL NOT NULL DEFAULT 0,
-    settled_pay_amount REAL NOT NULL DEFAULT 0,
-    order_count INTEGER NOT NULL DEFAULT 0,
-    settled_order_count INTEGER NOT NULL DEFAULT 0,
-    overall_show_count INTEGER NOT NULL DEFAULT 0,
-    overall_click_count INTEGER NOT NULL DEFAULT 0,
-    refund_amount_1h REAL NOT NULL DEFAULT 0,
-    plan_count INTEGER NOT NULL DEFAULT 0,
-    advertiser_count INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (scope_key, day_key, material_key)
-);
-CREATE INDEX IF NOT EXISTS idx_material_ranking_day_prefix_material
-ON material_ranking_day_prefix (scope_key, material_key, day_key);
 
 CREATE TABLE IF NOT EXISTS material_profile (
     customer_center_id TEXT NOT NULL DEFAULT '',
@@ -583,42 +473,22 @@ CREATE TABLE IF NOT EXISTS material_profile (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (customer_center_id, material_key)
 );
-
-CREATE TABLE IF NOT EXISTS material_relation_edges (
-    customer_center_id TEXT NOT NULL DEFAULT '',
-    material_key TEXT NOT NULL,
-    material_id TEXT NOT NULL DEFAULT '',
-    advertiser_id BIGINT NOT NULL DEFAULT 0,
-    advertiser_name TEXT NOT NULL DEFAULT '',
-    ad_id BIGINT NOT NULL DEFAULT 0,
-    ad_name TEXT NOT NULL DEFAULT '',
-    first_seen_at TEXT NOT NULL DEFAULT '',
-    last_seen_at TEXT NOT NULL DEFAULT '',
-    last_snapshot_time TEXT NOT NULL DEFAULT '',
-    seen_count INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (customer_center_id, material_key, advertiser_id, ad_id)
-);
 CREATE INDEX IF NOT EXISTS idx_material_profile_updated
 ON material_profile (updated_at, customer_center_id, material_key);
 
-CREATE INDEX IF NOT EXISTS idx_material_profile_cc_create_time_key
-ON material_profile (customer_center_id, create_time DESC, material_key)
-WHERE COALESCE(create_time, '') <> '';
-
-CREATE INDEX IF NOT EXISTS idx_material_profile_cc_updated_key
-ON material_profile (customer_center_id, updated_at DESC, material_key);
-
-CREATE TABLE IF NOT EXISTS material_relation_current (
+CREATE TABLE IF NOT EXISTS material_current_plan_items (
     customer_center_id TEXT NOT NULL DEFAULT '',
-    snapshot_time TEXT NOT NULL,
-    window_start TEXT NOT NULL DEFAULT '',
-    window_end TEXT NOT NULL DEFAULT '',
-    advertiser_id BIGINT NOT NULL DEFAULT 0,
+    ad_id BIGINT NOT NULL,
+    advertiser_id BIGINT NOT NULL,
     advertiser_name TEXT NOT NULL DEFAULT '',
-    ad_id BIGINT NOT NULL DEFAULT 0,
     ad_name TEXT NOT NULL DEFAULT '',
-    material_type TEXT NOT NULL DEFAULT '',
+    plan_product_name TEXT NOT NULL DEFAULT '',
+    plan_anchor_name TEXT NOT NULL DEFAULT '',
+    plan_signature TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    material_type TEXT NOT NULL,
     material_key TEXT NOT NULL,
     material_id TEXT NOT NULL DEFAULT '',
     material_name TEXT NOT NULL DEFAULT '',
@@ -627,56 +497,39 @@ CREATE TABLE IF NOT EXISTS material_relation_current (
     cover_url TEXT NOT NULL DEFAULT '',
     aweme_item_id TEXT NOT NULL DEFAULT '',
     video_url TEXT NOT NULL DEFAULT '',
+    product_show_count INTEGER NOT NULL DEFAULT 0,
+    product_click_count INTEGER NOT NULL DEFAULT 0,
     stat_cost REAL NOT NULL DEFAULT 0,
     pay_amount REAL NOT NULL DEFAULT 0,
     total_pay_amount REAL NOT NULL DEFAULT 0,
     settled_pay_amount REAL NOT NULL DEFAULT 0,
     order_count INTEGER NOT NULL DEFAULT 0,
     settled_order_count INTEGER NOT NULL DEFAULT 0,
-    overall_show_count INTEGER NOT NULL DEFAULT 0,
-    overall_click_count INTEGER NOT NULL DEFAULT 0,
-    top_anchor_name TEXT NOT NULL DEFAULT '',
-    product_info_text TEXT NOT NULL DEFAULT '',
+    roi REAL NOT NULL DEFAULT 0,
     is_original INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (customer_center_id, advertiser_id, ad_id, material_type, material_key)
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (customer_center_id, ad_id, material_type, material_key)
 );
-CREATE INDEX IF NOT EXISTS idx_material_relation_current_snapshot
-ON material_relation_current (snapshot_time, customer_center_id, material_key);
+CREATE INDEX IF NOT EXISTS idx_material_current_plan_items_snapshot
+ON material_current_plan_items (customer_center_id, snapshot_time, ad_id);
+CREATE INDEX IF NOT EXISTS idx_material_current_plan_items_adv
+ON material_current_plan_items (customer_center_id, advertiser_id, ad_id);
 
-CREATE TABLE IF NOT EXISTS material_relation_daily (
+CREATE TABLE IF NOT EXISTS material_plan_sync_states (
     customer_center_id TEXT NOT NULL DEFAULT '',
-    biz_date TEXT NOT NULL,
-    snapshot_time TEXT NOT NULL,
-    window_start TEXT NOT NULL DEFAULT '',
-    window_end TEXT NOT NULL DEFAULT '',
+    ad_id BIGINT NOT NULL,
     advertiser_id BIGINT NOT NULL DEFAULT 0,
     advertiser_name TEXT NOT NULL DEFAULT '',
-    ad_id BIGINT NOT NULL DEFAULT 0,
     ad_name TEXT NOT NULL DEFAULT '',
-    material_type TEXT NOT NULL DEFAULT '',
-    material_key TEXT NOT NULL,
-    material_id TEXT NOT NULL DEFAULT '',
-    material_name TEXT NOT NULL DEFAULT '',
-    create_time TEXT NOT NULL DEFAULT '',
-    video_id TEXT NOT NULL DEFAULT '',
-    cover_url TEXT NOT NULL DEFAULT '',
-    aweme_item_id TEXT NOT NULL DEFAULT '',
-    video_url TEXT NOT NULL DEFAULT '',
-    stat_cost REAL NOT NULL DEFAULT 0,
-    pay_amount REAL NOT NULL DEFAULT 0,
-    total_pay_amount REAL NOT NULL DEFAULT 0,
-    settled_pay_amount REAL NOT NULL DEFAULT 0,
-    order_count INTEGER NOT NULL DEFAULT 0,
-    settled_order_count INTEGER NOT NULL DEFAULT 0,
-    overall_show_count INTEGER NOT NULL DEFAULT 0,
-    overall_click_count INTEGER NOT NULL DEFAULT 0,
-    top_anchor_name TEXT NOT NULL DEFAULT '',
-    product_info_text TEXT NOT NULL DEFAULT '',
-    is_original INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (customer_center_id, biz_date, advertiser_id, ad_id, material_type, material_key)
+    plan_signature TEXT NOT NULL DEFAULT '',
+    snapshot_time TEXT NOT NULL DEFAULT '',
+    last_material_sync_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (customer_center_id, ad_id)
 );
-CREATE INDEX IF NOT EXISTS idx_material_relation_daily_date
-ON material_relation_daily (biz_date, customer_center_id, material_key);
+CREATE INDEX IF NOT EXISTS idx_material_plan_sync_states_updated
+ON material_plan_sync_states (customer_center_id, updated_at, ad_id);
 
 CREATE TABLE IF NOT EXISTS video_origin_flags (
     snapshot_time TEXT NOT NULL,
@@ -733,52 +586,6 @@ CREATE TABLE IF NOT EXISTS extended_sync_runs (
     created_at TEXT NOT NULL,
     finished_at TEXT NOT NULL,
     PRIMARY KEY (customer_center_id, snapshot_time)
-);
-
-CREATE TABLE IF NOT EXISTS plan_refresh_states (
-    customer_center_id TEXT NOT NULL DEFAULT '',
-    ad_id BIGINT NOT NULL,
-    advertiser_id BIGINT NOT NULL DEFAULT 0,
-    advertiser_name TEXT NOT NULL DEFAULT '',
-    ad_name TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT '',
-    opt_status TEXT NOT NULL DEFAULT '',
-    last_hot_sync_at TEXT NOT NULL DEFAULT '',
-    last_warm_sync_at TEXT NOT NULL DEFAULT '',
-    last_cold_sync_at TEXT NOT NULL DEFAULT '',
-    next_cold_due_at TEXT NOT NULL DEFAULT '',
-    last_material_sync_at TEXT NOT NULL DEFAULT '',
-    last_material_change_at TEXT NOT NULL DEFAULT '',
-    last_status_change_at TEXT NOT NULL DEFAULT '',
-    last_nonzero_perf_at TEXT NOT NULL DEFAULT '',
-    last_material_error_at TEXT NOT NULL DEFAULT '',
-    last_material_error_code INTEGER NOT NULL DEFAULT 0,
-    last_material_error_message TEXT NOT NULL DEFAULT '',
-    last_material_error_retryable INTEGER NOT NULL DEFAULT 0,
-    consecutive_material_error_count INTEGER NOT NULL DEFAULT 0,
-    next_material_retry_at TEXT NOT NULL DEFAULT '',
-    last_material_row_count INTEGER NOT NULL DEFAULT 0,
-    sync_priority TEXT NOT NULL DEFAULT 'cold',
-    updated_at TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (customer_center_id, ad_id)
-);
-
-CREATE TABLE IF NOT EXISTS history_refresh_states (
-    customer_center_id TEXT NOT NULL DEFAULT '',
-    target_date TEXT NOT NULL,
-    stage TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    trigger TEXT NOT NULL DEFAULT '',
-    snapshot_time TEXT NOT NULL DEFAULT '',
-    affected_tables_json TEXT NOT NULL DEFAULT '[]',
-    detail_json TEXT NOT NULL DEFAULT '{}',
-    last_attempt_at TEXT NOT NULL DEFAULT '',
-    started_at TEXT NOT NULL DEFAULT '',
-    finished_at TEXT NOT NULL DEFAULT '',
-    last_success_at TEXT NOT NULL DEFAULT '',
-    error_message TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (customer_center_id, target_date, stage)
 );
 
 CREATE TABLE IF NOT EXISTS alert_rules (
@@ -1131,36 +938,8 @@ ON material_report_snapshots (customer_center_id, snapshot_time);
 CREATE INDEX IF NOT EXISTS idx_material_report_snapshots_material
 ON material_report_snapshots (customer_center_id, material_type, material_id, snapshot_time);
 
-CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_material
-ON material_relation_edges (customer_center_id, material_key, last_seen_at DESC, advertiser_id, ad_id);
-
-CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_material_first_seen
-ON material_relation_edges (customer_center_id, material_key, first_seen_at)
-WHERE COALESCE(first_seen_at, '') <> '';
-
-CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_advertiser
-ON material_relation_edges (customer_center_id, advertiser_id, last_seen_at DESC, material_key);
-
-CREATE INDEX IF NOT EXISTS idx_material_relation_edges_cc_ad
-ON material_relation_edges (customer_center_id, ad_id, last_seen_at DESC, material_key);
-
 CREATE INDEX IF NOT EXISTS idx_extended_sync_runs_cc_time
 ON extended_sync_runs (customer_center_id, snapshot_time);
-
-CREATE INDEX IF NOT EXISTS idx_plan_refresh_states_cc_priority_sync
-ON plan_refresh_states (customer_center_id, sync_priority, last_material_sync_at, ad_id);
-
-CREATE INDEX IF NOT EXISTS idx_plan_refresh_states_cc_cold_sync
-ON plan_refresh_states (customer_center_id, last_cold_sync_at, ad_id);
-
-CREATE INDEX IF NOT EXISTS idx_plan_refresh_states_cc_next_cold_due
-ON plan_refresh_states (customer_center_id, next_cold_due_at, ad_id);
-
-CREATE INDEX IF NOT EXISTS idx_history_refresh_states_stage_date
-ON history_refresh_states (stage, target_date, customer_center_id);
-
-CREATE INDEX IF NOT EXISTS idx_history_refresh_states_status_updated
-ON history_refresh_states (status, updated_at);
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_status_created
 ON alert_events (status, created_at);

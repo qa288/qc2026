@@ -1,0 +1,252 @@
+# Qianchuan dashboard deployment and data-pipeline contract.
+# This file intentionally contains no secrets. Keep tokens, database passwords,
+# app_secret, refresh_token, and customer_center_id values in .env.dashboard only.
+
+profile_version: "26.4.21-1"
+profile_date: "2026-04-19"
+timezone: "Asia/Shanghai"
+image:
+  final_tag: "qc-dashboard:26.4.21-1"
+  env_key: "QC_DASHBOARD_IMAGE"
+  dockerfile: "dashboard/Dockerfile"
+  clean_full_build_command: "docker build --pull --no-cache --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t qc-dashboard:26.4.21-1 -f dashboard/Dockerfile ."
+  optional_build_args:
+    PIP_INDEX_URL: "https://pypi.tuna.tsinghua.edu.cn/simple"
+  note: "PIP_INDEX_URL only affects build-time dependency download speed; runtime behavior is unchanged."
+
+deployment:
+  source_root_on_server: "/opt/qianchuan/qianchuan_openclaw_reporter"
+  local_mirror_root: "C:/qc2026-main/.remote_edit/server_qianchuan"
+  compose_files:
+    source_build: "docker-compose.dashboard.yml"
+    prebuilt_image: "docker-compose.dashboard.image.yml"
+  commands:
+    build_from_source: "docker compose --env-file .env.dashboard -f docker-compose.dashboard.yml up -d --build"
+    clean_full_image_build: "docker build --pull --no-cache --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t qc-dashboard:26.4.21-1 -f dashboard/Dockerfile ."
+    run_prebuilt_image: "docker compose --env-file .env.dashboard -f docker-compose.dashboard.image.yml up -d"
+    check_containers: "docker ps --format '{{.Names}} {{.Image}} {{.Status}}'"
+  runtime_paths_do_not_copy_between_hosts:
+    - "data/"
+    - "volumes/"
+    - "backups/"
+    - "__pycache__/"
+  required_runtime_services:
+    - "qianchuan-web"
+    - "qianchuan-worker"
+    - "qianchuan-history-worker"
+    - "qianchuan-scheduler"
+    - "qianchuan-postgres"
+    - "qianchuan-redis"
+  required_env_keys_without_values:
+    - "APP_ID"
+    - "APP_SECRET"
+    - "REFRESH_TOKEN"
+    - "CUSTOMER_CENTER_ID"
+    - "DATABASE_URL or POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB"
+    - "REDIS_URL"
+    - "CELERY_BROKER_URL"
+    - "CELERY_RESULT_BACKEND"
+    - "QC_DASHBOARD_IMAGE"
+    - "ENABLE_HOT_SYNC_SCHEDULES"
+    - "DETAIL_SYNC_INTERVAL_MINUTES"
+    - "MATERIAL_SYNC_INTERVAL_MINUTES"
+    - "MATERIAL_SYNC_WARM_INTERVAL_MINUTES"
+    - "DETAIL_MATERIAL_TYPES"
+    - "MATERIAL_PLAN_MATERIAL_STATUS"
+
+api_chains:
+  account_plan_hot_chain:
+    purpose: "账户、计划热链和账户-计划页面数据"
+    schedule_env: "DETAIL_SYNC_INTERVAL_MINUTES"
+    current_schedule_minutes: 10
+    retention_env: "ACCOUNT_PLAN_RETENTION_DAYS"
+    current_retention_days: 140
+    primary_apis:
+      - constant: "ACCOUNT_REPORT_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/get/"
+        usage: "千川账户报表"
+      - constant: "PLAN_LIST_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/list/"
+        usage: "全域计划列表和计划实时状态"
+      - constant: "UNI_PROMOTION_CONFIG_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/config/get/"
+        usage: "自定义报表配置"
+      - constant: "UNI_PROMOTION_DATA_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/data/get/"
+        usage: "自定义报表数据、全域/乘方补充指标"
+      - constant: "PLAN_DETAIL_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/detail/"
+        usage: "Creative/plan_detail，确认计划真实绑定的标题、视频、图片素材"
+      - constant: "PLAN_PRODUCT_URL"
+        endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/product/get/"
+        usage: "计划商品维度补充"
+    delivery_type_display_rule:
+      - "plan_source=UNI_PROMOTION 时显示全域投放，即使 plan_delivery_type=CUBIC。"
+      - "plan_source=UNI_CUBIC 且 plan_delivery_type=CUBIC 时显示乘方投放。"
+      - "plan_source=UNI_REPORT 且 plan_delivery_type=CUBIC 时显示乘方投放。"
+      - "不要只按 plan_delivery_type=CUBIC 判断乘方，否则全域升级版主链会显示反。"
+
+  material_hot_chain:
+    purpose: "素材热链、素材页右侧计划数/账户数、素材日表和关系日表"
+    hot_schedule_env: "MATERIAL_SYNC_INTERVAL_MINUTES"
+    current_hot_schedule_minutes: 10
+    warm_schedule_env: "MATERIAL_SYNC_WARM_INTERVAL_MINUTES"
+    current_warm_schedule_minutes: 30
+    material_status_env: "MATERIAL_PLAN_MATERIAL_STATUS"
+    required_material_status: "ALL"
+    detail_material_types_env: "DETAIL_MATERIAL_TYPES"
+    current_detail_material_types: ["VIDEO"]
+    primary_api:
+      constant: "PLAN_MATERIAL_URL"
+      endpoint: "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/ad/material/get/"
+      required_filtering:
+        material_status: "ALL"
+        video_type_for_VIDEO: "ALL"
+    ownership_source_order:
+      - "本次接口行自带的 customer_center_id、advertiser_id、ad_id。"
+      - "Creative/plan_detail 返回的 title_material/video_material/image_material 绑定关系。"
+      - "material_relation_edges 中已确认的素材-账户-计划边。"
+    forbidden_ownership_source:
+      - "写入素材关系、素材日表或历史补齐时，不允许用 material_profile.plan_ids_json 反推 ad_id。"
+      - "material_profile.plan_ids_json 只能作为展示兼容字段或兜底，不是归属事实来源。"
+    write_models:
+      - "material_snapshots"
+      - "material_current"
+      - "material_daily"
+      - "material_relation_current"
+      - "material_relation_daily"
+      - "material_profile"
+      - "material_relation_edges"
+    relation_key:
+      - "customer_center_id"
+      - "biz_date or snapshot_time"
+      - "advertiser_id"
+      - "ad_id"
+      - "material_type"
+      - "material_key/material_id/title_signature"
+
+material_type_capture:
+  allowed_material_types: ["VIDEO", "IMAGE", "TITLE", "CAROUSEL", "LIVE_ROOM"]
+  cost_reconciliation_rule:
+    primary_cost_types: ["VIDEO", "IMAGE", "CAROUSEL", "LIVE_ROOM"]
+    excluded_from_non_title_cost: ["TITLE"]
+    threshold_yuan: 1.00
+    notes:
+      - "计划消耗对齐时按非 TITLE 素材求和。TITLE 不参与 VIDEO/IMAGE 成本补齐，避免双倍叠加。"
+      - "如果计划同时存在 VIDEO + IMAGE，历史补齐必须允许 IMAGE，否则会出现少量或大额差异。"
+  video:
+    source_api_material_type: "VIDEO"
+    creative_detail_fields: ["video_material"]
+    row_material_type: "VIDEO"
+    capture_rule:
+      - "用 video_id/video_material_id/signature 作为视频素材键。"
+      - "VIDEO 指标只能写 VIDEO 行，不允许用 TITLE 数据补 VIDEO。"
+      - "热链的素材右侧计划数、账户数按 relation_edges 或本次 ad_id/advertiser_id 统计。"
+  image:
+    source_api_material_type: "IMAGE"
+    creative_detail_fields: ["image_material"]
+    row_material_type: "IMAGE"
+    capture_rule:
+      - "IMAGE 是非 TITLE 成本口径的一部分，历史差异计划需要补。"
+      - "IMAGE 不能覆盖 VIDEO 行，只能写 IMAGE 行。"
+  title:
+    source_api_material_type: "TITLE"
+    creative_detail_fields: ["title_material"]
+    row_material_type: "TITLE"
+    capture_rule:
+      - "TITLE 只落 TITLE 行。"
+      - "TITLE 可用于标题素材展示和标题维度指标，但不能塞进 VIDEO。"
+      - "历史补齐时如果 TITLE 与 VIDEO 同时出现，禁止把 TITLE 消耗叠加到非 TITLE 成本。"
+
+history_repair_policy:
+  default_scan_start_date: "2026-01-01"
+  compare_level: "customer_center_id + biz_date + ad_id"
+  acceptable_abs_diff_yuan: 1.00
+  scan_sql_intent:
+    plan_cost: "plan_daily 按 customer_center_id,biz_date,ad_id 汇总 stat_cost"
+    material_cost: "material_relation_daily 按同键汇总 UPPER(material_type) <> 'TITLE' 的 stat_cost"
+    diff_filter: "ABS(plan_cost - material_cost) > 1.00"
+  repair_order:
+    - "只找有差异的日期和计划，不全量重刷已对齐月份。"
+    - "对差异 ad_id 调 plan_detail/Creative 确认真实绑定。"
+    - "对差异 ad_id 调 PLAN_MATERIAL_URL，material_status 必须为 ALL。"
+    - "按 material_type 分流写 material_snapshots。"
+    - "用当天所有有效快照重建 material_daily/material_relation_daily。"
+    - "复核计划日、素材日、素材关系日三边差异。"
+    - "再重建受影响 day 索引和 day_prefix，并清 Redis 缓存版本。"
+  do_not_do:
+    - "不要用 DELIVERY_OK 做历史补齐。"
+    - "不要用 material_profile.plan_ids_json 反推历史归属。"
+    - "不要为了几分钱尾差人工改 VIDEO，除非用户明确要求。"
+    - "不要在底表未对齐前先缓存错误索引。"
+
+index_and_cache_policy:
+  material_ranking:
+    retention_env: "MATERIAL_RANKING_INDEX_RETENTION_DAYS"
+    current_retention_days: 140
+    base_index: "single day material_ranking_index/day"
+    prefix_index: "material_ranking_day_prefix"
+    window_rule:
+      - "昨日、近7天、近30天后端应从 day/day_prefix 聚合切片。"
+      - "前端仍发原来的 range，不需要前端拆分大索引。"
+      - "新自然日只追加前一日 day 索引，并从该日更新 day_prefix。"
+      - "补历史日时，从最早修复日期向后重算 day_prefix。"
+      - "不要再构建 range_key=week/month/custom 的固定窗口成品索引；多日查询由 day_prefix 优先、day_rollup 兜底。"
+    cache_rule:
+      - "Redis 版本必须跟 latest_index_day 或 day_prefix watermark 绑定。"
+      - "索引重建后必须 bump material 页面缓存版本，避免继续命中旧缓存。"
+  material_library:
+    required_indexes:
+      - "idx_material_profile_cc_create_time_key"
+      - "idx_material_profile_cc_updated_key"
+      - "idx_material_relation_edges_cc_material_first_seen"
+
+preflight_checks:
+  before_history_pull:
+    - "确认 .env.dashboard 中 MATERIAL_PLAN_MATERIAL_STATUS=ALL。"
+    - "确认历史脚本差异阈值为 1.00 元。"
+    - "确认补齐范围不包含已经冻结且对齐的日期，除非本次目标就是重验。"
+    - "确认不会把 TITLE 写入 VIDEO。"
+  before_deploy:
+    - "python -m py_compile dashboard/main.py dashboard/migrations.py dashboard/page_routes.py report_qianchuan.py"
+    - "docker compose --env-file .env.dashboard -f docker-compose.dashboard.image.yml config"
+    - "docker ps --format '{{.Names}} {{.Image}} {{.Status}}'"
+  after_deploy:
+    - "检查 /api/health 或页面首页。"
+    - "检查素材资产库 range=all 首屏接口不再 504。"
+    - "检查计划投放类型：UNI_PROMOTION+CUBIC 显示全域投放，UNI_CUBIC+CUBIC 显示乘方投放。"
+    - "检查素材页右侧计划数/账户数来自 material_relation_edges。"
+
+verification_sql:
+  material_plan_day_diff_non_title: |
+    WITH plan_cost AS (
+      SELECT customer_center_id, biz_date, ad_id,
+             ROUND(SUM(stat_cost)::numeric, 2) AS plan_cost
+      FROM plan_daily
+      WHERE biz_date BETWEEN :start_date AND :end_date
+      GROUP BY customer_center_id, biz_date, ad_id
+    ),
+    material_cost AS (
+      SELECT customer_center_id, biz_date, ad_id,
+             ROUND(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE'
+                            THEN stat_cost ELSE 0 END)::numeric, 2) AS material_cost
+      FROM material_relation_daily
+      WHERE biz_date BETWEEN :start_date AND :end_date
+      GROUP BY customer_center_id, biz_date, ad_id
+    )
+    SELECT p.customer_center_id, p.biz_date, p.ad_id,
+           p.plan_cost, COALESCE(m.material_cost, 0) AS material_cost,
+           ROUND((p.plan_cost - COALESCE(m.material_cost, 0))::numeric, 2) AS diff
+    FROM plan_cost p
+    LEFT JOIN material_cost m USING (customer_center_id, biz_date, ad_id)
+    WHERE ABS(p.plan_cost - COALESCE(m.material_cost, 0)) > :threshold_yuan
+    ORDER BY p.biz_date, ABS(p.plan_cost - COALESCE(m.material_cost, 0)) DESC;
+
+  material_relation_edge_counts: |
+    SELECT customer_center_id, material_key,
+           COUNT(DISTINCT advertiser_id) AS advertiser_count,
+           COUNT(DISTINCT ad_id) AS plan_count
+    FROM material_relation_edges
+    WHERE customer_center_id = :customer_center_id
+      AND material_key = :material_key
+    GROUP BY customer_center_id, material_key;
