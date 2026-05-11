@@ -76,6 +76,132 @@ class UploadAccess:
             self._column_exists_cache[key] = self._column_exists_locked(conn, table_name, column_name)
         return self._column_exists_cache[key]
 
+    @staticmethod
+    def _customer_facing_upload_job_note(status_text: str, note: Any) -> str:
+        normalized_status = str(status_text or "").strip().lower()
+        raw_note = str(note or "").strip()
+        lowered_note = raw_note.lower()
+        if normalized_status == "receiving":
+            return "视频上传中。"
+        if normalized_status == "queued":
+            return "等待后台处理。"
+        if normalized_status == "running":
+            if "绑定" in raw_note or "bind" in lowered_note:
+                return "计划绑定中。"
+            if "素材库" in raw_note or "上传素材" in raw_note or "upload" in lowered_note:
+                return "素材上传中。"
+            return "处理中。"
+        return raw_note
+
+    @staticmethod
+    def _customer_facing_upload_detail_message(stage: str, display_status: str, message: Any) -> str:
+        normalized_stage = str(stage or "").strip().lower()
+        normalized_status = str(display_status or "").strip().lower()
+        raw_message = str(message or "").strip()
+        if normalized_status == "running":
+            if normalized_stage == "binding":
+                return "计划绑定中。"
+            if normalized_stage in {"uploading", "upload_queued"}:
+                return "素材上传中。"
+            return "处理中。"
+        if normalized_status == "queued":
+            if normalized_stage == "bind_queued":
+                return "等待计划绑定。"
+            if normalized_stage == "queued":
+                return "等待后台处理。"
+            return "等待素材上传。"
+        return raw_message
+
+    @staticmethod
+    def _is_material_upload_limit_error_text(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return (
+            "添加素材数量超过上限" in normalized
+            or "素材数量超过上限" in normalized
+            or "计划素材数量已达上限" in normalized
+            or "material count exceeds limit" in lowered
+            or "material number exceeds limit" in lowered
+        )
+
+    @staticmethod
+    def _is_material_upload_video_param_error_text(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return "视频参数错误" in normalized or "video parameter" in lowered or "video param" in lowered
+
+    @staticmethod
+    def _is_material_upload_payload_too_large_error_text(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return (
+            "http 413" in lowered
+            or "request entity too large" in lowered
+            or "payload too large" in lowered
+            or "capacity limit" in lowered
+        )
+
+    @staticmethod
+    def _is_material_upload_format_error_text(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        if UploadAccess._is_material_upload_payload_too_large_error_text(normalized):
+            return False
+        return (
+            "视频格式校验失败" in normalized
+            or "视频元数据预检失败" in normalized
+            or "视频尺寸错误" in normalized
+            or "视频参数错误" in normalized
+            or "video format" in lowered
+            or "video size" in lowered
+            or "video dimension" in lowered
+            or "video parameter" in lowered
+            or "invalid video" in lowered
+        )
+
+    @staticmethod
+    def _is_material_upload_shop_scope_permission_lost_error_text(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return (
+            "当前账户已失去该抖音号下对应店铺的商品全域投放权限" in normalized
+            or "商品全域投放权限，请重新获取权限后重试" in normalized
+            or ("permission" in lowered and "shop" in lowered and "scope" in lowered)
+        )
+
+    @classmethod
+    def _customer_facing_upload_failure_message(
+        cls,
+        *,
+        target_has_limit_failure: bool,
+        message: Any,
+    ) -> str:
+        raw_message = str(message or "").strip()
+        if cls._is_material_upload_shop_scope_permission_lost_error_text(raw_message):
+            return "当前账户已失去该抖音号下对应店铺的商品全域投放权限，请重新获取权限后重试。"
+        if cls._is_material_upload_payload_too_large_error_text(raw_message):
+            return "官方上传网关拒绝该文件大小（HTTP 413），请压缩视频后重新上传。"
+        if target_has_limit_failure and (
+            cls._is_material_upload_limit_error_text(raw_message)
+            or cls._is_material_upload_video_param_error_text(raw_message)
+        ):
+            return "计划素材数量已达上限，请清理后重试。"
+        if cls._is_material_upload_limit_error_text(raw_message):
+            return "计划素材数量已达上限，请清理后重试。"
+        if cls._is_material_upload_video_param_error_text(raw_message):
+            return "视频参数错误，系统已自动重试一次，请稍后重试。"
+        return raw_message
+
     def _upload_target_account_rows_locked(self, conn: Any, allowed_advertiser_ids: list[int] | None) -> list[dict[str, Any]]:
         customer_center_id = str(self._current_customer_center_id() or "").strip()
         where_clauses = ["customer_center_id = ?"]
@@ -185,13 +311,11 @@ class UploadAccess:
             target_plans = [
                 dict(item)
                 for item in plans
-                if int(item.get("advertiser_id", 0) or 0) in account_ids and not self._upload_target_plan_paused(item)
+                if int(item.get("advertiser_id", 0) or 0) in account_ids
             ]
         else:
             target_plans = []
             for item in plans:
-                if self._upload_target_plan_paused(item):
-                    continue
                 haystack = self._normalize_match_text(
                     str(item.get("ad_name") or ""),
                     str(item.get("product_name") or ""),
@@ -222,6 +346,16 @@ class UploadAccess:
                     "pay_amount": round(float(item.get("pay_amount", 0.0) or 0.0), 2),
                     "order_count": int(float(item.get("order_count", 0.0) or 0.0)),
                     "roi": round(float(item.get("roi", 0.0) or 0.0), 2),
+                    "status": str(item.get("status") or "").strip(),
+                    "opt_status": str(item.get("opt_status") or "").strip(),
+                    "status_code_text": " / ".join(
+                        part
+                        for part in (
+                            str(item.get("status") or "").strip(),
+                            str(item.get("opt_status") or "").strip(),
+                        )
+                        if part
+                    ),
                     "status_text": self._upload_plan_status_text(item),
                 }
             )
@@ -507,14 +641,41 @@ class UploadAccess:
             (job_id, target_id, file_id, status, message, now, now),
         )
 
-    def attach_material_upload_task(self, job_id: int, task_id: str) -> None:
+    def attach_material_upload_task(
+        self,
+        job_id: int,
+        task_id: str,
+        status_text: str = "queued",
+        note: str = "",
+    ) -> None:
         with self._db() as conn:
+            existing = conn.execute(
+                """
+                SELECT status, note
+                FROM material_upload_jobs
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (int(job_id),),
+            ).fetchone()
+            current_status = str((existing or {}).get("status") or "").strip().lower()
+            next_status = str(status_text or "").strip().lower() or "queued"
+            if current_status in {"receiving", "running"}:
+                next_status = current_status
+            next_note = str(note or "").strip()
+            if not next_note:
+                if next_status == "receiving":
+                    next_note = "后台正在处理已上传的视频，等待更多视频上传。"
+                elif next_status == "running":
+                    next_note = str((existing or {}).get("note") or "").strip() or "上传任务正在执行。"
+                else:
+                    next_note = "上传任务已入队，等待执行。"
             self.update_material_upload_job(
                 conn,
                 int(job_id),
                 task_id=str(task_id or ""),
-                status="queued",
-                note="上传任务已入队，等待执行。",
+                status=next_status,
+                note=next_note,
                 updated_at=self._now_text(),
             )
 
@@ -560,163 +721,50 @@ class UploadAccess:
                 item = dict(row)
                 item["created_by_label"] = str(item.get("display_name") or item.get("username") or "")
                 status_text = str(item.get("status") or "").strip().lower()
-                has_failures = (
-                    int(item.get("failed_files", 0) or 0) > 0
-                    or int(item.get("failed_targets", 0) or 0) > 0
-                    or status_text in {"failed", "partial"}
-                )
-                detail_rows = conn.execute(
+                item["note"] = self._customer_facing_upload_job_note(status_text, item.get("note"))
+                detail_counts = conn.execute(
                     """
                     SELECT
-                        ta.id AS target_asset_id,
-                        ta.target_id,
-                        ta.file_id,
-                        ta.status AS target_asset_status,
-                        ta.message AS target_message,
-                        f.original_name,
-                        f.status AS file_status,
-                        f.message AS file_message,
-                        t.advertiser_id,
-                        t.advertiser_name,
-                        t.ad_id,
-                        t.ad_name,
-                        fa.status AS file_asset_status,
-                        fa.message AS file_asset_message,
-                        fa.material_id,
-                        fa.video_id
-                    FROM material_upload_job_target_assets ta
-                    JOIN material_upload_job_targets t ON t.id = ta.target_id
-                    JOIN material_upload_job_files f ON f.id = ta.file_id
-                    LEFT JOIN material_upload_job_file_assets fa
-                        ON fa.job_id = ta.job_id
-                       AND fa.file_id = ta.file_id
-                       AND fa.advertiser_id = t.advertiser_id
-                    WHERE ta.job_id = ?
-                    ORDER BY ta.id ASC
-                    LIMIT 500
+                        COUNT(*) AS detail_count,
+                        COALESCE(SUM(CASE WHEN status IN ('success', 'failed') THEN 1 ELSE 0 END), 0) AS completed_detail_count,
+                        COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) AS success_detail_count,
+                        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_detail_count
+                    FROM material_upload_job_target_assets
+                    WHERE job_id = ?
                     """,
                     (job_id,),
-                ).fetchall()
-                detail_items: list[dict[str, Any]] = []
-                completed_details = 0
-                success_details = 0
-                failed_items: list[dict[str, Any]] = []
-                upload_operation_keys: set[tuple[int, int]] = set()
-                upload_completed_keys: set[tuple[int, int]] = set()
-                for detail_row in detail_rows:
-                    target_asset_status = str(detail_row["target_asset_status"] or "").strip().lower()
-                    file_asset_status = str(detail_row["file_asset_status"] or "").strip().lower()
-                    file_status = str(detail_row["file_status"] or "").strip().lower()
-                    target_asset_id = int(detail_row["target_asset_id"] or 0)
-                    target_id = int(detail_row["target_id"] or 0)
-                    file_id = int(detail_row["file_id"] or 0)
-                    advertiser_id = int(detail_row["advertiser_id"] or 0)
-                    upload_key = (file_id, advertiser_id)
-                    upload_operation_keys.add(upload_key)
-                    if file_asset_status in {"success", "failed"}:
-                        upload_completed_keys.add(upload_key)
-                    file_asset_failed = file_asset_status == "failed"
-                    if target_asset_status == "success":
-                        stage = "done"
-                        display_status = "success"
-                        message = str(detail_row["target_message"] or "")
-                        completed_details += 1
-                        success_details += 1
-                    elif target_asset_status == "failed":
-                        stage = "upload_failed" if file_asset_failed else "bind_failed"
-                        display_status = "failed"
-                        message = str((detail_row["file_asset_message"] if file_asset_failed else detail_row["target_message"]) or "")
-                        completed_details += 1
-                    elif target_asset_status == "running":
-                        stage = "binding"
-                        display_status = "running"
-                        message = str(detail_row["target_message"] or "正在绑定计划。")
-                    elif file_asset_status == "running":
-                        stage = "uploading"
-                        display_status = "running"
-                        message = str(detail_row["file_asset_message"] or "正在上传素材。")
-                    elif file_asset_status == "success":
-                        stage = "bind_queued"
-                        display_status = "queued"
-                        message = "素材上传完成，等待绑定计划。"
-                    elif file_asset_status == "failed" or file_status == "failed":
-                        stage = "upload_failed"
-                        display_status = "failed"
-                        message = str(detail_row["file_asset_message"] or detail_row["file_message"] or "上传素材失败。")
-                        completed_details += 1
-                    elif status_text == "queued":
-                        stage = "queued"
-                        display_status = "queued"
-                        message = "等待后台执行。"
-                    else:
-                        stage = "upload_queued"
-                        display_status = "queued"
-                        message = "等待上传素材。"
-                    detail_item = {
-                        "target_asset_id": target_asset_id,
-                        "target_id": target_id,
-                        "file_id": file_id,
-                        "failure_stage": "upload" if file_asset_failed or stage == "upload_failed" else "bind",
-                        "stage": stage,
-                        "status": display_status,
-                        "original_name": str(detail_row["original_name"] or ""),
-                        "message": message,
-                        "advertiser_id": advertiser_id,
-                        "advertiser_name": str(detail_row["advertiser_name"] or ""),
-                        "ad_id": int(detail_row["ad_id"] or 0),
-                        "ad_name": str(detail_row["ad_name"] or ""),
-                        "material_id": str(detail_row["material_id"] or ""),
-                        "video_id": str(detail_row["video_id"] or ""),
-                        "retryable": target_asset_status == "failed",
-                    }
-                    detail_items.append(detail_item)
-                    if display_status == "failed":
-                        failed_items.append(detail_item)
-                total_details = len(detail_items)
-                total_operations = len(upload_operation_keys) + total_details
-                completed_operations = len(upload_completed_keys) + completed_details
+                ).fetchone()
+                upload_counts = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS upload_operation_count,
+                        COALESCE(SUM(CASE WHEN status IN ('success', 'failed', 'skipped') THEN 1 ELSE 0 END), 0) AS completed_upload_operation_count
+                    FROM material_upload_job_file_assets
+                    WHERE job_id = ?
+                    """,
+                    (job_id,),
+                ).fetchone()
+                total_details = int((detail_counts or {}).get("detail_count", 0) or 0)
+                completed_details = int((detail_counts or {}).get("completed_detail_count", 0) or 0)
+                success_details = int((detail_counts or {}).get("success_detail_count", 0) or 0)
+                failed_details = int((detail_counts or {}).get("failed_detail_count", 0) or 0)
+                upload_operation_count = int((upload_counts or {}).get("upload_operation_count", 0) or 0)
+                upload_completed_count = int((upload_counts or {}).get("completed_upload_operation_count", 0) or 0)
+                total_operations = upload_operation_count + total_details
+                completed_operations = upload_completed_count + completed_details
                 if total_operations > 0:
                     progress_percent = round(max(0, min(100, completed_operations * 100 / total_operations)))
                 elif str(item.get("status") or "").strip().lower() in {"success", "ok"}:
                     progress_percent = 100
                 else:
                     progress_percent = 0
-                item["detail_items"] = detail_items
+                item["detail_items"] = []
                 item["detail_count"] = total_details
                 item["completed_detail_count"] = completed_details
                 item["success_detail_count"] = success_details
-                item["failed_detail_count"] = len(failed_items)
+                item["failed_detail_count"] = failed_details
                 item["progress_percent"] = progress_percent
-                if has_failures and not failed_items:
-                    legacy_failures = conn.execute(
-                        """
-                        SELECT original_name, message, status
-                        FROM material_upload_job_files
-                        WHERE job_id = ? AND status IN ('failed', 'partial')
-                        ORDER BY id ASC
-                        LIMIT 5
-                        """,
-                        (job_id,),
-                    ).fetchall()
-                    failed_items = [
-                        {
-                            "target_asset_id": 0,
-                            "target_id": 0,
-                            "file_id": 0,
-                            "failure_stage": "upload",
-                            "stage": "upload_failed",
-                            "original_name": str(failed_row["original_name"] or ""),
-                            "message": str(failed_row["message"] or ""),
-                            "status": str(failed_row["status"] or ""),
-                            "advertiser_id": 0,
-                            "advertiser_name": "",
-                            "ad_id": 0,
-                            "ad_name": "",
-                            "retryable": False,
-                        }
-                        for failed_row in legacy_failures
-                    ]
-                    item["failed_detail_count"] = len(failed_items)
-                item["failed_items"] = failed_items
+                item["failed_items"] = []
+                item["details_lazy"] = True
                 items.append(item)
         return items

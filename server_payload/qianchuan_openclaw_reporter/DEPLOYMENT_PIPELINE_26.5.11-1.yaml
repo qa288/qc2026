@@ -1,0 +1,6 @@
+version: 26.5.11-1
+date: 2026-05-11
+summary:
+  - sync the current dashboard, report, upload, and material alignment code into git
+  - preserve recent upload worker, material ranking index, and closed-day alignment changes
+  - prepare the codebase for EBP account list and deleted-plan reconciliation follow-up

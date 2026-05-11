@@ -16,6 +16,8 @@ SORT_KEYS = (
 DEFAULT_PAGE_SIZE = 20
 RETENTION_DAYS = max(int(str(os.environ.get("MATERIAL_RANKING_INDEX_RETENTION_DAYS") or "60").strip() or "60"), 1)
 SCOPE_ALL = "__all_customer_centers__"
+UNATTRIBUTED_MATERIAL_TYPE = "UNATTRIBUTED_DELETED"
+UNATTRIBUTED_MATERIAL_DISPLAY_NAME = "未归因关闭/暂停计划消耗"
 ZERO_BUCKET_FIELDS = (
     "stat_cost",
     "pay_amount",
@@ -75,6 +77,24 @@ def zero_bucket_sql(alias: str = "") -> str:
     return f"CASE WHEN {comparisons} THEN 1 ELSE 0 END"
 
 
+def material_display_name_value(material_type: Any, material_name: Any, fallback: str = "unnamed material") -> str:
+    name = str(material_name or "").strip()
+    if name:
+        return name
+    if str(material_type or "").strip().upper() == UNATTRIBUTED_MATERIAL_TYPE:
+        return UNATTRIBUTED_MATERIAL_DISPLAY_NAME
+    return str(fallback or "")
+
+
+def material_type_value(material_key: Any, profile: dict[str, Any]) -> str:
+    material_type = str((profile or {}).get("material_type") or "").strip().upper()
+    if material_type:
+        return material_type
+    if str(material_key or "").strip().startswith("__unattributed_deleted_material__:"):
+        return UNATTRIBUTED_MATERIAL_TYPE
+    return "OTHER"
+
+
 def _date_key(value: str, field_name: str = "date") -> str:
     try:
         return datetime.strptime(str(value or "").strip()[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
@@ -84,6 +104,138 @@ def _date_key(value: str, field_name: str = "date") -> str:
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _material_profile_search_expr() -> str:
+    return """
+        LOWER(
+            COALESCE(material_key, '') || ' ' ||
+            COALESCE(material_id, '') || ' ' ||
+            COALESCE(backend_material_name, '') || ' ' ||
+            COALESCE(material_name, '') || ' ' ||
+            COALESCE(publish_title, '') || ' ' ||
+            COALESCE(video_id, '') || ' ' ||
+            COALESCE(product_info_text, '') || ' ' ||
+            COALESCE(top_anchor_name, '') || ' ' ||
+            COALESCE(top_plan_name, '') || ' ' ||
+            COALESCE(top_account_name, '') || ' ' ||
+            COALESCE(aweme_item_id, '') || ' ' ||
+            COALESCE(material_type, '') || ' ' ||
+            COALESCE(product_names_json, '')
+        )
+    """
+
+
+def _material_profile_search_parts(
+    service: Any,
+    *,
+    all_customer_centers: bool,
+    search_text: str,
+    join_target_expr: str,
+) -> tuple[str, str, list[Any], str]:
+    normalized_search_text = str(search_text or "").strip().lower()
+    if not normalized_search_text:
+        return normalized_search_text, "", [], ""
+    escaped_search = normalized_search_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    search_scope_sql = "COALESCE(customer_center_id, '') <> ''" if all_customer_centers else "customer_center_id = ?"
+    search_params: list[Any] = [] if all_customer_centers else [service._current_customer_center_id()]
+    search_params.append(f"%{escaped_search}%")
+    search_cte_sql = f"""
+    matching_materials AS (
+        SELECT DISTINCT material_key
+        FROM material_profile
+        WHERE {search_scope_sql}
+          AND {_material_profile_search_expr()} LIKE ? ESCAPE '\\'
+    ),
+    """
+    search_join_sql = f"INNER JOIN matching_materials mm ON mm.material_key = {join_target_expr}"
+    return normalized_search_text, search_cte_sql, search_params, search_join_sql
+
+
+def _empty_material_index_payload(
+    service: Any,
+    *,
+    latest_snapshot_time: str,
+    normalized: str,
+    range_label: str,
+    start_day: str,
+    end_day: str,
+    normalized_page_size: int,
+    normalized_sort_key: str,
+    normalized_sort_dir: str,
+    search_text: str,
+    ranking_index_range_key: str,
+    freshness_source: str,
+    freshness_notice: str,
+    all_customer_centers: bool,
+    day_prefix_used: bool,
+    day_rollup_used: bool,
+    live_overlay_used: bool,
+) -> dict[str, Any]:
+    payload = {
+        "snapshot_time": str(latest_snapshot_time or "").strip(),
+        "snapshot_count": 0,
+        "items": [],
+        "meta": service._material_meta_from_rows([], str(latest_snapshot_time or "").strip(), material_count=0),
+        "range_key": normalized,
+        "range_label": range_label,
+        "material_mode": "performance",
+        "query_start_date": start_day,
+        "query_end_date": end_day,
+        "pagination": {
+            "page": 1,
+            "page_size": normalized_page_size,
+            "total_count": 0,
+            "total_pages": 1,
+            "start_index": 0,
+            "end_index": 0,
+            "sort_key": normalized_sort_key,
+            "sort_dir": normalized_sort_dir,
+            "search": str(search_text or "").strip(),
+        },
+        "materials_aggregate": {
+            "material_mode": "performance",
+            "material_count": 0,
+            "stat_cost": 0.0,
+            "pay_amount": 0.0,
+            "total_pay_amount": 0.0,
+            "settled_pay_amount": 0.0,
+            "order_count": 0,
+            "settled_order_count": 0,
+            "overall_show_count": 0,
+            "overall_click_count": 0,
+            "overall_ctr": 0.0,
+            "roi": 0.0,
+            "settled_roi": 0.0,
+            "pay_order_cost": 0.0,
+            "settled_amount_rate": 0.0,
+            "refund_amount_1h": 0.0,
+            "refund_rate_1h": 0.0,
+            "plan_count": 0,
+            "advertiser_count": 0,
+            "summary_text": "total 0 materials",
+        },
+        "metrics_semantics": {
+            "money_scope": "material_reuse_aggregation",
+            "reconcilable_to_account_summary": False,
+            "notice": freshness_notice,
+        },
+        "materialTodayStatus": service._material_today_hot_status(
+            all_customer_centers=all_customer_centers,
+        ),
+        "ranking_index_used": True,
+        "ranking_index_range_key": ranking_index_range_key,
+        "ranking_index_day_prefix_used": bool(day_prefix_used),
+        "ranking_index_day_rollup_used": bool(day_rollup_used),
+        "ranking_index_live_overlay_used": bool(live_overlay_used),
+    }
+    return service._attach_freshness(
+        payload,
+        data_time=payload.get("snapshot_time"),
+        synced_at=payload.get("snapshot_time"),
+        source=freshness_source,
+        partial=False,
+    )
 
 
 def _date_range(start_day: str, end_day: str) -> list[str]:
@@ -813,16 +965,21 @@ def rebuild_day_prefix_range(
     end_day: str,
     all_customer_centers: bool = False,
     force_scope_key: str = "",
+    force_customer_center_id: str = "",
 ) -> dict[str, Any]:
     start_day = _date_key(start_day, "start_day")
     end_day = _date_key(end_day, "end_day")
     if start_day > end_day:
         start_day, end_day = end_day, start_day
-    customer_center_id = "" if all_customer_centers else str(service._current_customer_center_id() or "").strip()
-    scope_key_value = str(force_scope_key or "").strip() or scope_key(
-        service,
-        all_customer_centers=all_customer_centers,
-    )
+    customer_center_id = "" if all_customer_centers else str(
+        force_customer_center_id or service._current_customer_center_id() or ""
+    ).strip()
+    scope_key_value = str(force_scope_key or "").strip()
+    if not scope_key_value:
+        if all_customer_centers:
+            scope_key_value = scope_key(service, all_customer_centers=True)
+        else:
+            scope_key_value = customer_center_id or scope_key(service, all_customer_centers=False)
     if not scope_key_value:
         return {
             "ok": False,
@@ -1626,6 +1783,12 @@ def payload_from_day_rollup_index(
     summary = dict(query_rows[0] or {}) if query_rows else {}
     total_count = int(summary.get("total_count", 0) or 0)
     indexed_day_count = int(summary.get("indexed_day_count", 0) or 0)
+    if (total_count <= 0 or indexed_day_count <= 0) and use_prefix_index:
+        use_prefix_index = False
+        query_rows = run_page(normalized_page)
+        summary = dict(query_rows[0] or {}) if query_rows else {}
+        total_count = int(summary.get("total_count", 0) or 0)
+        indexed_day_count = int(summary.get("indexed_day_count", 0) or 0)
     if total_count <= 0 or indexed_day_count <= 0:
         if normalized_search_text and use_prefix_index and indexed_day_count > 0:
             return empty_search_index_payload(summary, indexed_day_count)
@@ -1685,6 +1848,7 @@ def payload_from_day_rollup_index(
             overall_show_count = int(metric.get("page_overall_show_count", 0) or 0)
             overall_click_count = int(metric.get("page_overall_click_count", 0) or 0)
             refund_amount_1h = round(float(metric.get("page_refund_amount_1h", 0.0) or 0.0), 2)
+            material_type = material_type_value(material_key, profile)
             page_source_rows.append(
                 {
                     "customer_center_id": str(profile.get("customer_center_id") or service._current_customer_center_id()),
@@ -1694,9 +1858,9 @@ def payload_from_day_rollup_index(
                     "window_end": f"{end_day} 23:59:59",
                     "material_key": material_key,
                     "material_id": str(profile.get("material_id") or ""),
-                    "material_name": str(profile.get("material_name") or "") or "unnamed material",
+                    "material_name": material_display_name_value(material_type, profile.get("material_name")),
                     "create_time": str(profile.get("create_time") or ""),
-                    "material_type": str(profile.get("material_type") or "") or "OTHER",
+                    "material_type": material_type,
                     "video_id": str(profile.get("video_id") or ""),
                     "cover_url": str(profile.get("cover_url") or ""),
                     "aweme_item_id": str(profile.get("aweme_item_id") or ""),
@@ -2076,6 +2240,7 @@ def payload_from_current_index(
     sort_dir: str,
     tz_name: str,
     all_customer_centers: bool,
+    search_text: str = "",
 ) -> dict[str, Any] | None:
     start_day = _date_key(start_day, "start_day")
     end_day = _date_key(end_day, "end_day")
@@ -2097,9 +2262,15 @@ def payload_from_current_index(
     normalized_page_size = max(int(page_size or DEFAULT_PAGE_SIZE), 1)
     current_scope_sql = "COALESCE(mc.customer_center_id, '') <> ''" if all_customer_centers else "mc.customer_center_id = ?"
     current_scope_params: list[Any] = [] if all_customer_centers else [service._current_customer_center_id()]
+    normalized_search_text, search_cte_sql, search_params, current_search_join_sql = _material_profile_search_parts(
+        service,
+        all_customer_centers=all_customer_centers,
+        search_text=search_text,
+        join_target_expr="mc.material_key",
+    )
 
     page_sql = f"""
-    WITH current_source AS (
+    WITH {search_cte_sql}current_source AS (
         SELECT
             mc.material_key,
             MAX(mc.snapshot_time) AS snapshot_time,
@@ -2115,6 +2286,7 @@ def payload_from_current_index(
             CAST(COALESCE(SUM(mc.overall_click_count), 0) AS INTEGER) AS overall_click_count,
             CAST(ROUND(COALESCE(SUM(mc.refund_amount_1h), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS refund_amount_1h
         FROM material_current mc
+        {current_search_join_sql}
         WHERE {current_scope_sql}
         GROUP BY mc.material_key
     ),
@@ -2196,6 +2368,7 @@ def payload_from_current_index(
         for row in conn.execute(
             page_sql,
             [
+                *search_params,
                 *current_scope_params,
                 start_index,
                 start_index + normalized_page_size,
@@ -2205,6 +2378,27 @@ def payload_from_current_index(
     summary = dict(query_rows[0] or {}) if query_rows else {}
     total_count = int(summary.get("total_count", 0) or 0)
     if total_count <= 0:
+        if normalized_search_text:
+            latest_snapshot_time = str(summary.get("latest_snapshot_time") or "").strip()
+            return _empty_material_index_payload(
+                service,
+                latest_snapshot_time=latest_snapshot_time,
+                normalized=normalized,
+                range_label=range_label,
+                start_day=today_key,
+                end_day=today_key,
+                normalized_page_size=normalized_page_size,
+                normalized_sort_key=normalized_sort_key,
+                normalized_sort_dir=normalized_sort_dir,
+                search_text=search_text,
+                ranking_index_range_key="current_live",
+                freshness_source="material_current_index",
+                freshness_notice="material performance uses material_current live index for today",
+                all_customer_centers=all_customer_centers,
+                day_prefix_used=False,
+                day_rollup_used=False,
+                live_overlay_used=True,
+            )
         return None
     total_pages = max(1, (total_count + normalized_page_size - 1) // normalized_page_size)
     current_page = min(max(1, normalized_page), total_pages)
@@ -2222,6 +2416,7 @@ def payload_from_current_index(
             sort_dir=normalized_sort_dir,
             tz_name=tz_name,
             all_customer_centers=all_customer_centers,
+            search_text=search_text,
         )
 
     page_material_keys = [
@@ -2274,6 +2469,7 @@ def payload_from_current_index(
         overall_show_count = int(metric.get("page_overall_show_count", 0) or 0)
         overall_click_count = int(metric.get("page_overall_click_count", 0) or 0)
         refund_amount_1h = round(float(metric.get("page_refund_amount_1h", 0.0) or 0.0), 2)
+        material_type = material_type_value(material_key, profile)
         page_source_rows.append(
             {
                 "customer_center_id": str(profile.get("customer_center_id") or service._current_customer_center_id() or ""),
@@ -2283,9 +2479,9 @@ def payload_from_current_index(
                 "window_end": f"{today_key} 23:59:59",
                 "material_key": material_key,
                 "material_id": str(profile.get("material_id") or ""),
-                "material_name": str(profile.get("material_name") or "") or "unnamed material",
+                "material_name": material_display_name_value(material_type, profile.get("material_name")),
                 "create_time": str(profile.get("create_time") or ""),
-                "material_type": str(profile.get("material_type") or "") or "OTHER",
+                "material_type": material_type,
                 "video_id": str(profile.get("video_id") or ""),
                 "cover_url": str(profile.get("cover_url") or ""),
                 "aweme_item_id": str(profile.get("aweme_item_id") or ""),
@@ -2360,7 +2556,7 @@ def payload_from_current_index(
         "end_index": start_index + len(items),
         "sort_key": normalized_sort_key,
         "sort_dir": normalized_sort_dir,
-        "search": "",
+        "search": str(search_text or "").strip(),
     }
     payload["materials_aggregate"] = {
         "material_mode": "performance",
@@ -2423,6 +2619,7 @@ def payload_from_live_overlay_index(
     sort_key: str,
     sort_dir: str,
     all_customer_centers: bool,
+    search_text: str = "",
 ) -> dict[str, Any] | None:
     start_day = _date_key(start_day, "start_day")
     end_day = _date_key(end_day, "end_day")
@@ -2455,6 +2652,12 @@ def payload_from_live_overlay_index(
     ).days + 1
     current_scope_sql = "COALESCE(mc.customer_center_id, '') <> ''" if all_customer_centers else "mc.customer_center_id = ?"
     current_scope_params: list[Any] = [] if all_customer_centers else [service._current_customer_center_id()]
+    normalized_search_text, search_cte_sql, search_params, search_join_sql = _material_profile_search_parts(
+        service,
+        all_customer_centers=all_customer_centers,
+        search_text=search_text,
+        join_target_expr="prepared.material_key",
+    )
 
     use_prefix_index = False
     prefix_start_day = (datetime.strptime(start_day, "%Y-%m-%d").date() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -2481,6 +2684,7 @@ def payload_from_live_overlay_index(
         WHERE scope_key = ?
           AND day_key = ?
     ),
+    {search_cte_sql}
     history_metrics AS (
         SELECT
             e.material_key,
@@ -2552,6 +2756,11 @@ def payload_from_live_overlay_index(
         FROM merged
         WHERE COALESCE(merged.active_day_count, 0) > 0
     ),
+    filtered AS (
+        SELECT prepared.*
+        FROM prepared
+        {search_join_sql}
+    ),
     summary AS (
         SELECT
             COUNT(*) AS total_count,
@@ -2566,22 +2775,22 @@ def payload_from_live_overlay_index(
             CAST(ROUND(COALESCE(SUM(refund_amount_1h), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS aggregate_refund_amount_1h,
             CAST(COALESCE(SUM(plan_count), 0) AS INTEGER) AS aggregate_plan_count,
             CAST(COALESCE(SUM(advertiser_count), 0) AS INTEGER) AS aggregate_advertiser_count
-        FROM prepared
+        FROM filtered
     ),
     source_meta AS (
         SELECT
             COALESCE(MAX(snapshot_time), '') AS latest_snapshot_time,
             ? + CASE WHEN EXISTS(SELECT 1 FROM current_metrics) THEN 1 ELSE 0 END AS snapshot_count,
             ? + CASE WHEN EXISTS(SELECT 1 FROM current_metrics) THEN 1 ELSE 0 END AS indexed_day_count
-        FROM prepared
+        FROM filtered
     ),
     ranked AS (
         SELECT
-            prepared.*,
+            filtered.*,
             ROW_NUMBER() OVER (
                 ORDER BY zero_bucket ASC, {metric_column} {metric_order}, material_key ASC
             ) AS rank_no
-        FROM prepared
+        FROM filtered
     ),
     paged AS (
         SELECT *
@@ -2653,6 +2862,7 @@ def payload_from_live_overlay_index(
           AND sort_key = ?
           AND sort_dir = ?
     ),
+    {search_cte_sql}
     history_metrics AS (
         SELECT
             material_key,
@@ -2721,6 +2931,11 @@ def payload_from_live_overlay_index(
         FROM merged
         WHERE COALESCE(merged.active_day_count, 0) > 0
     ),
+    filtered AS (
+        SELECT prepared.*
+        FROM prepared
+        {search_join_sql}
+    ),
     summary AS (
         SELECT
             COUNT(*) AS total_count,
@@ -2735,22 +2950,22 @@ def payload_from_live_overlay_index(
             CAST(ROUND(COALESCE(SUM(refund_amount_1h), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS aggregate_refund_amount_1h,
             CAST(COALESCE(SUM(plan_count), 0) AS INTEGER) AS aggregate_plan_count,
             CAST(COALESCE(SUM(advertiser_count), 0) AS INTEGER) AS aggregate_advertiser_count
-        FROM prepared
+        FROM filtered
     ),
     source_meta AS (
         SELECT
             COALESCE(MAX(snapshot_time), '') AS latest_snapshot_time,
             (SELECT COUNT(DISTINCT start_date) FROM daily_rows) + CASE WHEN EXISTS(SELECT 1 FROM current_metrics) THEN 1 ELSE 0 END AS snapshot_count,
             (SELECT COUNT(DISTINCT start_date) FROM daily_rows) + CASE WHEN EXISTS(SELECT 1 FROM current_metrics) THEN 1 ELSE 0 END AS indexed_day_count
-        FROM prepared
+        FROM filtered
     ),
     ranked AS (
         SELECT
-            prepared.*,
+            filtered.*,
             ROW_NUMBER() OVER (
                 ORDER BY zero_bucket ASC, {metric_column} {metric_order}, material_key ASC
             ) AS rank_no
-        FROM prepared
+        FROM filtered
     ),
     paged AS (
         SELECT *
@@ -2807,6 +3022,7 @@ def payload_from_live_overlay_index(
                         history_end_day,
                         scope_key_value,
                         prefix_start_day,
+                        *search_params,
                         *current_scope_params,
                         history_day_count,
                         history_day_count,
@@ -2825,6 +3041,7 @@ def payload_from_live_overlay_index(
                     history_end_day,
                     normalized_sort_key,
                     normalized_sort_dir,
+                    *search_params,
                     *current_scope_params,
                     start_index,
                     start_index + normalized_page_size,
@@ -2837,7 +3054,30 @@ def payload_from_live_overlay_index(
     total_count = int(summary.get("total_count", 0) or 0)
     indexed_day_count = int(summary.get("indexed_day_count", 0) or 0)
     expected_indexed_day_count = history_day_count + 1
-    if total_count <= 0 or indexed_day_count < expected_indexed_day_count:
+    if indexed_day_count < expected_indexed_day_count:
+        return None
+    if total_count <= 0:
+        if normalized_search_text:
+            latest_snapshot_time = str(summary.get("latest_snapshot_time") or "").strip()
+            return _empty_material_index_payload(
+                service,
+                latest_snapshot_time=latest_snapshot_time,
+                normalized=normalized,
+                range_label=range_label,
+                start_day=start_day,
+                end_day=end_day,
+                normalized_page_size=normalized_page_size,
+                normalized_sort_key=normalized_sort_key,
+                normalized_sort_dir=normalized_sort_dir,
+                search_text=search_text,
+                ranking_index_range_key="day_prefix_live" if use_prefix_index else "day_rollup_live",
+                freshness_source="material_ranking_day_prefix_live" if use_prefix_index else "material_ranking_day_rollup_live",
+                freshness_notice="material performance uses historical prefix plus live current overlay",
+                all_customer_centers=all_customer_centers,
+                day_prefix_used=bool(use_prefix_index),
+                day_rollup_used=True,
+                live_overlay_used=True,
+            )
         return None
 
     total_pages = max(1, (total_count + normalized_page_size - 1) // normalized_page_size)
@@ -2896,6 +3136,7 @@ def payload_from_live_overlay_index(
         overall_show_count = int(metric.get("page_overall_show_count", 0) or 0)
         overall_click_count = int(metric.get("page_overall_click_count", 0) or 0)
         refund_amount_1h = round(float(metric.get("page_refund_amount_1h", 0.0) or 0.0), 2)
+        material_type = material_type_value(material_key, profile)
         page_source_rows.append(
             {
                 "customer_center_id": str(profile.get("customer_center_id") or service._current_customer_center_id() or ""),
@@ -2905,9 +3146,9 @@ def payload_from_live_overlay_index(
                 "window_end": f"{end_day} 23:59:59",
                 "material_key": material_key,
                 "material_id": str(profile.get("material_id") or ""),
-                "material_name": str(profile.get("material_name") or "") or "unnamed material",
+                "material_name": material_display_name_value(material_type, profile.get("material_name")),
                 "create_time": str(profile.get("create_time") or ""),
-                "material_type": str(profile.get("material_type") or "") or "OTHER",
+                "material_type": material_type,
                 "video_id": str(profile.get("video_id") or ""),
                 "cover_url": str(profile.get("cover_url") or ""),
                 "aweme_item_id": str(profile.get("aweme_item_id") or ""),
@@ -2996,7 +3237,7 @@ def payload_from_live_overlay_index(
         "end_index": start_index + len(items),
         "sort_key": normalized_sort_key,
         "sort_dir": normalized_sort_dir,
-        "search": "",
+        "search": str(search_text or "").strip(),
     }
     payload["materials_aggregate"] = {
         "material_mode": "performance",

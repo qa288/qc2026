@@ -933,6 +933,103 @@ def _material_asset_library_indexes(conn: Any) -> None:
         conn.execute(statement)
 
 
+def _material_title_video_alignment_schema(conn: Any) -> None:
+    material_tables = (
+        "material_snapshots",
+        "material_rollups",
+        "material_current",
+        "material_daily",
+        "material_profile",
+        "material_relation_current",
+        "material_relation_daily",
+        "material_current_plan_items",
+    )
+    for table_name in material_tables:
+        if not _table_exists(conn, table_name):
+            continue
+        _ensure_column(conn, table_name, "backend_material_name", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, table_name, "publish_title", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, table_name, "creative_title_material_ids_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, table_name, "creative_source", "TEXT NOT NULL DEFAULT ''")
+
+    if getattr(conn, "backend", "") == "postgres":
+        conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_profile_backend_name_trgm
+            ON material_profile USING gin (LOWER(backend_material_name) gin_trgm_ops)
+            WHERE COALESCE(backend_material_name, '') <> ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_profile_publish_title_trgm
+            ON material_profile USING gin (LOWER(publish_title) gin_trgm_ops)
+            WHERE COALESCE(publish_title, '') <> ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_profile_alignment_search_trgm
+            ON material_profile USING gin (
+                LOWER(
+                    COALESCE(material_key, '') || ' ' ||
+                    COALESCE(material_id, '') || ' ' ||
+                    COALESCE(backend_material_name, '') || ' ' ||
+                    COALESCE(material_name, '') || ' ' ||
+                    COALESCE(publish_title, '') || ' ' ||
+                    COALESCE(video_id, '') || ' ' ||
+                    COALESCE(product_info_text, '') || ' ' ||
+                    COALESCE(top_anchor_name, '') || ' ' ||
+                    COALESCE(top_plan_name, '') || ' ' ||
+                    COALESCE(top_account_name, '') || ' ' ||
+                    COALESCE(aweme_item_id, '') || ' ' ||
+                    COALESCE(material_type, '') || ' ' ||
+                    COALESCE(product_names_json, '')
+                ) gin_trgm_ops
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_snapshots_cc_day_plan_type
+            ON material_snapshots (customer_center_id, (substr(snapshot_time, 1, 10)), advertiser_id, ad_id, material_type)
+            """
+        )
+    else:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_profile_backend_name
+            ON material_profile (backend_material_name)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_profile_publish_title
+            ON material_profile (publish_title)
+            """
+        )
+
+    statements = (
+        """
+        CREATE INDEX IF NOT EXISTS idx_mrd_cc_date_plan_type
+        ON material_relation_daily (customer_center_id, biz_date, advertiser_id, ad_id, material_type)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_mrd_cc_date_video
+        ON material_relation_daily (customer_center_id, biz_date, advertiser_id, video_id)
+        WHERE COALESCE(video_id, '') <> ''
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_material_daily_cc_date_backend_name
+        ON material_daily (customer_center_id, biz_date, backend_material_name)
+        WHERE COALESCE(backend_material_name, '') <> ''
+        """,
+    )
+    for statement in statements:
+        conn.execute(statement)
+
+
 def _material_snapshot_primary_key_with_advertiser(conn: Any) -> None:
     _rebuild_table_with_schema(
         conn,
@@ -2652,6 +2749,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=34,
         name="material_ranking_day_prefix",
         apply_fn=_material_ranking_day_prefix_schema,
+    ),
+    Migration(
+        version=35,
+        name="material_title_video_alignment",
+        apply_fn=_material_title_video_alignment_schema,
     ),
 )
 

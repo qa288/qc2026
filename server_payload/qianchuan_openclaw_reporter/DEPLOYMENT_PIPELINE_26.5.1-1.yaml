@@ -1,0 +1,6 @@
+version: 26.5.1-1
+date: 2026-05-01
+summary:
+  - paused-plan gap scan/apply tooling added
+  - plan/account/summary daily current writes preserved by UPSERT logic
+  - NAS one-shot compose for paused account/plan backfill

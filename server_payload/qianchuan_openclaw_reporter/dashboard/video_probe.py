@@ -7,6 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from typing import Iterable
 
 
 class VideoProbeError(RuntimeError):
@@ -25,6 +26,10 @@ class VideoProbeResult:
     sample_aspect_ratio: str = ""
     display_aspect_ratio: str = ""
     duration_seconds: float = 0.0
+    bit_rate_bps: int = 0
+    codec_name: str = ""
+    pixel_format: str = ""
+    profile: str = ""
 
 
 @dataclass(frozen=True)
@@ -58,7 +63,16 @@ def probe_video_file(file_path: Path) -> VideoProbeResult:
     raise VideoProbeError(f"unsupported container for fallback probe: {path.suffix or '<none>'}")
 
 
-def validate_video_probe_for_upload(result: VideoProbeResult) -> list[str]:
+def validate_video_probe_for_upload(
+    result: VideoProbeResult,
+    *,
+    allowed_display_aspect_ratios: Iterable[str] | None = None,
+    min_duration_seconds: float = 0.0,
+    max_duration_seconds: float = 0.0,
+    min_bitrate_bps: int = 0,
+    allowed_containers: Iterable[str] | None = None,
+    allowed_codecs: Iterable[str] | None = None,
+) -> list[str]:
     problems: list[str] = []
     if result.coded_width <= 0 or result.coded_height <= 0:
         problems.append("\u65e0\u6cd5\u89e3\u6790\u7f16\u7801\u5c3a\u5bf8")
@@ -92,7 +106,76 @@ def validate_video_probe_for_upload(result: VideoProbeResult) -> list[str]:
             f"\u4e0e\u7f16\u7801\u5c3a\u5bf8 {result.coded_width}x{result.coded_height} "
             "\u4e0d\u4e00\u81f4"
         )
+    display_aspect = _normalize_ratio_text(result.display_aspect_ratio) or _ratio_text(
+        int(result.display_width or 0),
+        int(result.display_height or 0),
+    )
+    allowed_aspects = {_normalize_ratio_text(item) for item in (allowed_display_aspect_ratios or [])}
+    allowed_aspects.discard("")
+    if allowed_aspects and display_aspect and display_aspect not in allowed_aspects:
+        problems.append(
+            f"\u663e\u793a\u5bbd\u9ad8\u6bd4 {display_aspect} \u4e0d\u5728\u5141\u8bb8\u8303\u56f4 "
+            f"{', '.join(sorted(allowed_aspects))}"
+        )
+    dimension_problem = _official_video_dimension_problem(display_aspect, result.display_width, result.display_height)
+    if dimension_problem:
+        problems.append(dimension_problem)
+    if min_duration_seconds > 0 and 0 < result.duration_seconds < min_duration_seconds:
+        problems.append(
+            f"\u65f6\u957f {result.duration_seconds:.2f}s \u4f4e\u4e8e {float(min_duration_seconds):.0f}s"
+        )
+    if max_duration_seconds > 0 and result.duration_seconds > max_duration_seconds:
+        problems.append(
+            f"\u65f6\u957f {result.duration_seconds:.2f}s \u8d85\u8fc7 {float(max_duration_seconds):.0f}s"
+        )
+    if min_bitrate_bps > 0 and result.bit_rate_bps > 0 and result.bit_rate_bps < min_bitrate_bps:
+        problems.append(
+            f"\u7801\u7387 {result.bit_rate_bps / 1000:.0f}kbps \u4f4e\u4e8e {int(min_bitrate_bps / 1000)}kbps"
+        )
+    normalized_container = str(result.container or "").strip().lower().lstrip(".")
+    allowed_container_set = {
+        str(item or "").strip().lower().lstrip(".")
+        for item in (allowed_containers or [])
+        if str(item or "").strip()
+    }
+    if allowed_container_set and normalized_container and normalized_container not in allowed_container_set:
+        problems.append(f"\u5bb9\u5668 {normalized_container} \u4e0d\u5728\u5141\u8bb8\u8303\u56f4")
+    normalized_codec = str(result.codec_name or "").strip().lower()
+    allowed_codec_set = {
+        str(item or "").strip().lower()
+        for item in (allowed_codecs or [])
+        if str(item or "").strip()
+    }
+    if allowed_codec_set and normalized_codec and normalized_codec not in allowed_codec_set:
+        problems.append(f"\u7f16\u7801 {normalized_codec} \u4e0d\u5728\u5141\u8bb8\u8303\u56f4")
     return problems
+
+
+def _official_video_dimension_problem(display_aspect: str, width: int, height: int) -> str:
+    normalized_aspect = _normalize_ratio_text(display_aspect)
+    normalized_width = int(width or 0)
+    normalized_height = int(height or 0)
+    if normalized_width <= 0 or normalized_height <= 0:
+        return ""
+    limits = {
+        "16:9": (1280, 720, 2560, 1440),
+        "9:16": (720, 1280, 1440, 2560),
+    }
+    limit = limits.get(normalized_aspect)
+    if not limit:
+        return ""
+    min_width, min_height, max_width, max_height = limit
+    if (
+        normalized_width < min_width
+        or normalized_height < min_height
+        or normalized_width > max_width
+        or normalized_height > max_height
+    ):
+        return (
+            f"\u5206\u8fa8\u7387 {normalized_width}x{normalized_height} \u4e0d\u5728 "
+            f"{min_width}x{min_height}-{max_width}x{max_height} \u8303\u56f4"
+        )
+    return ""
 
 
 def format_video_probe_summary(result: VideoProbeResult) -> str:
@@ -110,6 +193,14 @@ def format_video_probe_summary(result: VideoProbeResult) -> str:
         parts.append(f"DAR={result.display_aspect_ratio}")
     if result.duration_seconds > 0:
         parts.append(f"\u65f6\u957f={result.duration_seconds:.2f}s")
+    if result.bit_rate_bps > 0:
+        parts.append(f"\u7801\u7387={result.bit_rate_bps / 1000:.0f}kbps")
+    if result.codec_name:
+        parts.append(f"\u7f16\u7801={result.codec_name}")
+    if result.pixel_format:
+        parts.append(f"\u50cf\u7d20\u683c\u5f0f={result.pixel_format}")
+    if result.profile:
+        parts.append(f"profile={result.profile}")
     return ", ".join(parts)
 
 
@@ -167,11 +258,16 @@ def _probe_with_ffprobe(file_path: Path) -> VideoProbeResult | None:
     display_aspect_ratio = _normalize_ratio_text(video_stream.get("display_aspect_ratio"))
     if not display_aspect_ratio and display_width > 0 and display_height > 0:
         display_aspect_ratio = _ratio_text(display_width, display_height)
+    format_info = payload.get("format")
     duration_seconds = _to_float(video_stream.get("duration"))
     if duration_seconds <= 0:
-        format_info = payload.get("format")
         if isinstance(format_info, dict):
             duration_seconds = _to_float(format_info.get("duration"))
+    bit_rate_bps = _parse_bitrate_bps(video_stream.get("bit_rate"))
+    if bit_rate_bps <= 0 and isinstance(format_info, dict):
+        bit_rate_bps = _parse_bitrate_bps(format_info.get("bit_rate"))
+    if bit_rate_bps <= 0:
+        bit_rate_bps = _estimate_bitrate_bps(file_path, duration_seconds)
     container = str(file_path.suffix.lower().lstrip(".") or "video")
     return VideoProbeResult(
         source="ffprobe",
@@ -184,6 +280,10 @@ def _probe_with_ffprobe(file_path: Path) -> VideoProbeResult | None:
         sample_aspect_ratio=sample_aspect_ratio,
         display_aspect_ratio=display_aspect_ratio,
         duration_seconds=duration_seconds,
+        bit_rate_bps=bit_rate_bps,
+        codec_name=str(video_stream.get("codec_name") or "").strip().lower(),
+        pixel_format=str(video_stream.get("pix_fmt") or "").strip().lower(),
+        profile=str(video_stream.get("profile") or "").strip(),
     )
 
 
@@ -235,6 +335,12 @@ def _probe_with_mediainfo(file_path: Path) -> VideoProbeResult | None:
         display_aspect_ratio = _ratio_text(display_width, display_height)
     duration_seconds = _parse_duration_seconds(video_track.get("Duration"))
     container = str(file_path.suffix.lower().lstrip(".") or "video")
+    bit_rate_bps = (
+        _parse_bitrate_bps(video_track.get("BitRate"))
+        or _parse_bitrate_bps(video_track.get("BitRate/String"))
+        or _parse_bitrate_bps(video_track.get("Bit rate"))
+        or _estimate_bitrate_bps(file_path, duration_seconds)
+    )
     return VideoProbeResult(
         source="mediainfo",
         container=container,
@@ -246,6 +352,10 @@ def _probe_with_mediainfo(file_path: Path) -> VideoProbeResult | None:
         sample_aspect_ratio=sample_aspect_ratio,
         display_aspect_ratio=display_aspect_ratio,
         duration_seconds=duration_seconds,
+        bit_rate_bps=bit_rate_bps,
+        codec_name=_normalize_mediainfo_codec(video_track),
+        pixel_format=str(video_track.get("PixelFormat") or "").strip().lower(),
+        profile=str(video_track.get("Format_Profile") or video_track.get("Format profile") or "").strip(),
     )
 
 
@@ -276,6 +386,7 @@ def _probe_iso_bmff(file_path: Path) -> VideoProbeResult:
                 display_aspect_ratio = str(track.get("display_aspect_ratio") or "").strip()
                 if not display_aspect_ratio and display_width > 0 and display_height > 0:
                     display_aspect_ratio = _ratio_text(display_width, display_height)
+                duration_seconds = float(track.get("duration_seconds") or 0.0)
                 return VideoProbeResult(
                     source="iso-bmff-fallback",
                     container=str(file_path.suffix.lower().lstrip(".") or "mp4"),
@@ -286,7 +397,9 @@ def _probe_iso_bmff(file_path: Path) -> VideoProbeResult:
                     rotation=rotation,
                     sample_aspect_ratio=sample_aspect_ratio,
                     display_aspect_ratio=display_aspect_ratio,
-                    duration_seconds=float(track.get("duration_seconds") or 0.0),
+                    duration_seconds=duration_seconds,
+                    bit_rate_bps=_estimate_bitrate_bps(file_path, duration_seconds),
+                    codec_name=str(track.get("codec_name") or "").strip().lower(),
                 )
     raise VideoProbeError("mp4 fallback probe returned no video track")
 
@@ -400,15 +513,16 @@ def _parse_mp4_stsd(handle, box: _Box) -> dict[str, object]:
         entry_size = struct.unpack(">I", data[offset:offset + 4])[0]
         if entry_size < 8 or offset + entry_size > len(data):
             break
+        entry_kind = data[offset + 4:offset + 8].decode("latin1", errors="ignore")
         entry_payload = data[offset + 8:offset + entry_size]
-        parsed = _parse_mp4_visual_sample_entry(entry_payload)
+        parsed = _parse_mp4_visual_sample_entry(entry_payload, entry_kind)
         if parsed:
             return parsed
         offset += entry_size
     return {}
 
 
-def _parse_mp4_visual_sample_entry(entry_payload: bytes) -> dict[str, object]:
+def _parse_mp4_visual_sample_entry(entry_payload: bytes, entry_kind: str = "") -> dict[str, object]:
     if len(entry_payload) < 28:
         return {}
     coded_width, coded_height = struct.unpack(">HH", entry_payload[24:28])
@@ -428,6 +542,7 @@ def _parse_mp4_visual_sample_entry(entry_payload: bytes) -> dict[str, object]:
         "coded_width": int(coded_width),
         "coded_height": int(coded_height),
         "sample_aspect_ratio": sample_aspect_ratio or "1:1",
+        "codec_name": str(entry_kind or "").strip().lower(),
     }
 
 
@@ -458,6 +573,8 @@ def _probe_avi(file_path: Path) -> VideoProbeResult:
                     sample_aspect_ratio="1:1",
                     display_aspect_ratio=_ratio_text(coded_width, coded_height),
                     duration_seconds=duration_seconds,
+                    bit_rate_bps=_estimate_bitrate_bps(file_path, duration_seconds),
+                    codec_name=str(video_track.get("codec_name") or "").strip().lower(),
                 )
     raise VideoProbeError("avi fallback probe returned no video stream")
 
@@ -495,6 +612,20 @@ def _parse_avi_strf(handle, start: int, end: int) -> tuple[int, int]:
     width = struct.unpack("<i", data[4:8])[0]
     height = struct.unpack("<i", data[8:12])[0]
     return abs(int(width)), abs(int(height))
+
+
+def _normalize_mediainfo_codec(video_track: dict[str, object]) -> str:
+    candidates = [
+        video_track.get("CodecID"),
+        video_track.get("CodecID/Hint"),
+        video_track.get("Format"),
+    ]
+    text = " ".join(str(item or "") for item in candidates).lower()
+    if "avc" in text or "h.264" in text or "h264" in text:
+        return "h264"
+    if "hev" in text or "h.265" in text or "h265" in text:
+        return "hevc"
+    return str(video_track.get("Format") or "").strip().lower()
 
 
 def _parse_avi_avih(handle, start: int, end: int) -> float:
@@ -734,6 +865,42 @@ def _parse_duration_seconds(value: object) -> float:
     if text.endswith(" s"):
         return _to_float(text[:-2])
     return 0.0
+
+
+def _parse_bitrate_bps(value: object) -> int:
+    text = str(value or "").strip().lower()
+    if not text or text == "n/a":
+        return 0
+    numeric_text = "".join(char for char in text if char.isdigit() or char in ".")
+    if not numeric_text:
+        return 0
+    try:
+        numeric = float(numeric_text)
+    except ValueError:
+        return 0
+    if numeric <= 0:
+        return 0
+    if "mb/s" in text or "mbps" in text or "mib/s" in text:
+        return int(round(numeric * 1_000_000))
+    if "kb/s" in text or "kbps" in text or "kib/s" in text:
+        return int(round(numeric * 1_000))
+    return int(round(numeric))
+
+
+def _estimate_bitrate_bps(file_path: Path, duration_seconds: float) -> int:
+    try:
+        duration = float(duration_seconds or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        return 0
+    try:
+        size = int(Path(file_path).stat().st_size)
+    except OSError:
+        return 0
+    if size <= 0:
+        return 0
+    return int(round(size * 8 / duration))
 
 
 def _to_int(value: object) -> int:

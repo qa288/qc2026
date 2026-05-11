@@ -2189,6 +2189,109 @@ body {
   background: rgba(255, 252, 248, 0.84);
 }
 
+.upload-hierarchy-panel {
+  border-radius: 8px;
+}
+
+.upload-plan-card-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: start;
+}
+
+.upload-plan-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(20, 59, 47, 0.08);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.upload-plan-card.is-expanded {
+  grid-column: 1 / -1;
+}
+
+.upload-plan-card.is-failed {
+  border-color: rgba(142, 43, 43, 0.18);
+  background: rgba(255, 248, 244, 0.9);
+}
+
+.upload-plan-card.is-success {
+  border-color: rgba(11, 125, 101, 0.16);
+  background: rgba(247, 252, 249, 0.9);
+}
+
+.upload-plan-card-head {
+  min-width: 0;
+}
+
+.upload-plan-card-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.upload-plan-card-metrics div {
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(20, 59, 47, 0.045);
+}
+
+.upload-plan-card-metrics span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.upload-plan-card-metrics strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.upload-plan-card-actions {
+  justify-content: flex-start;
+  justify-self: stretch;
+}
+
+.upload-plan-card-files {
+  min-width: 0;
+}
+
+.upload-hierarchy-shell,
+.upload-target-file-panel {
+  max-height: 520px;
+  overflow: auto;
+  border: 1px solid rgba(20, 59, 47, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.upload-plan-detail-table,
+.upload-file-detail-table {
+  min-width: 980px;
+}
+
+.upload-target-file-row > td {
+  background: rgba(20, 59, 47, 0.035);
+}
+
+.upload-target-file-panel {
+  max-height: 420px;
+}
+
+.upload-plan-progress {
+  margin-top: 8px;
+  max-width: 220px;
+}
+
 .upload-failure-panel-head {
   display: flex;
   justify-content: space-between;
@@ -2347,6 +2450,10 @@ body {
     grid-template-columns: 1fr;
   }
 
+  .upload-plan-card-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .upload-failure-card {
     grid-template-columns: 1fr;
   }
@@ -2358,6 +2465,12 @@ body {
 
   .upload-failure-action {
     justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .upload-plan-card-list {
+    grid-template-columns: 1fr;
   }
 }
 

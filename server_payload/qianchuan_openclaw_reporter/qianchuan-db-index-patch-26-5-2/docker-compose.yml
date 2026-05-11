@@ -1,0 +1,27 @@
+name: qianchuan-db-index-patch-26-5-2
+
+services:
+  patch-index:
+    image: aa.tyos.cc/qianchuan-db-restore-stream:26.5.2-1
+    container_name: qianchuan-db-index-patch-26-5-2
+    restart: "no"
+    network_mode: "container:qianchuan-postgres"
+    entrypoint: ["/bin/sh", "-ec"]
+    environment:
+      PGPASSWORD: "REPLACE_WITH_NAS_POSTGRES_PASSWORD"
+    command:
+      - |
+        set -eu
+        PATCH_URL='http://aa.tyos.cc:18181/qianchuan_aa_26.5.2-1_material_index_patch_20260502.sql.gz'
+        PATCH_SHA256='07c4403c7acbb6d5176909466a657e5fd09c6c813245aa005cdd371c169914f1'
+        PGHOST='127.0.0.1'
+        PGPORT='5432'
+        PGDATABASE='qianchuan'
+        PGUSER='qianchuan'
+        TMP=/tmp/material_index_patch.sql.gz
+        echo "material index patch start"
+        curl -fL --retry 5 --retry-delay 5 -o "$$TMP" "$$PATCH_URL"
+        echo "$$PATCH_SHA256  $$TMP" | sha256sum -c -
+        gzip -dc "$$TMP" | psql -h "$$PGHOST" -p "$$PGPORT" -U "$$PGUSER" -d "$$PGDATABASE" -v ON_ERROR_STOP=1
+        psql -h "$$PGHOST" -p "$$PGPORT" -U "$$PGUSER" -d "$$PGDATABASE" -v ON_ERROR_STOP=1 -c "SELECT COUNT(*) AS rows, ROUND(SUM(stat_cost)::numeric,2) AS stat_cost FROM material_ranking_index WHERE scope_key='1848205818628227' AND start_date='2026-05-01' AND end_date='2026-05-01' AND range_key='day' AND sort_key='stat_cost' AND sort_dir='desc';"
+        echo "material index patch done"

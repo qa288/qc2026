@@ -578,47 +578,6 @@ class PerformanceAccess:
                 if not customer_center_id or not biz_date or not snapshot_time:
                     continue
 
-                conn.execute(
-                    """
-                    INSERT INTO summary_daily (
-                        customer_center_id, biz_date, snapshot_time, account_count, active_account_count,
-                        plan_count, active_plan_count, stat_cost, pay_amount, order_count, roi,
-                        account_failures, plan_failures
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (customer_center_id, biz_date) DO UPDATE SET
-                        snapshot_time = excluded.snapshot_time,
-                        account_count = excluded.account_count,
-                        active_account_count = excluded.active_account_count,
-                        plan_count = excluded.plan_count,
-                        active_plan_count = excluded.active_plan_count,
-                        stat_cost = excluded.stat_cost,
-                        pay_amount = excluded.pay_amount,
-                        order_count = excluded.order_count,
-                        roi = excluded.roi,
-                        account_failures = excluded.account_failures,
-                        plan_failures = excluded.plan_failures
-                    """,
-                    (
-                        customer_center_id,
-                        biz_date,
-                        snapshot_time,
-                        int(row.get("account_count", 0) or 0),
-                        int(row.get("active_account_count", 0) or 0),
-                        int(row.get("plan_count", 0) or 0),
-                        int(row.get("active_plan_count", 0) or 0),
-                        float(row.get("stat_cost", 0.0) or 0.0),
-                        float(row.get("pay_amount", 0.0) or 0.0),
-                        int(row.get("order_count", 0) or 0),
-                        float(row.get("roi", 0.0) or 0.0),
-                        int(row.get("account_failures", 0) or 0),
-                        int(row.get("plan_failures", 0) or 0),
-                    ),
-                )
-
-                conn.execute(
-                    "DELETE FROM account_daily WHERE customer_center_id = ? AND biz_date = ?",
-                    (customer_center_id, biz_date),
-                )
                 day_account_rows = account_rows_by_day.get((customer_center_id, biz_date, snapshot_time), [])
                 if day_account_rows:
                     conn.executemany(
@@ -629,6 +588,24 @@ class PerformanceAccess:
                             settled_roi, settled_order_count, pay_order_cost, settled_amount_rate,
                             refund_rate_1h, refund_amount_1h, plan_count, ok, error
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (customer_center_id, biz_date, advertiser_id) DO UPDATE SET
+                            snapshot_time = excluded.snapshot_time,
+                            advertiser_name = excluded.advertiser_name,
+                            stat_cost = excluded.stat_cost,
+                            roi = excluded.roi,
+                            order_count = excluded.order_count,
+                            pay_amount = excluded.pay_amount,
+                            total_pay_amount = excluded.total_pay_amount,
+                            settled_pay_amount = excluded.settled_pay_amount,
+                            settled_roi = excluded.settled_roi,
+                            settled_order_count = excluded.settled_order_count,
+                            pay_order_cost = excluded.pay_order_cost,
+                            settled_amount_rate = excluded.settled_amount_rate,
+                            refund_rate_1h = excluded.refund_rate_1h,
+                            refund_amount_1h = excluded.refund_amount_1h,
+                            plan_count = excluded.plan_count,
+                            ok = excluded.ok,
+                            error = excluded.error
                         """,
                         [
                             (
@@ -657,10 +634,6 @@ class PerformanceAccess:
                         ],
                     )
 
-                conn.execute(
-                    "DELETE FROM plan_daily WHERE customer_center_id = ? AND biz_date = ?",
-                    (customer_center_id, biz_date),
-                )
                 day_plan_rows = plan_rows_by_day.get((customer_center_id, biz_date, snapshot_time), [])
                 if day_plan_rows:
                     conn.executemany(
@@ -673,6 +646,32 @@ class PerformanceAccess:
                             settled_roi, settled_order_count, pay_order_cost, settled_amount_rate,
                             refund_rate_1h, refund_amount_1h
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (customer_center_id, biz_date, ad_id) DO UPDATE SET
+                            snapshot_time = excluded.snapshot_time,
+                            advertiser_id = excluded.advertiser_id,
+                            advertiser_name = excluded.advertiser_name,
+                            ad_name = excluded.ad_name,
+                            product_id = excluded.product_id,
+                            product_name = excluded.product_name,
+                            anchor_name = excluded.anchor_name,
+                            marketing_goal = excluded.marketing_goal,
+                            plan_source = excluded.plan_source,
+                            plan_delivery_type = excluded.plan_delivery_type,
+                            status = excluded.status,
+                            opt_status = excluded.opt_status,
+                            roi_goal = excluded.roi_goal,
+                            stat_cost = excluded.stat_cost,
+                            roi = excluded.roi,
+                            order_count = excluded.order_count,
+                            pay_amount = excluded.pay_amount,
+                            total_pay_amount = excluded.total_pay_amount,
+                            settled_pay_amount = excluded.settled_pay_amount,
+                            settled_roi = excluded.settled_roi,
+                            settled_order_count = excluded.settled_order_count,
+                            pay_order_cost = excluded.pay_order_cost,
+                            settled_amount_rate = excluded.settled_amount_rate,
+                            refund_rate_1h = excluded.refund_rate_1h,
+                            refund_amount_1h = excluded.refund_amount_1h
                         """,
                         [
                             (
@@ -708,6 +707,78 @@ class PerformanceAccess:
                             for item in day_plan_rows
                         ],
                     )
+
+                account_summary = dict(
+                    conn.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS account_count,
+                            COALESCE(SUM(CASE WHEN stat_cost > 0 THEN 1 ELSE 0 END), 0) AS active_account_count,
+                            COALESCE(SUM(stat_cost), 0) AS stat_cost,
+                            COALESCE(SUM(pay_amount), 0) AS pay_amount,
+                            COALESCE(SUM(order_count), 0) AS order_count,
+                            COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS account_failures,
+                            COALESCE(SUM(CASE WHEN ok = 0 AND COALESCE(error, '') <> '' THEN 1 ELSE 0 END), 0) AS plan_failures
+                        FROM account_daily
+                        WHERE customer_center_id = ?
+                          AND biz_date = ?
+                        """,
+                        (customer_center_id, biz_date),
+                    ).fetchone()
+                )
+                plan_summary = dict(
+                    conn.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS plan_count,
+                            COALESCE(SUM(CASE WHEN stat_cost > 0 THEN 1 ELSE 0 END), 0) AS active_plan_count
+                        FROM plan_daily
+                        WHERE customer_center_id = ?
+                          AND biz_date = ?
+                        """,
+                        (customer_center_id, biz_date),
+                    ).fetchone()
+                )
+                stat_cost = round(float(account_summary.get("stat_cost", 0.0) or 0.0), 2)
+                pay_amount = round(float(account_summary.get("pay_amount", 0.0) or 0.0), 2)
+                order_count = int(float(account_summary.get("order_count", 0) or 0))
+                roi = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+                conn.execute(
+                    """
+                    INSERT INTO summary_daily (
+                        customer_center_id, biz_date, snapshot_time, account_count, active_account_count,
+                        plan_count, active_plan_count, stat_cost, pay_amount, order_count, roi,
+                        account_failures, plan_failures
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (customer_center_id, biz_date) DO UPDATE SET
+                        snapshot_time = excluded.snapshot_time,
+                        account_count = excluded.account_count,
+                        active_account_count = excluded.active_account_count,
+                        plan_count = excluded.plan_count,
+                        active_plan_count = excluded.active_plan_count,
+                        stat_cost = excluded.stat_cost,
+                        pay_amount = excluded.pay_amount,
+                        order_count = excluded.order_count,
+                        roi = excluded.roi,
+                        account_failures = excluded.account_failures,
+                        plan_failures = excluded.plan_failures
+                    """,
+                    (
+                        customer_center_id,
+                        biz_date,
+                        snapshot_time,
+                        int(account_summary.get("account_count", 0) or 0),
+                        int(account_summary.get("active_account_count", 0) or 0),
+                        int(plan_summary.get("plan_count", 0) or 0),
+                        int(plan_summary.get("active_plan_count", 0) or 0),
+                        stat_cost,
+                        pay_amount,
+                        order_count,
+                        roi,
+                        int(account_summary.get("account_failures", 0) or 0),
+                        int(account_summary.get("plan_failures", 0) or 0),
+                    ),
+                )
         except Exception as exc:  # noqa: BLE001
             if self.is_missing_daily_read_model_error(exc):
                 return
@@ -763,7 +834,6 @@ class PerformanceAccess:
                 int(row.get("plan_failures", 0) or 0),
             ),
         )
-        conn.execute("DELETE FROM account_current WHERE customer_center_id = ?", (customer_center_id,))
         if account_rows:
             conn.executemany(
                 """
@@ -772,6 +842,24 @@ class PerformanceAccess:
                     pay_amount, total_pay_amount, settled_pay_amount, settled_roi, settled_order_count, pay_order_cost,
                     settled_amount_rate, refund_rate_1h, refund_amount_1h, plan_count, ok, error
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (customer_center_id, advertiser_id) DO UPDATE SET
+                    snapshot_time = excluded.snapshot_time,
+                    advertiser_name = excluded.advertiser_name,
+                    stat_cost = excluded.stat_cost,
+                    roi = excluded.roi,
+                    order_count = excluded.order_count,
+                    pay_amount = excluded.pay_amount,
+                    total_pay_amount = excluded.total_pay_amount,
+                    settled_pay_amount = excluded.settled_pay_amount,
+                    settled_roi = excluded.settled_roi,
+                    settled_order_count = excluded.settled_order_count,
+                    pay_order_cost = excluded.pay_order_cost,
+                    settled_amount_rate = excluded.settled_amount_rate,
+                    refund_rate_1h = excluded.refund_rate_1h,
+                    refund_amount_1h = excluded.refund_amount_1h,
+                    plan_count = excluded.plan_count,
+                    ok = excluded.ok,
+                    error = excluded.error
                 """,
                 [
                     (
@@ -798,7 +886,6 @@ class PerformanceAccess:
                     for item in account_rows
                 ],
             )
-        conn.execute("DELETE FROM plan_current WHERE customer_center_id = ?", (customer_center_id,))
         if plan_rows:
             conn.executemany(
                 """
@@ -809,6 +896,32 @@ class PerformanceAccess:
                     settled_pay_amount, settled_roi, settled_order_count, pay_order_cost, settled_amount_rate,
                     refund_rate_1h, refund_amount_1h
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (customer_center_id, ad_id) DO UPDATE SET
+                    snapshot_time = excluded.snapshot_time,
+                    advertiser_id = excluded.advertiser_id,
+                    advertiser_name = excluded.advertiser_name,
+                    ad_name = excluded.ad_name,
+                    product_id = excluded.product_id,
+                    product_name = excluded.product_name,
+                    anchor_name = excluded.anchor_name,
+                    marketing_goal = excluded.marketing_goal,
+                    plan_source = excluded.plan_source,
+                    plan_delivery_type = excluded.plan_delivery_type,
+                    status = excluded.status,
+                    opt_status = excluded.opt_status,
+                    roi_goal = excluded.roi_goal,
+                    stat_cost = excluded.stat_cost,
+                    roi = excluded.roi,
+                    order_count = excluded.order_count,
+                    pay_amount = excluded.pay_amount,
+                    total_pay_amount = excluded.total_pay_amount,
+                    settled_pay_amount = excluded.settled_pay_amount,
+                    settled_roi = excluded.settled_roi,
+                    settled_order_count = excluded.settled_order_count,
+                    pay_order_cost = excluded.pay_order_cost,
+                    settled_amount_rate = excluded.settled_amount_rate,
+                    refund_rate_1h = excluded.refund_rate_1h,
+                    refund_amount_1h = excluded.refund_amount_1h
                 """,
                 [
                     (
@@ -843,6 +956,77 @@ class PerformanceAccess:
                     for item in plan_rows
                 ],
             )
+        account_summary = dict(
+            conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS account_count,
+                    COALESCE(SUM(CASE WHEN stat_cost > 0 THEN 1 ELSE 0 END), 0) AS active_account_count,
+                    COALESCE(SUM(stat_cost), 0) AS stat_cost,
+                    COALESCE(SUM(pay_amount), 0) AS pay_amount,
+                    COALESCE(SUM(order_count), 0) AS order_count,
+                    COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS account_failures,
+                    COALESCE(SUM(CASE WHEN ok = 0 AND COALESCE(error, '') <> '' THEN 1 ELSE 0 END), 0) AS plan_failures
+                FROM account_current
+                WHERE customer_center_id = ?
+                """,
+                (customer_center_id,),
+            ).fetchone()
+        )
+        plan_summary = dict(
+            conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS plan_count,
+                    COALESCE(SUM(CASE WHEN stat_cost > 0 THEN 1 ELSE 0 END), 0) AS active_plan_count
+                FROM plan_current
+                WHERE customer_center_id = ?
+                """,
+                (customer_center_id,),
+            ).fetchone()
+        )
+        stat_cost = round(float(account_summary.get("stat_cost", 0.0) or 0.0), 2)
+        pay_amount = round(float(account_summary.get("pay_amount", 0.0) or 0.0), 2)
+        order_count = int(float(account_summary.get("order_count", 0) or 0))
+        roi = round(pay_amount / stat_cost, 2) if stat_cost > 0 else 0.0
+        conn.execute(
+            """
+            INSERT INTO summary_current (
+                customer_center_id, snapshot_time, window_start, window_end, account_count, active_account_count,
+                plan_count, active_plan_count, stat_cost, pay_amount, order_count, roi, account_failures, plan_failures
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (customer_center_id) DO UPDATE SET
+                snapshot_time = excluded.snapshot_time,
+                window_start = excluded.window_start,
+                window_end = excluded.window_end,
+                account_count = excluded.account_count,
+                active_account_count = excluded.active_account_count,
+                plan_count = excluded.plan_count,
+                active_plan_count = excluded.active_plan_count,
+                stat_cost = excluded.stat_cost,
+                pay_amount = excluded.pay_amount,
+                order_count = excluded.order_count,
+                roi = excluded.roi,
+                account_failures = excluded.account_failures,
+                plan_failures = excluded.plan_failures
+            """,
+            (
+                customer_center_id,
+                snapshot_time,
+                str(row.get("window_start") or ""),
+                str(row.get("window_end") or ""),
+                int(account_summary.get("account_count", 0) or 0),
+                int(account_summary.get("active_account_count", 0) or 0),
+                int(plan_summary.get("plan_count", 0) or 0),
+                int(plan_summary.get("active_plan_count", 0) or 0),
+                stat_cost,
+                pay_amount,
+                order_count,
+                roi,
+                int(account_summary.get("account_failures", 0) or 0),
+                int(account_summary.get("plan_failures", 0) or 0),
+            ),
+        )
 
     def _current_rows_for_customer_center(
         self,

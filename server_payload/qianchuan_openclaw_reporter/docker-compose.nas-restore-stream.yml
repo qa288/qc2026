@@ -1,0 +1,19 @@
+name: qianchuan-db-restore-26-5-2
+
+services:
+  restore:
+    image: aa.tyos.cc/qianchuan-db-restore-stream:26.5.2-1
+    container_name: qianchuan-db-restore-26-5-2
+    restart: "no"
+    network_mode: "container:qianchuan-postgres"
+    env_file:
+      - .env.dashboard
+    environment:
+      DUMP_URL: "http://aa.tyos.cc:18181/qianchuan_aa_26.5.2-1_20260502.dump"
+      DUMP_SHA256: "b50a70ad31882ccfcba4a35ee49946c8d843610a768dffb4fcfa3f3c206007d8"
+      PGHOST: "127.0.0.1"
+      PGPORT: "5432"
+      PGDATABASE: "${POSTGRES_DB:?set POSTGRES_DB in .env.dashboard}"
+      PGUSER: "${POSTGRES_USER:?set POSTGRES_USER in .env.dashboard}"
+      PGPASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.dashboard}"
+      I_UNDERSTAND_RESTORE_OVERWRITES_DB: "1"

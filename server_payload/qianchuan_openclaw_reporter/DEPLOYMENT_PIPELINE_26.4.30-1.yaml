@@ -1,0 +1,55 @@
+# Qianchuan dashboard deployment and data-pipeline contract.
+# This file intentionally contains no secrets. Keep tokens, database passwords,
+# app_secret, refresh_token, and customer_center_id values in .env.dashboard only.
+
+profile_version: "26.4.30-1"
+profile_date: "2026-04-30"
+timezone: "Asia/Shanghai"
+image:
+  final_tag: "qc-dashboard:26.4.30-1"
+  env_key: "QC_DASHBOARD_IMAGE"
+  dockerfile: "dashboard/Dockerfile"
+  clean_full_build_command: "docker build --pull --no-cache --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t qc-dashboard:26.4.30-1 -f dashboard/Dockerfile ."
+  optional_build_args:
+    PIP_INDEX_URL: "https://pypi.tuna.tsinghua.edu.cn/simple"
+  note: "PIP_INDEX_URL only affects build-time dependency download speed; runtime behavior is unchanged."
+
+deployment:
+  source_root_on_server: "/opt/qianchuan/qianchuan_openclaw_reporter"
+  local_mirror_root: "C:/qc2026-main/.remote_edit/server_qianchuan"
+  compose_files:
+    source_build: "docker-compose.dashboard.yml"
+    prebuilt_image: "docker-compose.dashboard.image.yml"
+  commands:
+    build_from_source: "docker compose --env-file .env.dashboard -f docker-compose.dashboard.yml up -d --build"
+    clean_full_image_build: "docker build --pull --no-cache --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t qc-dashboard:26.4.30-1 -f dashboard/Dockerfile ."
+    run_prebuilt_image: "docker compose --env-file .env.dashboard -f docker-compose.dashboard.image.yml up -d"
+    check_containers: "docker ps --format '{{.Names}} {{.Image}} {{.Status}}'"
+  runtime_paths_do_not_copy_between_hosts:
+    - "data/"
+    - "volumes/"
+    - "backups/"
+    - "__pycache__/"
+  required_runtime_services:
+    - "qianchuan-web"
+    - "qianchuan-worker"
+    - "qianchuan-history-worker"
+    - "qianchuan-scheduler"
+    - "qianchuan-postgres"
+    - "qianchuan-redis"
+  required_env_keys_without_values:
+    - "APP_ID"
+    - "APP_SECRET"
+    - "REFRESH_TOKEN"
+    - "CUSTOMER_CENTER_ID"
+    - "DATABASE_URL or POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB"
+    - "REDIS_URL"
+    - "CELERY_BROKER_URL"
+    - "CELERY_RESULT_BACKEND"
+    - "QC_DASHBOARD_IMAGE"
+    - "ENABLE_HOT_SYNC_SCHEDULES"
+    - "DETAIL_SYNC_INTERVAL_MINUTES"
+    - "MATERIAL_SYNC_INTERVAL_MINUTES"
+    - "MATERIAL_SYNC_WARM_INTERVAL_MINUTES"
+    - "DETAIL_MATERIAL_TYPES"
+    - "MATERIAL_PLAN_MATERIAL_STATUS"

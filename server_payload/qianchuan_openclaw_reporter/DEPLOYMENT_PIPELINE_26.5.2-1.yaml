@@ -1,0 +1,7 @@
+version: 26.5.2-1
+date: 2026-05-02
+summary:
+  - merge SITE_PROMOTION_PRODUCT_AD history plans into official account/plan collection
+  - keep TITLE material metrics while using creative/detail and plan_materials for VIDEO/TITLE alignment
+  - add one-shot official daily alignment tooling for NAS database repair
+  - keep unattributed deleted-material bucket only as residual fallback after official material lookup

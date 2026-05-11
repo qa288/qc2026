@@ -65,6 +65,7 @@ const PERFORMANCE_CACHE_TTL_MS = 55 * 1000;
 const MATERIAL_CACHE_TTL_MS = 55 * 1000;
 const MATERIAL_SEARCH_DEBOUNCE_MS = 180;
 const COMMENT_PAGE_SIZE = 50;
+const COMMENT_PREFETCH_PAGE_COUNT = 2;
 const COMMENT_CACHE_TTL_MS = 10 * 60 * 1000;
 const COMMENT_SEARCH_DEBOUNCE_MS = 180;
 const DASHBOARD_FETCH_DEDUPE_MS = 1500;
@@ -137,9 +138,17 @@ const state = {
   uploadJobPendingItems: null,
   uploadJobPendingSignature: "",
   uploadJobLocalProgress: {},
+  uploadJobPlanDetails: {},
+  uploadJobTargetFileDetails: {},
+  uploadExpandedTargetKeys: [],
+  uploadDetailRefreshInFlight: false,
+  uploadLoadingPlanJobId: 0,
+  uploadLoadingTargetKey: "",
   uploadSelectedPlanIds: [],
   uploadFiles: [],
   uploadRetryingJobId: null,
+  uploadRetryingPlanKey: "",
+  uploadRetryingFileKey: "",
   uploadRetryingFailureKey: "",
   uploadExpandedJobIds: [],
   uploadDeletingJobId: null,
@@ -2189,12 +2198,39 @@ function commentRequestAdvertiserId() {
   return Number(commentAccountFilter?.value || 0) || 0;
 }
 
-function commentCacheKey(filter, advertiserId = commentRequestAdvertiserId()) {
-  return `${performanceFilterKey(filter)}:${Number(advertiserId || 0)}`;
+function commentRequestState(overrides = {}) {
+  const page = Math.max(1, Number(overrides.page ?? state.commentPage) || 1);
+  const pageSize = Math.max(1, Number(overrides.pageSize ?? COMMENT_PAGE_SIZE) || COMMENT_PAGE_SIZE);
+  const search = String(overrides.search ?? (commentSearch?.value || "")).trim();
+  const sortKey = String(overrides.sortKey ?? (state.commentSort?.key || "create_time")).trim() || "create_time";
+  const sortDir = String(overrides.sortDir ?? (state.commentSort?.dir || "desc")).trim().toLowerCase() === "asc" ? "asc" : "desc";
+  return {
+    page,
+    pageSize,
+    search,
+    sortKey,
+    sortDir,
+  };
 }
 
-function commentRangePayload(filter, advertiserId = commentRequestAdvertiserId()) {
-  return state.commentPayloads[commentCacheKey(filter, advertiserId)] || null;
+function commentCacheKey(filter, advertiserId = commentRequestAdvertiserId(), requestState = commentRequestState()) {
+  return [
+    performanceFilterKey(filter),
+    Number(advertiserId || 0),
+    Number(requestState.page || 1),
+    Number(requestState.pageSize || COMMENT_PAGE_SIZE),
+    requestState.sortKey || "create_time",
+    requestState.sortDir || "desc",
+    String(requestState.search || "").trim().toLowerCase(),
+  ].join(":");
+}
+
+function commentRangePayload(
+  filter,
+  advertiserId = commentRequestAdvertiserId(),
+  requestState = commentRequestState(),
+) {
+  return state.commentPayloads[commentCacheKey(filter, advertiserId, requestState)] || null;
 }
 
 function performanceSectionForView(view = state.activeView) {
@@ -2228,7 +2264,7 @@ function teamMaterialRowsForCurrentFilter() {
 }
 
 function commentRowsForCurrentFilter() {
-  return commentRangePayload(sectionFilter("comment"))?.items || [];
+  return commentRangePayload(sectionFilter("comment"), commentRequestAdvertiserId(), commentRequestState())?.items || [];
 }
 
 function rangeLabel(filter) {
@@ -2302,22 +2338,114 @@ function uploadFailureKey(jobId, row) {
   return `${Number(jobId || 0)}:${Number(row?.target_id || 0)}:${Number(row?.file_id || 0)}`;
 }
 
+function uploadJobDetailKey(jobId) {
+  return String(Number(jobId || 0));
+}
+
+function uploadTargetDetailKey(jobId, targetId) {
+  return `${Number(jobId || 0)}:${Number(targetId || 0)}`;
+}
+
+function uploadTargetFileRetryKey(jobId, targetId, fileId) {
+  return `${uploadTargetDetailKey(jobId, targetId)}:${Number(fileId || 0)}`;
+}
+
+function uploadJobPlanPayload(jobId) {
+  return state.uploadJobPlanDetails?.[uploadJobDetailKey(jobId)] || null;
+}
+
+function uploadTargetFilePayload(jobId, targetId) {
+  return state.uploadJobTargetFileDetails?.[uploadTargetDetailKey(jobId, targetId)] || null;
+}
+
+function uploadStatusIsPending(status) {
+  const value = String(status || "").trim().toLowerCase();
+  return ["prepared", "queued", "receiving", "running", "pending", "processing"].includes(value);
+}
+
+function uploadDetailPayloadHasPending(payload) {
+  const rows = Array.isArray(payload?.items) ? payload.items : [];
+  return rows.some((row) => {
+    const stage = String(row?.stage || row?.failure_stage || "").trim().toLowerCase();
+    return (
+      uploadStatusIsPending(row?.status) ||
+      uploadStatusIsPending(row?.target_asset_status) ||
+      uploadStatusIsPending(row?.file_asset_status) ||
+      stage === "uploading" ||
+      stage === "binding" ||
+      stage.includes("queued")
+    );
+  });
+}
+
+function expandedUploadTargetIdsForJob(jobId) {
+  const normalizedJobId = Number(jobId || 0);
+  if (!normalizedJobId) return [];
+  return (state.uploadExpandedTargetKeys || [])
+    .map((key) => String(key || "").split(":").map((item) => Number(item || 0)))
+    .filter((parts) => parts.length >= 2 && parts[0] === normalizedJobId && parts[1] > 0)
+    .map((parts) => parts[1]);
+}
+
+async function refreshExpandedUploadDetails(force = false) {
+  if (state.uploadDetailRefreshInFlight) return;
+  const jobIds = (state.uploadExpandedJobIds || []).map((jobId) => Number(jobId || 0)).filter(Boolean);
+  if (!jobIds.length) return;
+  state.uploadDetailRefreshInFlight = true;
+  try {
+    for (const jobId of jobIds) {
+      const planPayload = uploadJobPlanPayload(jobId);
+      const nextPlanPayload = force || !planPayload || uploadDetailPayloadHasPending(planPayload)
+        ? await fetchUploadJobPlans(jobId, true)
+        : planPayload;
+      for (const targetId of expandedUploadTargetIdsForJob(jobId)) {
+        const filePayload = uploadTargetFilePayload(jobId, targetId);
+        const targetRow = (Array.isArray(nextPlanPayload?.items) ? nextPlanPayload.items : []).find(
+          (item) => Number(item?.target_id || 0) === Number(targetId || 0),
+        );
+        if (force || !filePayload || uploadDetailPayloadHasPending(filePayload) || uploadStatusIsPending(targetRow?.status)) {
+          await fetchUploadTargetFiles(jobId, targetId, true);
+        }
+      }
+    }
+  } finally {
+    state.uploadDetailRefreshInFlight = false;
+  }
+}
+
+function isUploadTargetExpanded(jobId, targetId) {
+  return (state.uploadExpandedTargetKeys || []).includes(uploadTargetDetailKey(jobId, targetId));
+}
+
+function formatUploadFileSize(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "--";
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
 function isUploadJobExpanded(jobId) {
   const normalizedJobId = Number(jobId || 0);
   return (state.uploadExpandedJobIds || []).includes(normalizedJobId);
 }
 
-function toggleUploadJobFailures(jobId) {
+async function toggleUploadJobFailures(jobId) {
   const normalizedJobId = Number(jobId || 0);
   if (!normalizedJobId) return;
   state.uploadJobLastInteractionAt = Date.now();
   const expanded = new Set(state.uploadExpandedJobIds || []);
+  const shouldOpen = !expanded.has(normalizedJobId);
   if (expanded.has(normalizedJobId)) {
     expanded.delete(normalizedJobId);
   } else {
     expanded.add(normalizedJobId);
   }
   state.uploadExpandedJobIds = Array.from(expanded);
+  renderUploadJobTableStable(normalizedJobId);
+  if (shouldOpen && !uploadJobPlanPayload(normalizedJobId)) {
+    await fetchUploadJobPlans(normalizedJobId);
+  }
 }
 
 function uploadJobAnchorTop(jobId) {
@@ -2383,6 +2511,30 @@ function uploadDetailStatusLabel(status) {
   if (value === "running") return "进行中";
   if (value === "queued") return "等待";
   return uploadJobStatusLabel(status);
+}
+
+function uploadFileAssetStatusLabel(row) {
+  const value = String(row?.file_asset_status || "").trim().toLowerCase();
+  if (value === "success") return "已上传";
+  if (value === "failed") return "上传失败";
+  if (value === "running") return "上传中";
+  if (value === "queued") return "待上传";
+  if (value === "skipped") return "已跳过";
+  if (String(row?.material_id || row?.video_id || "").trim()) return "已上传";
+  return "未上传";
+}
+
+function uploadBindStatusLabel(row) {
+  const value = String(row?.target_asset_status || row?.status || "").trim().toLowerCase();
+  if (value === "success") return "绑定成功";
+  if (value === "running") return "绑定中";
+  if (value === "queued") return "待绑定";
+  if (value === "failed") {
+    const assetValue = String(row?.file_asset_status || "").trim().toLowerCase();
+    const hasMaterial = Boolean(String(row?.material_id || row?.video_id || "").trim());
+    return assetValue === "success" || hasMaterial ? "绑定失败" : "未绑定";
+  }
+  return uploadDetailStatusLabel(value);
 }
 
 function uploadProgressPercent(item) {
@@ -2478,15 +2630,15 @@ function formatUploadFailureItem(row) {
 
 function renderUploadJobNote(item) {
   const base = normalizeUploadJobNote(item.note);
-  const detailItems = Array.isArray(item.detail_items) ? item.detail_items : [];
+  const detailCount = Number(item.detail_count || 0);
   const failedCount = Number(item.failed_detail_count ?? item.failed_items?.length ?? 0);
-  if (!detailItems.length) {
+  if (!detailCount) {
     return escapeHtml(base);
   }
   return `
     <div class="cell-primary">${escapeHtml(base)}</div>
     <div class="cell-subline">
-      <span class="cell-subitem">明细 ${formatNumber(detailItems.length)} 条</span>
+      <span class="cell-subitem">素材明细 ${formatNumber(detailCount)} 条</span>
       <span class="cell-subitem">完成 ${formatNumber(item.success_detail_count || 0)}</span>
       <span class="cell-subitem">失败 ${formatNumber(failedCount)}</span>
     </div>
@@ -2494,65 +2646,155 @@ function renderUploadJobNote(item) {
 }
 
 function renderUploadJobDetails(item) {
-  const detailItems = Array.isArray(item.detail_items) ? item.detail_items : [];
-  if (!detailItems.length) return "";
-  const failedCount = Number(item.failed_detail_count ?? item.failed_items?.length ?? 0);
+  const jobId = Number(item?.id || 0);
+  if (!jobId) return "";
+  const payload = uploadJobPlanPayload(jobId);
+  const plans = Array.isArray(payload?.items) ? payload.items : [];
+  const loading = Number(state.uploadLoadingPlanJobId || 0) === jobId;
+  const failedCount = Number(payload?.job?.failed_detail_count ?? item.failed_detail_count ?? 0);
+  const successCount = Number(payload?.job?.success_detail_count ?? item.success_detail_count ?? 0);
+  const detailCount = Number(payload?.job?.detail_count ?? item.detail_count ?? 0);
   return `
-    <div class="upload-failure-panel">
+    <div class="upload-failure-panel upload-hierarchy-panel">
       <div class="upload-failure-panel-head">
         <div>
-          <div class="cell-primary">上传任务明细</div>
-          <div class="cell-subline"><span class="cell-subitem">每一行对应一个计划和一个视频素材，失败项可单独重试。</span></div>
+          <div class="cell-primary">计划明细</div>
+          <div class="cell-subline"><span class="cell-subitem">先按计划聚合，点开计划后查看该计划下的视频素材。</span></div>
         </div>
         <div class="upload-detail-summary">
-          <span class="status-pill live">完成 ${formatNumber(item.success_detail_count || 0)}</span>
+          <span class="status-pill live">完成 ${formatNumber(successCount)}</span>
           <span class="status-pill system">失败 ${formatNumber(failedCount)}</span>
-          <span class="status-pill neutral">总计 ${formatNumber(detailItems.length)}</span>
+          <span class="status-pill neutral">总计 ${formatNumber(detailCount)}</span>
         </div>
       </div>
-      <div class="upload-failure-list">
-        ${detailItems.map((row) => {
-          const key = uploadFailureKey(item.id, row);
-          const targetAssetId = Number(row?.target_asset_id || 0);
-          const retrying = state.uploadRetryingFailureKey === key;
-          const retryable = Boolean(row?.retryable) || String(row?.status || "").trim().toLowerCase() === "failed";
-          const retryDisabled = !retryable || !targetAssetId || retrying || Number(state.uploadDeletingJobId || 0) === Number(item.id || 0);
-          const planLabel = String(row?.ad_name || "").trim() || (Number(row?.ad_id || 0) ? `计划 ${row.ad_id}` : "--");
-          const advertiserLabel = String(row?.advertiser_name || "").trim() || (Number(row?.advertiser_id || 0) ? `账户 ${row.advertiser_id}` : "--");
-          const statusValue = String(row?.status || "").trim().toLowerCase();
-          const message = normalizeUploadJobNote(row?.message);
-          return `
-            <div class="upload-failure-card ${statusValue === "failed" ? "is-failed" : statusValue === "success" ? "is-success" : ""}">
-              <div class="upload-failure-main">
-                <div class="upload-failure-title-row">
-                  <div class="upload-failure-title">${escapeHtml(planLabel)}</div>
-                  <span class="status-pill ${uploadJobStatusClass(row?.status)}">${escapeHtml(uploadDetailStatusLabel(row?.status))}</span>
-                </div>
-                <div class="upload-failure-meta">
-                  <span>${escapeHtml(uploadDetailStageLabel(row?.stage || row?.failure_stage))}</span>
-                  <span>${escapeHtml(advertiserLabel)}</span>
-                  <span class="mono">PID ${escapeHtml(row?.ad_id || "--")}</span>
-                  <span>${escapeHtml(row?.original_name || "--")}</span>
-                </div>
-              </div>
-              ${renderUploadDetailProgress(row)}
-              <div class="upload-failure-action">
-                ${retryable ? `
-                  <button
-                    type="button"
-                    class="button ghost compact"
-                    data-action="retry-upload-target-asset"
-                    data-job-id="${escapeHtml(item.id)}"
-                    data-target-asset-id="${escapeHtml(targetAssetId)}"
-                    ${retryDisabled ? "disabled" : ""}
-                  >${retrying ? "重试中..." : "重试此计划"}</button>
-                ` : ""}
-              </div>
-              ${message && message !== "--" ? `<div class="upload-failure-reason">${escapeHtml(message)}</div>` : ""}
-            </div>
-          `;
-        }).join("")}
+      ${loading && !payload ? '<div class="empty-cell">正在加载计划明细...</div>' : ""}
+      ${!loading && !plans.length ? '<div class="empty-cell">暂无计划明细。</div>' : ""}
+      ${plans.length ? `
+        <div class="upload-plan-card-list">
+          ${plans.map((target) => renderUploadPlanDetailCard(item, target)).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function renderUploadPlanDetailCard(job, target) {
+  const jobId = Number(job?.id || 0);
+  const targetId = Number(target?.target_id || 0);
+  const expanded = isUploadTargetExpanded(jobId, targetId);
+  const retryKey = uploadTargetDetailKey(jobId, targetId);
+  const retrying = state.uploadRetryingPlanKey === retryKey;
+  const retryable = Boolean(target?.retryable) && Number(target?.failed_detail_count || 0) > 0;
+  const retryDisabled = retrying || !retryable || Number(state.uploadDeletingJobId || 0) === jobId;
+  const statusValue = String(target?.status || "").trim().toLowerCase();
+  const planLabel = String(target?.ad_name || "").trim() || (Number(target?.ad_id || 0) ? `计划 ${target.ad_id}` : "--");
+  const advertiserLabel = String(target?.advertiser_name || "").trim() || (Number(target?.advertiser_id || 0) ? `账户 ${target.advertiser_id}` : "--");
+  const progress = Math.max(0, Math.min(100, Math.round(Number(target?.progress_percent || 0))));
+  const message = normalizeUploadJobNote(target?.message);
+  return `
+    <div class="upload-plan-card ${expanded ? "is-expanded" : ""} ${statusValue === "failed" || statusValue === "partial" ? "is-failed" : statusValue === "success" ? "is-success" : ""}" data-upload-target-row="${escapeHtml(retryKey)}">
+      <div class="upload-plan-card-head">
+        <div class="upload-failure-main">
+          <div class="upload-failure-title-row">
+            <div class="upload-failure-title">${escapeHtml(planLabel)}</div>
+            <span class="status-pill ${uploadJobStatusClass(target?.status)}">${escapeHtml(uploadJobStatusLabel(target?.status))}</span>
+          </div>
+          <div class="upload-failure-meta">
+            <span>${escapeHtml(advertiserLabel)}</span>
+            <span class="mono">PID ${escapeHtml(target?.ad_id || "--")}</span>
+          </div>
+        </div>
       </div>
+      <div class="upload-plan-card-metrics">
+        <div>
+          <span>素材</span>
+          <strong class="mono">${formatNumber(target?.completed_detail_count || 0)} / ${formatNumber(target?.detail_count || 0)}</strong>
+        </div>
+        <div>
+          <span>失败</span>
+          <strong class="mono">${formatNumber(target?.failed_detail_count || 0)}</strong>
+        </div>
+        <div>
+          <span>上传 / 绑定</span>
+          <strong class="mono">${formatNumber(target?.failed_upload_count || 0)} / ${formatNumber(target?.failed_bind_count || 0)}</strong>
+        </div>
+      </div>
+      <div class="upload-detail-progress upload-plan-progress ${statusValue === "failed" || statusValue === "partial" ? "is-failed" : statusValue === "success" ? "is-success" : ""}">
+        <div class="upload-detail-progress-track">
+          <div class="upload-detail-progress-fill" style="width: ${progress}%"></div>
+        </div>
+        <div class="upload-detail-progress-meta">
+          <span>计划处理</span>
+          <span class="mono">${progress}%</span>
+        </div>
+      </div>
+      ${message && message !== "--" ? `<div class="upload-failure-reason">${escapeHtml(message)}</div>` : ""}
+      <div class="upload-failure-action upload-plan-card-actions">
+          <button type="button" class="button ghost compact" data-action="toggle-upload-target-files" data-job-id="${escapeHtml(jobId)}" data-target-id="${escapeHtml(targetId)}">
+            ${expanded ? "收起素材" : "查看素材"}
+          </button>
+          ${retryable ? `<button type="button" class="button ghost compact" data-action="retry-upload-target" data-job-id="${escapeHtml(jobId)}" data-target-id="${escapeHtml(targetId)}" ${retryDisabled ? "disabled" : ""}>${retrying ? "重试中..." : "重试计划"}</button>` : ""}
+      </div>
+      ${expanded ? `<div class="upload-plan-card-files">${renderUploadTargetFileDetails(job, target)}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderUploadTargetFileDetails(job, target) {
+  const jobId = Number(job?.id || 0);
+  const targetId = Number(target?.target_id || 0);
+  const key = uploadTargetDetailKey(jobId, targetId);
+  const payload = uploadTargetFilePayload(jobId, targetId);
+  const rows = Array.isArray(payload?.items) ? payload.items : [];
+  const loading = state.uploadLoadingTargetKey === key;
+  if (loading && !payload) return '<div class="empty-cell">正在加载素材明细...</div>';
+  if (!rows.length) return '<div class="empty-cell">暂无素材明细。</div>';
+  return `
+    <div class="upload-target-file-panel">
+      <table class="data-table compact upload-file-detail-table">
+        <thead>
+          <tr>
+            <th>素材视频</th>
+            <th>进度</th>
+            <th>素材库状态</th>
+            <th>官方素材</th>
+            <th>计划绑定</th>
+            <th>说明</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row) => {
+            const fileId = Number(row?.file_id || 0);
+            const retryKey = uploadTargetFileRetryKey(jobId, targetId, fileId);
+            const retrying = state.uploadRetryingFileKey === retryKey;
+            const retryable = Boolean(row?.retryable) && String(row?.status || "").trim().toLowerCase() === "failed";
+            const retryDisabled = retrying || !retryable || Number(state.uploadDeletingJobId || 0) === jobId;
+            const materialLabel = [
+              String(row?.material_id || "").trim() ? `MID ${row.material_id}` : "",
+              String(row?.video_id || "").trim() ? `VID ${row.video_id}` : "",
+            ].filter(Boolean).join(" / ") || "--";
+            return `
+              <tr>
+                <td>
+                  <div class="entity-cell">
+                    <span class="entity-title">${escapeHtml(row?.original_name || "--")}</span>
+                    <span class="entity-sub">${escapeHtml(formatUploadFileSize(row?.file_size))}</span>
+                  </div>
+                </td>
+                <td>${renderUploadDetailProgress(row)}</td>
+                <td><span class="status-pill ${uploadJobStatusClass(row?.file_asset_status || (materialLabel !== "--" ? "success" : "queued"))}">${escapeHtml(uploadFileAssetStatusLabel(row))}</span></td>
+                <td class="mono">${escapeHtml(materialLabel)}</td>
+                <td><span class="status-pill ${uploadJobStatusClass(row?.target_asset_status || row?.status)}">${escapeHtml(uploadBindStatusLabel(row))}</span></td>
+                <td>${escapeHtml(normalizeUploadJobNote(row?.message))}</td>
+                <td>
+                  ${retryable ? `<button type="button" class="button ghost compact" data-action="retry-upload-target-file" data-job-id="${escapeHtml(jobId)}" data-target-id="${escapeHtml(targetId)}" data-file-id="${escapeHtml(fileId)}" ${retryDisabled ? "disabled" : ""}>${retrying ? "重试中..." : "重试素材"}</button>` : '<span class="cell-subitem">--</span>'}
+                </td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
     </div>
   `;
 }
@@ -2583,7 +2825,7 @@ function renderUploadTargetTable() {
   const payload = state.uploadTargets;
   const items = payload?.plans || [];
   if (!items.length) {
-    uploadTargetTable.innerHTML = '<tbody><tr><td colspan="7" class="empty-cell">先按账户或计划搜索，再勾选目标计划。</td></tr></tbody>';
+    uploadTargetTable.innerHTML = '<tbody><tr><td colspan="8" class="empty-cell">先按账户或计划搜索，再勾选目标计划。</td></tr></tbody>';
     renderUploadTargetSummary();
     return;
   }
@@ -2593,6 +2835,7 @@ function renderUploadTargetTable() {
         <th class="check-col">选择</th>
         <th>账户</th>
         <th>计划</th>
+        <th>投放状态</th>
         <th>商品 / 主播</th>
         <th class="mono">消耗</th>
         <th class="mono">支付</th>
@@ -2612,6 +2855,7 @@ function renderUploadTargetTable() {
                 <span class="entity-sub mono">PID ${escapeHtml(item.ad_id)}</span>
               </div>
             </td>
+            <td>${renderPlanStatusBadge(item)}</td>
             <td>${escapeHtml([item.product_name, item.anchor_name].filter(Boolean).join(" / ") || "--")}</td>
             <td class="mono">${formatMoney(item.stat_cost)}</td>
             <td class="mono">${formatMoney(item.pay_amount)}</td>
@@ -2658,7 +2902,7 @@ function renderUploadJobTable() {
     </thead>
     <tbody>
       ${items.map((item) => {
-        const detailItems = Array.isArray(item.detail_items) ? item.detail_items : [];
+        const targetCount = Number(item.total_targets || 0);
         const expanded = isUploadJobExpanded(item.id);
         const rows = [`
           <tr data-upload-job-row="${escapeHtml(item.id)}">
@@ -2685,8 +2929,8 @@ function renderUploadJobTable() {
               <div class="cell-subline">
                 <span class="cell-subitem">计划失败 ${formatNumber(item.failed_targets || 0)}</span>
               </div>
-              <button type="button" class="button ghost compact upload-failure-toggle" data-action="toggle-upload-failures" data-job-id="${escapeHtml(item.id)}" ${detailItems.length ? "" : "disabled"}>
-                ${expanded ? "收起明细" : `查看 ${formatNumber(detailItems.length)} 条`}
+              <button type="button" class="button ghost compact upload-failure-toggle" data-action="toggle-upload-failures" data-job-id="${escapeHtml(item.id)}" ${targetCount ? "" : "disabled"}>
+                ${expanded ? "收起计划" : `查看计划 ${formatNumber(targetCount)}`}
               </button>
             </td>
             <td>${escapeHtml(item.created_at || "--")}</td>
@@ -2709,7 +2953,7 @@ function renderUploadJobTable() {
             </td>
           </tr>
         `];
-        if (expanded && detailItems.length) {
+        if (expanded && targetCount) {
           rows.push(`
             <tr class="upload-failure-row" data-upload-job-detail-row="${escapeHtml(item.id)}">
               <td colspan="9">${renderUploadJobDetails(item)}</td>
@@ -2737,13 +2981,10 @@ function uploadJobsRenderSignature(items) {
     processed_targets: item?.processed_targets,
     success_targets: item?.success_targets,
     failed_targets: item?.failed_targets,
-    detail_items: (item?.detail_items || []).map((detail) => ({
-      target_asset_id: detail?.target_asset_id,
-      status: detail?.status,
-      stage: detail?.stage,
-      message: detail?.message,
-      video_id: detail?.video_id,
-    })),
+    detail_count: item?.detail_count,
+    completed_detail_count: item?.completed_detail_count,
+    success_detail_count: item?.success_detail_count,
+    failed_detail_count: item?.failed_detail_count,
   })));
 }
 
@@ -2800,7 +3041,7 @@ async function fetchUploadTargets(force = false) {
 
 async function fetchUploadJobs() {
   if (!canUseUploadModule()) return;
-  const response = await fetch("/api/upload/jobs");
+  const response = await fetch("/api/upload/jobs", { cache: "no-store" });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     window.alert(payload.detail || "加载上传任务失败");
@@ -2809,6 +3050,9 @@ async function fetchUploadJobs() {
   const payload = await response.json();
   const items = payload.items || [];
   const nextSignature = uploadJobsRenderSignature(items);
+  if ((state.uploadExpandedJobIds || []).length > 0) {
+    refreshExpandedUploadDetails(false).catch(() => {});
+  }
   if (nextSignature === state.uploadJobsSignature) return;
   const hasExpandedRows = (state.uploadExpandedJobIds || []).length > 0;
   const elapsed = Date.now() - Number(state.uploadJobLastInteractionAt || 0);
@@ -2817,6 +3061,80 @@ async function fetchUploadJobs() {
     return;
   }
   applyUploadJobsRender(items, nextSignature);
+}
+
+async function fetchUploadJobPlans(jobId, force = false) {
+  const normalizedJobId = Number(jobId || 0);
+  if (!normalizedJobId) return null;
+  const key = uploadJobDetailKey(normalizedJobId);
+  if (!force && state.uploadJobPlanDetails?.[key]) return state.uploadJobPlanDetails[key];
+  state.uploadLoadingPlanJobId = normalizedJobId;
+  renderUploadJobTableStable(normalizedJobId);
+  try {
+    const response = await fetch(`/api/upload/jobs/${encodeURIComponent(String(normalizedJobId))}/targets`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(payload.detail || "加载计划明细失败");
+      return null;
+    }
+    state.uploadJobPlanDetails = {
+      ...(state.uploadJobPlanDetails || {}),
+      [key]: payload,
+    };
+    return payload;
+  } finally {
+    state.uploadLoadingPlanJobId = 0;
+    renderUploadJobTableStable(normalizedJobId);
+  }
+}
+
+async function fetchUploadTargetFiles(jobId, targetId, force = false) {
+  const normalizedJobId = Number(jobId || 0);
+  const normalizedTargetId = Number(targetId || 0);
+  if (!normalizedJobId || !normalizedTargetId) return null;
+  const key = uploadTargetDetailKey(normalizedJobId, normalizedTargetId);
+  if (!force && state.uploadJobTargetFileDetails?.[key]) return state.uploadJobTargetFileDetails[key];
+  state.uploadLoadingTargetKey = key;
+  renderUploadJobTableStable(normalizedJobId);
+  try {
+    const response = await fetch(
+      `/api/upload/jobs/${encodeURIComponent(String(normalizedJobId))}/targets/${encodeURIComponent(String(normalizedTargetId))}/files`,
+      { cache: "no-store" },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(payload.detail || "加载素材明细失败");
+      return null;
+    }
+    state.uploadJobTargetFileDetails = {
+      ...(state.uploadJobTargetFileDetails || {}),
+      [key]: payload,
+    };
+    return payload;
+  } finally {
+    state.uploadLoadingTargetKey = "";
+    renderUploadJobTableStable(normalizedJobId);
+  }
+}
+
+async function toggleUploadTargetFiles(jobId, targetId) {
+  const normalizedJobId = Number(jobId || 0);
+  const normalizedTargetId = Number(targetId || 0);
+  if (!normalizedJobId || !normalizedTargetId) return;
+  state.uploadJobLastInteractionAt = Date.now();
+  const key = uploadTargetDetailKey(normalizedJobId, normalizedTargetId);
+  const expanded = new Set(state.uploadExpandedTargetKeys || []);
+  const shouldOpen = !expanded.has(key);
+  if (shouldOpen) {
+    expanded.add(key);
+  } else {
+    expanded.delete(key);
+  }
+  state.uploadExpandedTargetKeys = Array.from(expanded);
+  renderUploadJobTableStable(normalizedJobId);
+  if (shouldOpen && !uploadTargetFilePayload(normalizedJobId, normalizedTargetId)) {
+    await fetchUploadTargetFiles(normalizedJobId, normalizedTargetId);
+  }
 }
 
 function setUploadJobLocalProgress(jobId, percent, message = "") {
@@ -2860,17 +3178,29 @@ function uploadMaterialJobFileToServer(jobId, file, fileIndex, totalFiles, total
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `/api/upload/jobs/${encodeURIComponent(String(jobId))}/files`);
     let lastLoaded = 0;
+    const progressKey = String(fileIndex);
+    const updateOverallProgress = () => {
+      const inflightBytes = Object.values(progressState.inflightBytes || {}).reduce(
+        (sum, value) => sum + Number(value || 0),
+        0,
+      );
+      const loadedBytes = Number(progressState.completedBytes || 0) + inflightBytes;
+      const percent = totalBytes > 0
+        ? (loadedBytes / totalBytes) * 100
+        : ((Math.max(0, fileIndex - 1) / Math.max(1, totalFiles)) * 100);
+      const label = `正在上传视频到服务器 ${Math.max(0, Math.min(100, percent)).toFixed(0)}%`;
+      setInlineFeedback(uploadJobStatus, label, "neutral");
+      setUploadJobLocalProgress(jobId, percent, label);
+    };
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
         lastLoaded = Number(event.loaded || 0);
       }
-      const loadedBytes = Number(progressState.completedBytes || 0) + lastLoaded;
-      const percent = totalBytes > 0
-        ? (loadedBytes / totalBytes) * 100
-        : ((Math.max(0, fileIndex - 1) / Math.max(1, totalFiles)) * 100);
-      const label = `正在上传视频到服务器 ${fileIndex}/${totalFiles}，${Math.max(0, Math.min(100, percent)).toFixed(0)}%`;
-      setInlineFeedback(uploadJobStatus, label, "neutral");
-      setUploadJobLocalProgress(jobId, percent, label);
+      progressState.inflightBytes = {
+        ...(progressState.inflightBytes || {}),
+        [progressKey]: lastLoaded,
+      };
+      updateOverallProgress();
     };
     xhr.onload = () => {
       let payload = {};
@@ -2880,9 +3210,15 @@ function uploadMaterialJobFileToServer(jobId, file, fileIndex, totalFiles, total
         payload = {};
       }
       if (xhr.status < 200 || xhr.status >= 300) {
+        const inflightBytes = { ...(progressState.inflightBytes || {}) };
+        delete inflightBytes[progressKey];
+        progressState.inflightBytes = inflightBytes;
         reject(new Error(payload.detail || "上传视频到服务器失败"));
         return;
       }
+      const inflightBytes = { ...(progressState.inflightBytes || {}) };
+      delete inflightBytes[progressKey];
+      progressState.inflightBytes = inflightBytes;
       progressState.completedBytes = Number(progressState.completedBytes || 0) + Number(file?.size || lastLoaded || 0);
       const percent = totalBytes > 0
         ? (Number(progressState.completedBytes || 0) / totalBytes) * 100
@@ -2890,11 +3226,365 @@ function uploadMaterialJobFileToServer(jobId, file, fileIndex, totalFiles, total
       setUploadJobLocalProgress(jobId, percent, `已上传视频到服务器 ${fileIndex}/${totalFiles}`);
       resolve(payload);
     };
-    xhr.onerror = () => reject(new Error("上传视频到服务器失败"));
-    xhr.onabort = () => reject(new Error("上传视频到服务器已取消"));
+    xhr.onerror = () => {
+      const inflightBytes = { ...(progressState.inflightBytes || {}) };
+      delete inflightBytes[progressKey];
+      progressState.inflightBytes = inflightBytes;
+      reject(new Error("上传视频到服务器失败"));
+    };
+    xhr.onabort = () => {
+      const inflightBytes = { ...(progressState.inflightBytes || {}) };
+      delete inflightBytes[progressKey];
+      progressState.inflightBytes = inflightBytes;
+      reject(new Error("上传视频到服务器已取消"));
+    };
     xhr.send(form);
   });
 }
+
+async function uploadMaterialJobFilesToServer(jobId, filesToUpload, maxConcurrency = 3) {
+  const normalizedFiles = Array.isArray(filesToUpload) ? filesToUpload.slice() : [];
+  if (!normalizedFiles.length) return;
+  const totalBytes = normalizedFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
+  const progressState = { completedBytes: 0, inflightBytes: {} };
+  const workerCount = Math.max(1, Math.min(Number(maxConcurrency || 1), normalizedFiles.length));
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < normalizedFiles.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      await uploadMaterialJobFileToServer(
+        jobId,
+        normalizedFiles[currentIndex],
+        currentIndex + 1,
+        normalizedFiles.length,
+        totalBytes,
+        progressState,
+      );
+      await fetchUploadJobs();
+    }
+  }
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
+
+const UPLOAD_SERVER_CHUNK_SIZE = 8 * 1024 * 1024;
+const UPLOAD_SERVER_CHUNK_RETRIES = 4;
+const UPLOAD_VIDEO_MIN_DURATION_SECONDS = 4;
+const UPLOAD_VIDEO_MAX_DURATION_SECONDS = 300;
+const UPLOAD_VIDEO_MAX_BYTES = 1000 * 1000 * 1000;
+const UPLOAD_VIDEO_ALLOWED_EXTENSIONS = new Set(["mp4", "mpeg", "mpg", "3gp", "3gpp", "avi"]);
+const UPLOAD_VIDEO_ALLOWED_ASPECTS = new Set(["9:16", "16:9"]);
+const UPLOAD_VIDEO_DIMENSION_LIMITS = {
+  "16:9": { minWidth: 1280, minHeight: 720, maxWidth: 2560, maxHeight: 1440 },
+  "9:16": { minWidth: 720, minHeight: 1280, maxWidth: 1440, maxHeight: 2560 },
+};
+
+function uploadVideoGcd(left, right) {
+  let a = Math.abs(Number(left || 0));
+  let b = Math.abs(Number(right || 0));
+  while (b) {
+    const next = a % b;
+    a = b;
+    b = next;
+  }
+  return a || 1;
+}
+
+function uploadVideoRatioText(width, height) {
+  const normalizedWidth = Math.max(0, Math.round(Number(width || 0)));
+  const normalizedHeight = Math.max(0, Math.round(Number(height || 0)));
+  if (!normalizedWidth || !normalizedHeight) return "";
+  const divisor = uploadVideoGcd(normalizedWidth, normalizedHeight);
+  return `${normalizedWidth / divisor}:${normalizedHeight / divisor}`;
+}
+
+function uploadVideoDimensionError(ratio, width, height) {
+  const limit = UPLOAD_VIDEO_DIMENSION_LIMITS[String(ratio || "")];
+  const normalizedWidth = Math.max(0, Math.round(Number(width || 0)));
+  const normalizedHeight = Math.max(0, Math.round(Number(height || 0)));
+  if (!limit || !normalizedWidth || !normalizedHeight) return "";
+  if (
+    normalizedWidth < limit.minWidth ||
+    normalizedHeight < limit.minHeight ||
+    normalizedWidth > limit.maxWidth ||
+    normalizedHeight > limit.maxHeight
+  ) {
+    return `\u5206\u8fa8\u7387 ${normalizedWidth}x${normalizedHeight} \u4e0d\u5728 ${limit.minWidth}x${limit.minHeight}-${limit.maxWidth}x${limit.maxHeight} \u8303\u56f4`;
+  }
+  return "";
+}
+
+function loadUploadBrowserVideoMetadata(file) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    const url = URL.createObjectURL(file);
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      video.removeAttribute("src");
+      video.load();
+    };
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      const payload = {
+        width: Number(video.videoWidth || 0),
+        height: Number(video.videoHeight || 0),
+        duration: Number(video.duration || 0),
+      };
+      cleanup();
+      resolve(payload);
+    };
+    video.onerror = () => {
+      cleanup();
+      reject(new Error("浏览器无法读取视频元数据，请重新导出为 MP4 后上传"));
+    };
+    video.src = url;
+  });
+}
+
+async function validateUploadFilesForBrowser(files) {
+  const normalizedFiles = Array.isArray(files) ? files.slice() : [];
+  const errors = [];
+  for (const file of normalizedFiles) {
+    const name = String(file?.name || "video");
+    const extension = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
+    if (!UPLOAD_VIDEO_ALLOWED_EXTENSIONS.has(extension)) {
+      errors.push(`${name}: 仅支持 MP4/MPEG/3GP/AVI 视频`);
+      continue;
+    }
+    const size = Number(file?.size || 0);
+    if (size <= 0) {
+      errors.push(`${name}: 文件为空`);
+      continue;
+    }
+    if (size > UPLOAD_VIDEO_MAX_BYTES) {
+      errors.push(`${name}: \u6587\u4ef6\u8d85\u8fc7 ${(UPLOAD_VIDEO_MAX_BYTES / 1000 / 1000).toFixed(0)} MB`);
+      continue;
+    }
+    try {
+      const meta = await loadUploadBrowserVideoMetadata(file);
+      const ratio = uploadVideoRatioText(meta.width, meta.height);
+      if (!meta.width || !meta.height) {
+        errors.push(`${name}: 无法读取视频宽高`);
+      } else if (!UPLOAD_VIDEO_ALLOWED_ASPECTS.has(ratio)) {
+        errors.push(`${name}: 宽高比 ${ratio || "-"} 不符合素材上传规格`);
+      } else {
+        const dimensionError = uploadVideoDimensionError(ratio, meta.width, meta.height);
+        if (dimensionError) errors.push(`${name}: ${dimensionError}`);
+      }
+      if (!Number.isFinite(meta.duration) || meta.duration <= 0) {
+        errors.push(`${name}: 无法读取视频时长`);
+      } else if (meta.duration < UPLOAD_VIDEO_MIN_DURATION_SECONDS) {
+        errors.push(`${name}: \u65f6\u957f ${meta.duration.toFixed(1)}s \u4f4e\u4e8e ${UPLOAD_VIDEO_MIN_DURATION_SECONDS}s`);
+      } else if (meta.duration > UPLOAD_VIDEO_MAX_DURATION_SECONDS) {
+        errors.push(`${name}: 时长 ${meta.duration.toFixed(1)}s 超过 ${UPLOAD_VIDEO_MAX_DURATION_SECONDS}s`);
+      }
+    } catch (error) {
+      errors.push(`${name}: ${error instanceof Error ? error.message : "视频元数据读取失败"}`);
+    }
+  }
+  return { ok: errors.length === 0, errors, files: normalizedFiles };
+}
+
+function uploadServerChunkSize(file) {
+  const size = Number(file?.size || 0);
+  if (size >= 1024 * 1024 * 1024) return 16 * 1024 * 1024;
+  return UPLOAD_SERVER_CHUNK_SIZE;
+}
+
+function uploadServerChunkBytes(file, chunkIndex, chunkSize) {
+  const start = Number(chunkIndex || 0) * Number(chunkSize || UPLOAD_SERVER_CHUNK_SIZE);
+  const size = Number(file?.size || 0);
+  if (start >= size) return 0;
+  return Math.min(Number(chunkSize || UPLOAD_SERVER_CHUNK_SIZE), size - start);
+}
+
+function markUploadServerChunkDone(jobId, fileIndex, chunkIndex, bytes, totalBytes, progressState, message = "") {
+  const key = `${jobId}:${fileIndex}:${chunkIndex}`;
+  if (!progressState.completedChunkKeys) progressState.completedChunkKeys = new Set();
+  if (!progressState.completedChunkKeys.has(key)) {
+    progressState.completedChunkKeys.add(key);
+    progressState.completedBytes = Number(progressState.completedBytes || 0) + Number(bytes || 0);
+  }
+  const percent = totalBytes > 0 ? (Number(progressState.completedBytes || 0) / totalBytes) * 100 : 0;
+  const label = message || `uploading videos to server ${Math.max(0, Math.min(100, percent)).toFixed(0)}%`;
+  setInlineFeedback(uploadJobStatus, label, "neutral");
+  setUploadJobLocalProgress(jobId, percent, label);
+}
+
+async function fetchUploadServerChunkStatus(jobId, file, fileIndex, totalChunks, chunkSize) {
+  const params = new URLSearchParams({
+    file_index: String(fileIndex),
+    file_name: String(file?.name || `video-${fileIndex}.mp4`),
+    file_size: String(Number(file?.size || 0)),
+    total_chunks: String(totalChunks),
+    chunk_size: String(chunkSize),
+  });
+  const response = await fetch(`/api/upload/jobs/${encodeURIComponent(String(jobId))}/files/chunks?${params.toString()}`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || "failed to check uploaded chunks");
+  return payload;
+}
+
+function uploadMaterialJobChunkToServer(jobId, file, fileIndex, chunkIndex, totalChunks, totalBytes, chunkSize, progressState) {
+  return new Promise((resolve, reject) => {
+    const start = chunkIndex * chunkSize;
+    const end = Math.min(Number(file?.size || 0), start + chunkSize);
+    const chunk = file.slice(start, end);
+    const form = new FormData();
+    form.append("file_index", String(fileIndex));
+    form.append("chunk_index", String(chunkIndex));
+    form.append("total_chunks", String(totalChunks));
+    form.append("file_name", String(file?.name || `video-${fileIndex}.mp4`));
+    form.append("file_size", String(Number(file?.size || 0)));
+    form.append("file_last_modified", String(Number(file?.lastModified || 0)));
+    form.append("mime_type", String(file?.type || ""));
+    form.append("chunk_size", String(chunkSize));
+    form.append("chunk", chunk, String(file?.name || `video-${fileIndex}.mp4`));
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/upload/jobs/${encodeURIComponent(String(jobId))}/files/chunks`);
+    let lastLoaded = 0;
+    const progressKey = `${fileIndex}:${chunkIndex}`;
+    const updateOverallProgress = () => {
+      const inflightBytes = Object.values(progressState.inflightBytes || {}).reduce(
+        (sum, value) => sum + Number(value || 0),
+        0,
+      );
+      const loadedBytes = Number(progressState.completedBytes || 0) + inflightBytes;
+      const percent = totalBytes > 0 ? (loadedBytes / totalBytes) * 100 : 0;
+      const label = `uploading videos to server ${Math.max(0, Math.min(100, percent)).toFixed(0)}%`;
+      setInlineFeedback(uploadJobStatus, label, "neutral");
+      setUploadJobLocalProgress(jobId, percent, label);
+    };
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) lastLoaded = Number(event.loaded || 0);
+      progressState.inflightBytes = {
+        ...(progressState.inflightBytes || {}),
+        [progressKey]: lastLoaded,
+      };
+      updateOverallProgress();
+    };
+    xhr.onload = () => {
+      let payload = {};
+      try {
+        payload = JSON.parse(xhr.responseText || "{}");
+      } catch (error) {
+        payload = {};
+      }
+      const inflightBytes = { ...(progressState.inflightBytes || {}) };
+      delete inflightBytes[progressKey];
+      progressState.inflightBytes = inflightBytes;
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(payload.detail || "upload chunk to server failed"));
+        return;
+      }
+      markUploadServerChunkDone(
+        jobId,
+        fileIndex,
+        chunkIndex,
+        Number(chunk?.size || lastLoaded || 0),
+        totalBytes,
+        progressState,
+      );
+      resolve(payload);
+    };
+    xhr.onerror = () => {
+      const inflightBytes = { ...(progressState.inflightBytes || {}) };
+      delete inflightBytes[progressKey];
+      progressState.inflightBytes = inflightBytes;
+      reject(new Error("upload chunk to server failed"));
+    };
+    xhr.onabort = () => {
+      const inflightBytes = { ...(progressState.inflightBytes || {}) };
+      delete inflightBytes[progressKey];
+      progressState.inflightBytes = inflightBytes;
+      reject(new Error("upload chunk to server aborted"));
+    };
+    xhr.send(form);
+  });
+}
+
+async function uploadMaterialJobFileToServerChunked(jobId, file, fileIndex, totalFiles, totalBytes, progressState) {
+  const chunkSize = uploadServerChunkSize(file);
+  const totalChunks = Math.max(1, Math.ceil(Number(file?.size || 0) / chunkSize));
+  const statusPayload = await fetchUploadServerChunkStatus(jobId, file, fileIndex, totalChunks, chunkSize);
+  const uploadedChunks = new Set((statusPayload.uploaded_chunks || []).map((item) => Number(item)));
+  if (statusPayload.file_completed) {
+    for (let index = 0; index < totalChunks; index += 1) {
+      markUploadServerChunkDone(
+        jobId,
+        fileIndex,
+        index,
+        uploadServerChunkBytes(file, index, chunkSize),
+        totalBytes,
+        progressState,
+        `server upload ${fileIndex}/${totalFiles}`,
+      );
+    }
+    return statusPayload;
+  }
+  for (const index of uploadedChunks) {
+    markUploadServerChunkDone(
+      jobId,
+      fileIndex,
+      index,
+      uploadServerChunkBytes(file, index, chunkSize),
+      totalBytes,
+      progressState,
+      `resume server upload ${fileIndex}/${totalFiles}`,
+    );
+  }
+  let lastPayload = statusPayload;
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    if (uploadedChunks.has(chunkIndex)) continue;
+    let attempt = 0;
+    for (;;) {
+      try {
+        lastPayload = await uploadMaterialJobChunkToServer(
+          jobId,
+          file,
+          fileIndex,
+          chunkIndex,
+          totalChunks,
+          totalBytes,
+          chunkSize,
+          progressState,
+        );
+        break;
+      } catch (error) {
+        attempt += 1;
+        if (attempt >= UPLOAD_SERVER_CHUNK_RETRIES) throw error;
+        await new Promise((resolve) => window.setTimeout(resolve, 800 * attempt));
+      }
+    }
+  }
+  return lastPayload;
+}
+
+async function completeUploadMaterialJobFiles(jobId) {
+  const response = await fetch(`/api/upload/jobs/${encodeURIComponent(String(jobId))}/files/complete`, { method: "POST" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || "failed to complete server upload");
+  return payload;
+}
+
+uploadMaterialJobFilesToServer = async function uploadMaterialJobFilesToServerChunked(jobId, filesToUpload, maxConcurrency = 1) {
+  const normalizedFiles = Array.isArray(filesToUpload) ? filesToUpload.slice() : [];
+  if (!normalizedFiles.length) return;
+  const totalBytes = normalizedFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
+  const progressState = { completedBytes: 0, inflightBytes: {}, completedChunkKeys: new Set() };
+  for (let index = 0; index < normalizedFiles.length; index += 1) {
+    await uploadMaterialJobFileToServerChunked(
+      jobId,
+      normalizedFiles[index],
+      index + 1,
+      normalizedFiles.length,
+      totalBytes,
+      progressState,
+    );
+    await fetchUploadJobs();
+  }
+  await completeUploadMaterialJobFiles(jobId);
+};
 
 async function retryUploadJob(jobId) {
   const normalizedJobId = Number(jobId || 0);
@@ -2918,6 +3608,66 @@ async function retryUploadJob(jobId) {
     await fetchUploadJobs();
   } finally {
     state.uploadRetryingJobId = null;
+    renderUploadJobTableStable(normalizedJobId);
+  }
+}
+
+async function retryUploadTarget(jobId, targetId) {
+  const normalizedJobId = Number(jobId || 0);
+  const normalizedTargetId = Number(targetId || 0);
+  if (!normalizedJobId || !normalizedTargetId) return;
+  const retryKey = uploadTargetDetailKey(normalizedJobId, normalizedTargetId);
+  if (state.uploadRetryingPlanKey === retryKey) return;
+  state.uploadRetryingPlanKey = retryKey;
+  renderUploadJobTableStable(normalizedJobId);
+  setInlineFeedback(uploadJobStatus, `正在重试计划 ${normalizedTargetId}…`, "neutral");
+  try {
+    const response = await fetch(
+      `/api/upload/jobs/${encodeURIComponent(String(normalizedJobId))}/targets/${encodeURIComponent(String(normalizedTargetId))}/retry`,
+      { method: "POST" },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(payload.detail || "重试该计划失败");
+      setInlineFeedback(uploadJobStatus, "重试该计划失败。", "warn");
+      return;
+    }
+    setInlineFeedback(uploadJobStatus, `计划已在任务 #${payload.id || normalizedJobId} 内重新入队。`, "success");
+    await fetchUploadJobs();
+    await fetchUploadJobPlans(normalizedJobId, true);
+  } finally {
+    state.uploadRetryingPlanKey = "";
+    renderUploadJobTableStable(normalizedJobId);
+  }
+}
+
+async function retryUploadTargetFile(jobId, targetId, fileId) {
+  const normalizedJobId = Number(jobId || 0);
+  const normalizedTargetId = Number(targetId || 0);
+  const normalizedFileId = Number(fileId || 0);
+  if (!normalizedJobId || !normalizedTargetId || !normalizedFileId) return;
+  const retryKey = uploadTargetFileRetryKey(normalizedJobId, normalizedTargetId, normalizedFileId);
+  if (state.uploadRetryingFileKey === retryKey) return;
+  state.uploadRetryingFileKey = retryKey;
+  renderUploadJobTableStable(normalizedJobId);
+  setInlineFeedback(uploadJobStatus, `正在重试素材 ${normalizedFileId}…`, "neutral");
+  try {
+    const response = await fetch(
+      `/api/upload/jobs/${encodeURIComponent(String(normalizedJobId))}/targets/${encodeURIComponent(String(normalizedTargetId))}/files/${encodeURIComponent(String(normalizedFileId))}/retry`,
+      { method: "POST" },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      window.alert(payload.detail || "重试该素材失败");
+      setInlineFeedback(uploadJobStatus, "重试该素材失败。", "warn");
+      return;
+    }
+    setInlineFeedback(uploadJobStatus, `素材已在任务 #${payload.id || normalizedJobId} 内重新入队。`, "success");
+    await fetchUploadJobs();
+    await fetchUploadJobPlans(normalizedJobId, true);
+    await fetchUploadTargetFiles(normalizedJobId, normalizedTargetId, true);
+  } finally {
+    state.uploadRetryingFileKey = "";
     renderUploadJobTableStable(normalizedJobId);
   }
 }
@@ -5343,9 +6093,9 @@ function fillCommentAccountFilter(accounts) {
   }
 }
 
-function renderCommentPager(totalRows, currentPage, totalPages, startIndex, endIndex) {
+function renderCommentPager(totalRows, currentPage, totalPages, startIndex, endIndex, pageSize = COMMENT_PAGE_SIZE) {
   if (!commentTablePager) return;
-  if (totalRows <= COMMENT_PAGE_SIZE) {
+  if (totalRows <= pageSize) {
     commentTablePager.innerHTML = "";
     commentTablePager.classList.add("hidden");
     return;
@@ -5379,11 +6129,15 @@ function renderCommentPager(totalRows, currentPage, totalPages, startIndex, endI
     </div>
   `;
   commentTablePager.querySelectorAll("button[data-page]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const nextPage = Number(button.dataset.page || 0);
       if (!nextPage || nextPage === state.commentPage) return;
       state.commentPage = nextPage;
-      renderCommentTable(commentRowsForCurrentFilter());
+      try {
+        await refreshCommentSection(false);
+      } catch (error) {
+        window.alert(error.message || "评论分页加载失败");
+      }
     });
   });
 }
@@ -5647,25 +6401,12 @@ async function hideComment(row) {
 }
 
 
-function renderCommentTable(rows) {
+function renderCommentTable(payload) {
   if (!commentTable) return;
+  const normalizedPayload = Array.isArray(payload) ? { items: payload } : (payload || {});
   commentTable.classList.add("comment-table");
-  const query = String(commentSearch?.value || "").trim().toLowerCase();
-  const visibleRows = rows.filter((row) => {
-    const haystack = [
-      row.text,
-      row.comment_user_name,
-      row.comment_user_id,
-      row.item_title,
-      row.promotion_display_name,
-      row.promotion_name,
-      row.material_display_name,
-      row.advertiser_name,
-      row.comment_anchor_name,
-      row.top_anchor_name,
-    ].join(" ").toLowerCase();
-    return haystack.includes(query);
-  });
+  const pageRows = Array.isArray(normalizedPayload.items) ? normalizedPayload.items : [];
+  const pagination = normalizedPayload.pagination || {};
   const columns = [
     { key: "text", label: "评论内容", sortable: true },
     { key: "actions", label: "操作", sortable: false },
@@ -5698,12 +6439,12 @@ function renderCommentTable(rows) {
     "160px",
     "150px",
   ];
-  const sortedRows = sortRows(visibleRows, state.commentSort);
-  const totalRows = sortedRows.length;
-  const totalPages = Math.max(1, Math.ceil(totalRows / COMMENT_PAGE_SIZE));
-  const currentPage = Math.min(Math.max(Number(state.commentPage) || 1, 1), totalPages);
-  const pageStart = totalRows ? (currentPage - 1) * COMMENT_PAGE_SIZE : 0;
-  const pageRows = sortedRows.slice(pageStart, pageStart + COMMENT_PAGE_SIZE);
+  const totalRows = Number(pagination.total_count || normalizedPayload?.meta?.comment_count || pageRows.length || 0);
+  const totalPages = Math.max(1, Number(pagination.total_pages || (totalRows > 0 ? Math.ceil(totalRows / COMMENT_PAGE_SIZE) : 1)));
+  const currentPage = Math.min(Math.max(Number(pagination.page || state.commentPage) || 1, 1), totalPages);
+  const pageStart = Number(pagination.start_index || (totalRows > 0 ? (currentPage - 1) * COMMENT_PAGE_SIZE + 1 : 0));
+  const pageEnd = Number(pagination.end_index || (pageStart > 0 ? pageStart + pageRows.length - 1 : pageRows.length));
+  const effectivePageSize = Number(pagination.page_size || COMMENT_PAGE_SIZE || 50);
   state.commentPage = currentPage;
   commentTable.innerHTML = `
     <colgroup>
@@ -5775,20 +6516,25 @@ function renderCommentTable(rows) {
     </tbody>
   `;
   commentTable.querySelectorAll("th[data-key]").forEach((header) => {
-    header.addEventListener("click", () => {
+    header.addEventListener("click", async () => {
       const key = header.dataset.key;
       const column = columns.find((item) => item.key === key);
       if (!column || !column.sortable) return;
       state.commentSort = toggleSort(state.commentSort, key);
       saveSort("comment-sort", state.commentSort);
-      renderCommentTable(rows);
+      state.commentPage = 1;
+      try {
+        await refreshCommentSection(false);
+      } catch (error) {
+        window.alert(error.message || "评论排序失败");
+      }
     });
   });
   commentTable.querySelectorAll('[data-action="reply-comment"]').forEach((button) => {
     button.addEventListener("click", () => {
       const commentId = String(button.dataset.commentId || "");
       const advertiserId = Number(button.dataset.advertiserId || 0);
-      const row = visibleRows.find(
+      const row = pageRows.find(
         (item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId,
       );
       if (!row) return;
@@ -5799,7 +6545,7 @@ function renderCommentTable(rows) {
     button.addEventListener("click", async () => {
       const commentId = String(button.dataset.commentId || "");
       const advertiserId = Number(button.dataset.advertiserId || 0);
-      const row = visibleRows.find(
+      const row = pageRows.find(
         (item) => String(item.comment_id || "") === commentId && Number(item.advertiser_id || 0) === advertiserId,
       );
       if (!row) return;
@@ -5814,8 +6560,9 @@ function renderCommentTable(rows) {
     totalRows,
     currentPage,
     totalPages,
-    totalRows ? pageStart + 1 : 0,
-    pageStart + pageRows.length,
+    pageStart,
+    pageEnd,
+    effectivePageSize,
   );
 }
 
@@ -5940,10 +6687,57 @@ async function fetchTeamMaterialRankings(force = false) {
   }
 }
 
-async function fetchComments(force = false) {
-  const filter = sectionFilter("comment");
-  const advertiserId = commentRequestAdvertiserId();
-  const cacheKey = commentCacheKey(filter, advertiserId);
+function scheduleCommentPrefetch(task) {
+  if (typeof task !== "function") return;
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(() => {
+      task();
+    }, { timeout: 1200 });
+    return;
+  }
+  window.setTimeout(task, 400);
+}
+
+function shouldEagerPrefetchCommentPages(filter) {
+  const mode = normalizeRangeFilter(filter).mode;
+  return mode === "day" || mode === "yesterday";
+}
+
+function queueCommentPrefetch(payload, filter, advertiserId, requestState) {
+  const totalPages = Math.max(1, Number(payload?.pagination?.total_pages || 1));
+  if (Number(requestState.page || 1) !== 1 || totalPages <= 1) return;
+  if (!shouldEagerPrefetchCommentPages(filter)) return;
+  const lastPage = Math.min(totalPages, COMMENT_PREFETCH_PAGE_COUNT);
+  for (let page = 2; page <= lastPage; page += 1) {
+    const nextState = {
+      ...requestState,
+      page,
+    };
+    const nextKey = commentCacheKey(filter, advertiserId, nextState);
+    const nextCachedPayload = state.commentPayloads[nextKey];
+    const nextCachedAt = Number(state.commentPayloadFetchedAt[nextKey] || 0);
+    if (nextCachedPayload && nextCachedAt > 0 && Date.now() - nextCachedAt < COMMENT_CACHE_TTL_MS) {
+      continue;
+    }
+    if (state.commentRequestPromises[nextKey]) {
+      continue;
+    }
+    scheduleCommentPrefetch(() => {
+      fetchComments(false, {
+        ...nextState,
+        prefetch: true,
+        filter,
+        advertiserId,
+      }).catch(() => {});
+    });
+  }
+}
+
+async function fetchComments(force = false, overrides = {}) {
+  const filter = normalizeRangeFilter(overrides.filter || sectionFilter("comment"));
+  const advertiserId = Number(overrides.advertiserId ?? commentRequestAdvertiserId()) || 0;
+  const requestState = commentRequestState(overrides);
+  const cacheKey = commentCacheKey(filter, advertiserId, requestState);
   const cachedPayload = state.commentPayloads[cacheKey];
   const cachedAt = Number(state.commentPayloadFetchedAt[cacheKey] || 0);
   if (!force && cachedPayload && cachedAt > 0 && Date.now() - cachedAt < COMMENT_CACHE_TTL_MS) {
@@ -5955,6 +6749,13 @@ async function fetchComments(force = false) {
   const requestPromise = (async () => {
     const params = appendDisplayScopeParam(new URLSearchParams());
     params.set("range", filter.mode);
+    params.set("page", String(requestState.page));
+    params.set("page_size", String(requestState.pageSize));
+    params.set("sort_key", requestState.sortKey);
+    params.set("sort_dir", requestState.sortDir);
+    if (requestState.search) {
+      params.set("search", requestState.search);
+    }
     if (filter.mode === "custom") {
       params.set("start_date", filter.start);
       params.set("end_date", filter.end);
@@ -5973,6 +6774,9 @@ async function fetchComments(force = false) {
     const payload = await response.json();
     state.commentPayloads[cacheKey] = payload;
     state.commentPayloadFetchedAt[cacheKey] = Date.now();
+    if (!overrides.prefetch) {
+      queueCommentPrefetch(payload, filter, advertiserId, requestState);
+    }
     return payload;
   })();
   state.commentRequestPromises[cacheKey] = requestPromise;
@@ -8666,10 +9470,11 @@ async function refreshCommentSection(force = false) {
   syncSectionRangeControls("comment");
   const payload = await fetchComments(force);
   fillCommentAccountFilter(payload?.accounts || []);
-  renderCommentTable(payload?.items || []);
+  renderCommentTable(payload || {});
   const meta = payload?.meta || {};
+  const pagination = payload?.pagination || {};
   const rangeText = formatDateWindowMeta(payload);
-  const commentCount = Array.isArray(payload?.items) ? payload.items.length : Number(meta.comment_count || 0);
+  const commentCount = Number(pagination.total_count || meta.comment_count || (Array.isArray(payload?.items) ? payload.items.length : 0));
   const accountCount = Array.isArray(payload?.accounts) ? payload.accounts.length : Number(meta.account_count || 0);
   const visibleCount = Number(meta.visible_count || 0);
   const visibleSuffix = visibleCount > 0 && visibleCount !== commentCount ? ` · 可见 ${formatNumber(visibleCount)} 条` : "";
@@ -8872,7 +9677,9 @@ function bindInputs() {
   }, MATERIAL_SEARCH_DEBOUNCE_MS);
   const debouncedCommentSearch = debounce(() => {
     state.commentPage = 1;
-    renderCommentTable(commentRowsForCurrentFilter());
+    refreshCommentSection(false).catch((error) => {
+      window.alert(error.message || "评论搜索失败");
+    });
   }, COMMENT_SEARCH_DEBOUNCE_MS);
   const debouncedOperatorMaterialSearch = debounce(() => {
     if (!state.selectedUserId || !isAdmin()) {
@@ -9080,16 +9887,34 @@ function bindInputs() {
   });
   uploadJobTable?.addEventListener("click", async (event) => {
     const retryButton = event.target.closest('[data-action="retry-upload-job"]');
+    const retryTargetButton = event.target.closest('[data-action="retry-upload-target"]');
+    const retryTargetFileButton = event.target.closest('[data-action="retry-upload-target-file"]');
     const retryTargetAssetButton = event.target.closest('[data-action="retry-upload-target-asset"]');
+    const toggleTargetFilesButton = event.target.closest('[data-action="toggle-upload-target-files"]');
     const toggleFailuresButton = event.target.closest('[data-action="toggle-upload-failures"]');
     const deleteButton = event.target.closest('[data-action="delete-upload-job"]');
-    const button = retryButton || retryTargetAssetButton || toggleFailuresButton || deleteButton;
+    const button = retryButton || retryTargetButton || retryTargetFileButton || retryTargetAssetButton || toggleTargetFilesButton || toggleFailuresButton || deleteButton;
     if (!button) return;
     const jobId = Number(button.dataset.jobId || 0);
     if (!jobId) return;
     if (toggleFailuresButton) {
-      toggleUploadJobFailures(jobId);
-      renderUploadJobTableStable(jobId);
+      await toggleUploadJobFailures(jobId);
+      return;
+    }
+    if (toggleTargetFilesButton) {
+      await toggleUploadTargetFiles(jobId, Number(toggleTargetFilesButton.dataset.targetId || 0));
+      return;
+    }
+    if (retryTargetFileButton) {
+      await retryUploadTargetFile(
+        jobId,
+        Number(retryTargetFileButton.dataset.targetId || 0),
+        Number(retryTargetFileButton.dataset.fileId || 0),
+      );
+      return;
+    }
+    if (retryTargetButton) {
+      await retryUploadTarget(jobId, Number(retryTargetButton.dataset.targetId || 0));
       return;
     }
     if (retryTargetAssetButton) {
@@ -9102,8 +9927,19 @@ function bindInputs() {
     }
     await deleteUploadJob(jobId);
   });
-  uploadFileInput?.addEventListener("change", () => {
-    state.uploadFiles = Array.from(uploadFileInput.files || []);
+  uploadFileInput?.addEventListener("change", async () => {
+    const selectedFiles = Array.from(uploadFileInput.files || []);
+    const validation = await validateUploadFilesForBrowser(selectedFiles);
+    if (!validation.ok) {
+      const message = validation.errors.slice(0, 5).join("\n");
+      window.alert(message);
+      setInlineFeedback(uploadJobStatus, message, "error");
+      state.uploadFiles = [];
+      if (uploadFileInput) uploadFileInput.value = "";
+      renderUploadFileSummary();
+      return;
+    }
+    state.uploadFiles = validation.files;
     renderUploadFileSummary();
   });
   uploadJobForm?.addEventListener("submit", async (event) => {
@@ -9116,7 +9952,14 @@ function bindInputs() {
       window.alert("请先选择视频文件");
       return;
     }
-    const filesToUpload = state.uploadFiles.slice();
+    const browserValidation = await validateUploadFilesForBrowser(state.uploadFiles);
+    if (!browserValidation.ok) {
+      const message = browserValidation.errors.slice(0, 5).join("\n");
+      window.alert(message);
+      setInlineFeedback(uploadJobStatus, message, "error");
+      return;
+    }
+    const filesToUpload = browserValidation.files.slice();
     const form = new FormData();
     form.set("scope", String(uploadScopeSelect?.value || "plan"));
     form.set("query_text", String(uploadKeywordInput?.value || "").trim());
@@ -9142,19 +9985,7 @@ function bindInputs() {
       setUploadJobLocalProgress(preparedJobId, 0, "任务已创建，等待上传视频到服务器");
       setInlineFeedback(uploadJobStatus, `已创建任务 #${preparedJobId}，正在上传视频到服务器。`, "neutral");
       await fetchUploadJobs();
-      const totalBytes = filesToUpload.reduce((sum, file) => sum + Number(file.size || 0), 0);
-      const progressState = { completedBytes: 0 };
-      for (let index = 0; index < filesToUpload.length; index += 1) {
-        await uploadMaterialJobFileToServer(
-          preparedJobId,
-          filesToUpload[index],
-          index + 1,
-          filesToUpload.length,
-          totalBytes,
-          progressState,
-        );
-        await fetchUploadJobs();
-      }
+      await uploadMaterialJobFilesToServer(preparedJobId, filesToUpload, 3);
       state.uploadFiles = [];
       if (uploadFileInput) uploadFileInput.value = "";
       renderUploadFileSummary();

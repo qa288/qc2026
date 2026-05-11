@@ -133,6 +133,36 @@ def nightly_history_refresh_dashboard(
     )
 
 
+@celery_app.task(name="dashboard.finalize_yesterday_daily")
+def finalize_yesterday_daily_dashboard(
+    target_date: str = "",
+    trigger: str = "day_cut",
+) -> dict:
+    _prepare()
+    task_id = str(getattr(finalize_yesterday_daily_dashboard.request, "id", "") or "")
+    return service.finalize_yesterday_daily(
+        task_id=task_id,
+        trigger=str(trigger or "day_cut").strip() or "day_cut",
+        target_date=str(target_date or "").strip(),
+    )
+
+
+@celery_app.task(name="dashboard.history_catchup_probe")
+def history_catchup_probe_dashboard(
+    trigger: str = "probe",
+    performance_days: int | None = None,
+    extended_days: int | None = None,
+) -> dict:
+    _prepare()
+    task_id = str(getattr(history_catchup_probe_dashboard.request, "id", "") or "")
+    return service.history_catchup_probe(
+        task_id=task_id,
+        trigger=str(trigger or "probe").strip() or "probe",
+        performance_days=performance_days,
+        extended_days=extended_days,
+    )
+
+
 @celery_app.task(name="dashboard.material_day_backfill")
 def material_day_backfill_dashboard(target_date: str) -> dict:
     _prepare()
@@ -477,30 +507,56 @@ def _execute_full_refresh_overwrite(
                 stage_status="running",
                 message=str(
                     performance_payload.get("error")
-                    or "recent performance history refreshed; refreshing current-plan material inventory"
+                    or (
+                        "recent performance history refreshed; building today's material baseline from current plans"
+                        if trigger == "nightly"
+                        else "recent performance history refreshed; refreshing current-plan material inventory"
+                    )
                 ),
                 completed_steps=1,
                 result=performance_payload.get("result") or {},
             )
 
-            material_metrics_payload = run_stage(
-                "material_metrics",
-                service.refresh_recent_material_history,
-                material_history_days,
-                workers_override=nightly_material_workers,
-                prefer_report_metrics=nightly_use_report_metrics,
-                plan_material_requests_per_minute_override=nightly_plan_material_requests_per_minute,
-                plan_material_batch_size_override=nightly_plan_material_batch_size,
-                plan_material_batch_sleep_seconds_override=nightly_plan_material_batch_sleep_seconds,
-                progress_callback=build_stage_progress_callback(
+            if trigger == "nightly":
+                material_metrics_payload = run_stage(
                     "material_metrics",
-                    1,
-                    "refreshing current-plan material inventory",
-                ),
-            )
+                    service.refresh_current_day_material_baseline,
+                    workers_override=nightly_material_workers,
+                    plan_material_requests_per_minute_override=nightly_plan_material_requests_per_minute,
+                    plan_material_batch_size_override=nightly_plan_material_batch_size,
+                    plan_material_batch_sleep_seconds_override=nightly_plan_material_batch_sleep_seconds,
+                    # Build today's baseline with lower upstream pressure; metadata remains a separate stage.
+                    prefer_library_media_enrichment=False,
+                    prefer_library_create_time_enrichment=False,
+                    progress_callback=build_stage_progress_callback(
+                        "material_metrics",
+                        1,
+                        "building today's material baseline from current plans",
+                    ),
+                )
+            else:
+                material_metrics_payload = run_stage(
+                    "material_metrics",
+                    service.refresh_recent_material_history,
+                    material_history_days,
+                    workers_override=nightly_material_workers,
+                    prefer_report_metrics=nightly_use_report_metrics,
+                    plan_material_requests_per_minute_override=nightly_plan_material_requests_per_minute,
+                    plan_material_batch_size_override=nightly_plan_material_batch_size,
+                    plan_material_batch_sleep_seconds_override=nightly_plan_material_batch_sleep_seconds,
+                    progress_callback=build_stage_progress_callback(
+                        "material_metrics",
+                        1,
+                        "refreshing current-plan material inventory",
+                    ),
+                )
             material_metrics_result = dict(material_metrics_payload.get("result") or {})
-            material_metrics_result["start_date"] = material_start_date
-            material_metrics_result["requested_days"] = material_history_days
+            if trigger == "nightly":
+                material_metrics_result["start_date"] = str(material_metrics_result.get("range_start") or "")
+                material_metrics_result["requested_days"] = 1
+            else:
+                material_metrics_result["start_date"] = material_start_date
+                material_metrics_result["requested_days"] = material_history_days
             material_metrics_payload["result"] = material_metrics_result
 
             update_stage_status(
@@ -508,7 +564,11 @@ def _execute_full_refresh_overwrite(
                 stage_status="running",
                 message=str(
                     material_metrics_payload.get("error")
-                    or "current-plan material inventory refreshed; rebuilding material metadata"
+                    or (
+                        "today's material baseline built; rebuilding material metadata"
+                        if trigger == "nightly"
+                        else "current-plan material inventory refreshed; rebuilding material metadata"
+                    )
                 ),
                 completed_steps=2,
                 result=material_metrics_payload.get("result") or {},
@@ -691,20 +751,199 @@ def _material_upload_job_runtime_state(job_id: int) -> dict[str, int | str | boo
                 (int(job_id),),
             ).fetchone()["count"]
         )
+        pending_file_assets = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM material_upload_job_file_assets
+                WHERE job_id = ?
+                  AND status IN ('queued', 'running')
+                """,
+                (int(job_id),),
+            ).fetchone()["count"]
+        )
+        success_file_assets = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM material_upload_job_file_assets
+                WHERE job_id = ?
+                  AND status = 'success'
+                """,
+                (int(job_id),),
+            ).fetchone()["count"]
+        )
+        failed_file_assets = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM material_upload_job_file_assets
+                WHERE job_id = ?
+                  AND status = 'failed'
+                """,
+                (int(job_id),),
+            ).fetchone()["count"]
+        )
     status_text = str((job or {}).get("status") or "").strip().lower()
     total_files = int((job or {}).get("total_files", 0) or 0)
     return {
         "status": status_text,
         "total_files": total_files,
         "received_files": received_files,
+        "pending_file_assets": pending_file_assets,
+        "success_file_assets": success_file_assets,
+        "failed_file_assets": failed_file_assets,
         "pending_target_assets": pending_target_assets,
         "terminal": status_text in {"success", "failed", "partial"},
     }
 
 
+def _queue_material_upload_bind(job_id: int, note: str = "") -> str:
+    if service.material_uploads_paused():
+        return ""
+    task = celery_app.send_task("dashboard.material_upload_bind", args=[int(job_id)], queue="upload-bind")
+    service.attach_material_upload_task(
+        int(job_id),
+        str(task.id or ""),
+        status_text="running",
+        note=str(note or "账户素材库上传完成，绑定任务已入队。"),
+    )
+    return str(task.id or "")
+
+
+def _material_upload_paused_payload(job_id: int, stage: str) -> dict:
+    return {
+        "ok": True,
+        "skipped": True,
+        "paused": True,
+        "reason": "material uploads paused",
+        "stage": str(stage or ""),
+        "job_id": int(job_id),
+        "pause": service.material_upload_pause_status(),
+    }
+
+
+def _run_material_upload_library(job_id: int) -> dict:
+    _prepare()
+    if service.material_uploads_paused():
+        return _material_upload_paused_payload(int(job_id), "library")
+    with service._distributed_runtime_lock(f"material-upload-job:{int(job_id)}:library", timeout_seconds=21600) as acquired:
+        if not acquired:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "material library upload already running",
+                "job_id": int(job_id),
+            }
+        try:
+            result: dict = {"job_id": int(job_id), "status": "queued"}
+            idle_deadline = time.monotonic() + 90.0
+            last_signature: tuple[str, int, int] | None = None
+            last_bind_signature: tuple[int, int, int] | None = None
+            for _ in range(7200):
+                if service.material_uploads_paused():
+                    return _material_upload_paused_payload(int(job_id), "library")
+                result = service.process_material_upload_library_job(int(job_id))
+                runtime_state = _material_upload_job_runtime_state(int(job_id))
+                bind_signature = (
+                    int(runtime_state.get("received_files", 0) or 0),
+                    int(runtime_state.get("success_file_assets", 0) or 0),
+                    int(runtime_state.get("failed_file_assets", 0) or 0),
+                )
+                should_enqueue_bind = bool(result.get("should_enqueue_bind")) or int(runtime_state.get("success_file_assets", 0) or 0) > 0
+                if should_enqueue_bind and bind_signature != last_bind_signature:
+                    _queue_material_upload_bind(int(job_id))
+                    last_bind_signature = bind_signature
+                if bool(runtime_state.get("terminal")):
+                    break
+                pending_file_assets = int(runtime_state.get("pending_file_assets", 0) or 0)
+                received_files = int(runtime_state.get("received_files", 0) or 0)
+                total_files = int(runtime_state.get("total_files", 0) or 0)
+                status_text = str(runtime_state.get("status") or "").strip().lower()
+                runtime_signature = (status_text, received_files, pending_file_assets)
+                if pending_file_assets > 0:
+                    last_signature = runtime_signature
+                    idle_deadline = time.monotonic() + 90.0
+                    time.sleep(0.1)
+                    continue
+                waiting_for_more_files = status_text == "receiving" and received_files < total_files
+                if waiting_for_more_files:
+                    if runtime_signature != last_signature:
+                        last_signature = runtime_signature
+                        idle_deadline = time.monotonic() + 90.0
+                    elif time.monotonic() >= idle_deadline:
+                        break
+                    time.sleep(0.5)
+                    continue
+                break
+            return result
+        except Exception as exc:
+            service.mark_material_upload_job_failed(int(job_id), f"上传到账户素材库失败：{exc}")
+            raise
+
+
+def _run_material_upload_bind(job_id: int) -> dict:
+    _prepare()
+    if service.material_uploads_paused():
+        return _material_upload_paused_payload(int(job_id), "bind")
+    with service._distributed_runtime_lock(f"material-upload-job:{int(job_id)}:bind", timeout_seconds=21600) as acquired:
+        if not acquired:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "material bind already running",
+                "job_id": int(job_id),
+            }
+        try:
+            result: dict = {"job_id": int(job_id), "status": "queued"}
+            idle_deadline = time.monotonic() + 90.0
+            last_signature: tuple[str, int, int] | None = None
+            for _ in range(7200):
+                if service.material_uploads_paused():
+                    return _material_upload_paused_payload(int(job_id), "bind")
+                result = service.process_material_upload_bind_job(int(job_id))
+                runtime_state = _material_upload_job_runtime_state(int(job_id))
+                if bool(runtime_state.get("terminal")):
+                    break
+                pending_file_assets = int(runtime_state.get("pending_file_assets", 0) or 0)
+                pending_target_assets = int(runtime_state.get("pending_target_assets", 0) or 0)
+                status_text = str(runtime_state.get("status") or "").strip().lower()
+                runtime_signature = (status_text, pending_file_assets, pending_target_assets)
+                if pending_target_assets <= 0:
+                    break
+                if runtime_signature != last_signature:
+                    last_signature = runtime_signature
+                    idle_deadline = time.monotonic() + 90.0
+                    time.sleep(0.1)
+                    continue
+                if pending_file_assets > 0 and time.monotonic() < idle_deadline:
+                    time.sleep(0.5)
+                    continue
+                if pending_file_assets <= 0 and time.monotonic() < idle_deadline:
+                    time.sleep(0.1)
+                    continue
+                break
+            return result
+        except Exception as exc:
+            service.mark_material_upload_job_failed(int(job_id), f"绑定计划失败：{exc}")
+            raise
+
+
+@celery_app.task(name="dashboard.material_upload_library")
+def process_material_upload_library(job_id: int) -> dict:
+    return _run_material_upload_library(int(job_id))
+
+
+@celery_app.task(name="dashboard.material_upload_bind")
+def process_material_upload_bind(job_id: int) -> dict:
+    return _run_material_upload_bind(int(job_id))
+
+
 @celery_app.task(name="dashboard.material_upload")
 def process_material_upload(job_id: int) -> dict:
     _prepare()
+    if service.material_uploads_paused():
+        return _material_upload_paused_payload(int(job_id), "legacy")
     with service._distributed_runtime_lock(f"material-upload-job:{int(job_id)}", timeout_seconds=21600) as acquired:
         if not acquired:
             return {
@@ -715,12 +954,35 @@ def process_material_upload(job_id: int) -> dict:
             }
         try:
             result: dict = {"job_id": int(job_id), "status": "queued"}
-            for _ in range(24):
+            idle_deadline = time.monotonic() + 90.0
+            last_signature: tuple[str, int, int] | None = None
+            for _ in range(7200):
+                if service.material_uploads_paused():
+                    return _material_upload_paused_payload(int(job_id), "legacy")
                 result = service.process_material_upload_job(int(job_id))
                 runtime_state = _material_upload_job_runtime_state(int(job_id))
-                if int(runtime_state.get("pending_target_assets", 0) or 0) <= 0:
+                if bool(runtime_state.get("terminal")):
                     break
-                time.sleep(0.1)
+                pending_target_assets = int(runtime_state.get("pending_target_assets", 0) or 0)
+                received_files = int(runtime_state.get("received_files", 0) or 0)
+                total_files = int(runtime_state.get("total_files", 0) or 0)
+                status_text = str(runtime_state.get("status") or "").strip().lower()
+                runtime_signature = (status_text, received_files, pending_target_assets)
+                if pending_target_assets > 0:
+                    last_signature = runtime_signature
+                    idle_deadline = time.monotonic() + 90.0
+                    time.sleep(0.1)
+                    continue
+                waiting_for_more_files = status_text == "receiving" and received_files < total_files
+                if waiting_for_more_files:
+                    if runtime_signature != last_signature:
+                        last_signature = runtime_signature
+                        idle_deadline = time.monotonic() + 90.0
+                    elif time.monotonic() >= idle_deadline:
+                        break
+                    time.sleep(0.5)
+                    continue
+                break
             return result
         except Exception as exc:
             service.mark_material_upload_job_failed(int(job_id), f"上传任务失败：{exc}")

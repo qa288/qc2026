@@ -33,6 +33,7 @@ except Exception:  # noqa: BLE001
 ACCESS_TOKEN_URL = "https://ad.oceanengine.com/open_api/oauth2/access_token/"
 REFRESH_URL = "https://ad.oceanengine.com/open_api/oauth2/refresh_token/"
 CUSTOMER_CENTER_URL = "https://ad.oceanengine.com/open_api/2/customer_center/advertiser/list/"
+EBP_ADVERTISER_LIST_URL = "https://api.oceanengine.com/open_api/2/ebp/advertiser/list/"
 ACCOUNT_FUND_URL = "https://api.oceanengine.com/open_api/v3.0/account/fund/get/"
 ACCOUNT_REPORT_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/uni_promotion/get/"
 PLAN_LIST_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/uni_promotion/list/"
@@ -50,8 +51,9 @@ QIANCHUAN_IMAGE_GET_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/i
 QIANCHUAN_CAROUSEL_GET_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/carousel/get/"
 VIDEO_USER_LOSE_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/report/video_user_lose/get/"
 VIDEO_ORIGINAL_URL = "https://api.oceanengine.com/open_api/v1.0/qianchuan/file/video/original/get/"
-VIDEO_AD_UPLOAD_URL = "https://api.oceanengine.com/open_api/2/file/video/ad/"
+VIDEO_AD_UPLOAD_URL = "https://ad.oceanengine.com/open_api/2/file/video/ad/"
 VIDEO_AD_GET_URL = "https://api.oceanengine.com/open_api/2/file/video/ad/get/"
+EBP_VIDEO_UPLOAD_URL = "https://api.oceanengine.com/open_api/v3.0/tools/ebp/video/upload/"
 IMAGE_AD_UPLOAD_URL = "https://api.oceanengine.com/open_api/2/file/image/ad/"
 COMMENT_LIST_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/get/"
 COMMENT_REPLY_URL = "https://api.oceanengine.com/open_api/v3.0/tools/comment/reply/"
@@ -122,6 +124,24 @@ UNI_PLAN_REPORT_FALLBACK_METRICS = [
     "total_order_settle_amount_for_roi2_1h",
     "total_order_settle_count_for_roi2_1h",
     "total_prepay_and_pay_settle_roi2_1h",
+]
+UNI_PRODUCT_AD_HISTORY_TOPIC = "SITE_PROMOTION_PRODUCT_AD"
+UNI_PRODUCT_AD_HISTORY_DIMENSIONS = [
+    "ad_id",
+]
+UNI_PRODUCT_AD_HISTORY_METRICS = [
+    "stat_cost",
+    "total_pay_order_gmv_for_roi2",
+    "total_pay_order_gmv_include_coupon_for_roi2",
+    "total_pay_order_count_for_roi2",
+    "total_prepay_and_pay_order_roi2",
+    "total_order_settle_amount_for_roi2_1h",
+    "total_order_settle_count_for_roi2_1h",
+    "total_prepay_and_pay_settle_roi2_1h",
+    "total_cost_per_pay_order_for_roi2",
+    "total_order_settle_amount_rate_for_roi2_1h",
+    "total_refund_order_gmv_for_roi2_1h_all",
+    "total_refund_order_gmv_for_roi2_1h_rate",
 ]
 UNI_CUBIC_PLAN_DIMENSIONS = [
     "ad_id",
@@ -194,6 +214,7 @@ PLAN_SOURCE_UNI_PROMOTION = "UNI_PROMOTION"
 PLAN_SOURCE_UNI_REPORT = "UNI_REPORT"
 PLAN_SOURCE_UNI_CUBIC = "UNI_CUBIC"
 PLAN_SOURCE_STANDARD = "STANDARD"
+PLAN_SOURCE_ACCOUNT_RESIDUAL = "ACCOUNT_RESIDUAL"
 PLAN_DELIVERY_TYPE_GLOBAL = "GLOBAL"
 PLAN_DELIVERY_TYPE_CUBIC = "CUBIC"
 PLAN_DELIVERY_METADATA_SOURCE_UNI_MAIN = "UNI_MAIN_LIST"
@@ -445,6 +466,8 @@ def build_runtime_config(base_config: dict[str, Any] | None = None) -> dict[str,
     config = {
         "timezone": "Asia/Shanghai",
         "account_source": "QIANCHUAN",
+        "account_list_source": "EBP",
+        "ebp_enterprise_organization_id": "1854456986700803",
         "marketing_goal": "ALL",
         "order_platform": "QIANCHUAN",
         "max_workers": 3,
@@ -471,6 +494,8 @@ def build_runtime_config(base_config: dict[str, Any] | None = None) -> dict[str,
         "feishu_target": "FEISHU_TARGET",
         "timezone": "TIMEZONE",
         "account_source": "ACCOUNT_SOURCE",
+        "account_list_source": "ACCOUNT_LIST_SOURCE",
+        "ebp_enterprise_organization_id": "EBP_ENTERPRISE_ORGANIZATION_ID",
         "marketing_goal": "MARKETING_GOAL",
         "order_platform": "ORDER_PLATFORM",
         "plan_video_having_cost": "PLAN_VIDEO_HAVING_COST",
@@ -529,8 +554,8 @@ def post_json(url: str, payload: dict[str, Any], timeout: int = 30) -> dict[str,
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ApiError(f"HTTP {exc.code}: {body}") from exc
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise ApiError(f"HTTP {exc.code}: {error_body}") from exc
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise ApiError(f"request failed: {exc}") from exc
 
@@ -555,27 +580,97 @@ def post_api_json(url: str, access_token: str, payload: dict[str, Any], timeout:
         raise ApiError(f"request failed: {exc}") from exc
 
 
-def _multipart_form_body(
+class _MultipartFormDataStream:
+    def __init__(self, segments: list[bytes | Path], chunk_size: int = 1024 * 1024) -> None:
+        self._segments = segments
+        self._chunk_size = max(int(chunk_size or 0), 8192)
+        self._index = 0
+        self._buffer = b""
+        self._file_handle: Any | None = None
+        self._closed = False
+
+    def readable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        self._closed = True
+        if self._file_handle is not None:
+            self._file_handle.close()
+            self._file_handle = None
+
+    def read(self, size: int = -1) -> bytes:
+        if self._closed:
+            return b""
+        target_size = self._chunk_size if size is None or int(size) < 0 else int(size)
+        if target_size <= 0:
+            return b""
+        chunks: list[bytes] = []
+        remaining = target_size
+        try:
+            while remaining > 0:
+                if self._buffer:
+                    chunk = self._buffer[:remaining]
+                    self._buffer = self._buffer[remaining:]
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                    continue
+                if self._file_handle is not None:
+                    chunk = self._file_handle.read(min(self._chunk_size, remaining))
+                    if chunk:
+                        chunks.append(chunk)
+                        remaining -= len(chunk)
+                        continue
+                    self._file_handle.close()
+                    self._file_handle = None
+                    continue
+                if self._index >= len(self._segments):
+                    break
+                segment = self._segments[self._index]
+                self._index += 1
+                if isinstance(segment, Path):
+                    self._file_handle = segment.open("rb")
+                else:
+                    self._buffer = segment
+        except OSError as exc:
+            raise ApiError(f"request failed: {exc}") from exc
+        return b"".join(chunks)
+
+
+def _multipart_form_data_stream(
     fields: dict[str, Any],
-    files: list[tuple[str, str, str, bytes]],
-) -> tuple[bytes, str]:
+    files: list[tuple[str, str, str, bytes | Path]],
+) -> tuple[_MultipartFormDataStream, str, int]:
     boundary = f"----CodexOcean{int(time.time() * 1000)}"
-    body = bytearray()
+    segments: list[bytes | Path] = []
+    content_length = 0
+
+    def append_bytes(value: bytes) -> None:
+        nonlocal content_length
+        segments.append(value)
+        content_length += len(value)
+
     for name, value in fields.items():
-        body.extend(f"--{boundary}\r\n".encode("utf-8"))
-        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
-        body.extend(str(value).encode("utf-8"))
-        body.extend(b"\r\n")
+        append_bytes(f"--{boundary}\r\n".encode("utf-8"))
+        append_bytes(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        append_bytes(str(value).encode("utf-8"))
+        append_bytes(b"\r\n")
     for field_name, filename, content_type, content in files:
-        body.extend(f"--{boundary}\r\n".encode("utf-8"))
-        body.extend(
+        append_bytes(f"--{boundary}\r\n".encode("utf-8"))
+        append_bytes(
             f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode("utf-8")
         )
-        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
-        body.extend(content)
-        body.extend(b"\r\n")
-    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
-    return bytes(body), boundary
+        append_bytes(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+        if isinstance(content, Path):
+            try:
+                content_length += content.stat().st_size
+            except OSError as exc:
+                raise ApiError(f"request failed: {exc}") from exc
+            segments.append(content)
+        else:
+            append_bytes(content)
+        append_bytes(b"\r\n")
+    append_bytes(f"--{boundary}--\r\n".encode("utf-8"))
+    return _MultipartFormDataStream(segments), boundary, content_length
 
 
 def _file_md5_hex(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -596,46 +691,14 @@ def post_api_multipart(
     files: list[tuple[str, str, str, bytes | Path]],
     timeout: int = 120,
 ) -> dict[str, Any]:
-    if files:
-        request_files: list[tuple[str, tuple[str, Any, str]]] = []
-        open_handles: list[Any] = []
-        try:
-            for field_name, filename, content_type, content in files:
-                if isinstance(content, Path):
-                    handle = content.open("rb")
-                    open_handles.append(handle)
-                    request_files.append((field_name, (filename, handle, content_type)))
-                else:
-                    request_files.append((field_name, (filename, content, content_type)))
-            response = requests.post(
-                url,
-                data={key: str(value) for key, value in fields.items()},
-                files=request_files,
-                headers={"Access-Token": access_token},
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.HTTPError as exc:
-            status_code = exc.response.status_code if exc.response is not None else "?"
-            body = exc.response.text if exc.response is not None else str(exc)
-            raise ApiError(f"HTTP {status_code}: {body}") from exc
-        except (requests.RequestException, OSError, ValueError) as exc:
-            raise ApiError(f"request failed: {exc}") from exc
-        finally:
-            for handle in open_handles:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
-    body, boundary = _multipart_form_body(fields, files)
+    body, boundary, content_length = _multipart_form_data_stream(fields, files)
     request = urllib.request.Request(
         url,
         data=body,
         headers={
             "Access-Token": access_token,
             "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Content-Length": str(len(body)),
+            "Content-Length": str(content_length),
         },
         method="POST",
     )
@@ -643,10 +706,12 @@ def post_api_multipart(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ApiError(f"HTTP {exc.code}: {body}") from exc
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise ApiError(f"HTTP {exc.code}: {error_body}") from exc
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise ApiError(f"request failed: {exc}") from exc
+    finally:
+        body.close()
 
 
 def get_json(url: str, access_token: str, params: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
@@ -750,6 +815,7 @@ def post_api_multipart_with_retries(
     timeout: int = 120,
     attempts: int = 3,
     base_delay: float = 1.0,
+    before_request: Any | None = None,
 ) -> dict[str, Any]:
     last_error: Exception | None = None
     last_response: dict[str, Any] | None = None
@@ -757,6 +823,8 @@ def post_api_multipart_with_retries(
         retry_code = 0
         retry_response: dict[str, Any] | None = None
         try:
+            if before_request is not None:
+                before_request()
             response = post_api_multipart(url, access_token, fields, files, timeout=timeout)
         except ApiError as exc:
             last_error = exc
@@ -814,6 +882,21 @@ class OceanEngineClient:
         self._plan_material_request_interval_seconds = 0.0
         self._plan_material_next_request_at = 0.0
         self._plan_material_rate_lock = threading.Lock()
+
+    @staticmethod
+    def _api_response_token_expired(response: dict[str, Any] | None) -> bool:
+        payload = response if isinstance(response, dict) else {}
+        try:
+            code = int(payload.get("code", 0) or 0)
+        except Exception:
+            code = 0
+        message = str(payload.get("message") or payload.get("msg") or "")
+        normalized_message = message.lower()
+        if "access_token" in normalized_message and (
+            "expired" in normalized_message or "\u8fc7\u671f" in normalized_message
+        ):
+            return True
+        return code == 40102 or ("access_token" in message and "过期" in message)
 
     def configure_plan_material_rate_limit(self, requests_per_minute: int = 0) -> None:
         value = max(int(requests_per_minute or 0), 0)
@@ -1004,11 +1087,130 @@ class OceanEngineClient:
             self._save_token_cache(refreshed)
             return str(refreshed["access_token"])
 
+    def get_latest_access_token(self) -> str:
+        try:
+            resolved = self._resolved_token_payload(force_refresh=False) or {}
+        except Exception:
+            resolved = {}
+        now = int(time.time())
+        access_token = str(resolved.get("access_token") or "").strip()
+        expires_at = int(resolved.get("expires_at") or 0)
+        if access_token and expires_at > now + 60:
+            return access_token
+        return self.get_access_token()
+
+    def get_access_token_after_api_expired(self, expired_access_token: str) -> str:
+        expired_token = str(expired_access_token or "").strip()
+        with self._token_refresh_lock():
+            cache = self._reload_token_cache()
+            now = int(time.time())
+            cached_access_token = str(cache.get("access_token") or "").strip()
+            cached_expires_at = int(cache.get("expires_at") or 0)
+            if (
+                cached_access_token
+                and cached_access_token != expired_token
+                and cached_expires_at > now + 60
+            ):
+                return cached_access_token
+
+            resolved = self._resolved_token_payload(force_refresh=True) or {}
+            resolved_access_token = str(resolved.get("access_token") or "").strip()
+            resolved_expires_at = int(resolved.get("expires_at") or 0)
+            if (
+                resolved_access_token
+                and resolved_access_token != expired_token
+                and resolved_expires_at > now + 60
+            ):
+                return resolved_access_token
+
+            current_payload = dict(cache or {})
+            for key, value in (resolved or {}).items():
+                if value not in (None, ""):
+                    current_payload[key] = value
+            current_access_token = str(current_payload.get("access_token") or "").strip()
+            if current_access_token and current_access_token == expired_token:
+                current_payload["expires_at"] = min(int(current_payload.get("expires_at") or 0), now - 1)
+                current_payload["updated_at"] = now
+                current_payload["source"] = str(current_payload.get("source") or "runtime_api_expired")
+                self._save_token_cache(current_payload)
+                cache = self._reload_token_cache()
+
+            if oceanengine_token_refresh_disabled() or self.token_refresh_mode == "upstream_only":
+                raise ApiError(
+                    "access_token expired and no newer upstream access_token is available; refresh and publish the latest token first.",
+                    retryable=True,
+                )
+
+            refresh_token = str(
+                resolved.get("refresh_token")
+                or cache.get("refresh_token")
+                or self.config.get("refresh_token")
+            ).strip()
+            if not refresh_token:
+                raise ApiError("No refresh token is available after access_token expired", retryable=True)
+            payload = {
+                "app_id": self.config["app_id"],
+                "secret": self.config["app_secret"],
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            }
+            response = post_json(REFRESH_URL, payload)
+            if response.get("code") != 0:
+                raise ApiError.from_response(response, default_message="refresh token failed")
+            data = response["data"]
+            refreshed = {
+                "access_token": data["access_token"],
+                "refresh_token": data["refresh_token"],
+                "expires_at": now + int(data["expires_in"]),
+                "refresh_token_expires_in": data.get("refresh_token_expires_in"),
+                "updated_at": now,
+            }
+            refreshed_access_token = str(refreshed["access_token"])
+            if expired_token and refreshed_access_token == expired_token:
+                raise ApiError(
+                    "refresh token returned the same expired access_token",
+                    retryable=True,
+                )
+            self._save_token_cache(refreshed)
+            return refreshed_access_token
+
     def list_accounts(self) -> list[dict[str, Any]]:
         access_token = self.get_access_token()
         page = 1
         page_size = 100
         results: list[dict[str, Any]] = []
+        account_list_source = str(self.config.get("account_list_source") or "").strip().upper()
+        if account_list_source == "EBP":
+            enterprise_organization_id = str(self.config.get("ebp_enterprise_organization_id") or "").strip()
+            if not enterprise_organization_id:
+                raise ApiError("ebp_enterprise_organization_id is required when account_list_source=EBP")
+            while True:
+                params = {
+                    "enterprise_organization_id": enterprise_organization_id,
+                    "account_source": self.config["account_source"],
+                    "page": page,
+                    "page_size": page_size,
+                }
+                response = get_json_with_retries(EBP_ADVERTISER_LIST_URL, access_token, params)
+                if response.get("code") != 0:
+                    raise ApiError(f"list EBP accounts failed: {response}")
+                data = response["data"]
+                for item in data.get("account_list", []):
+                    account_id = int(item.get("advertiser_id") or item.get("account_id") or 0)
+                    account_name = str(item.get("advertiser_name") or item.get("account_name") or "")
+                    if account_id <= 0:
+                        continue
+                    normalized = dict(item)
+                    normalized["advertiser_id"] = account_id
+                    normalized["advertiser_name"] = account_name
+                    normalized.setdefault("account_id", account_id)
+                    normalized.setdefault("account_name", account_name)
+                    results.append(normalized)
+                page_info = data.get("page_info", {})
+                total_page = int(page_info.get("total_page", 1) or 1)
+                if page >= total_page:
+                    return results
+                page += 1
         while True:
             params = {
                 "cc_account_id": self.config["customer_center_id"],
@@ -1063,13 +1265,21 @@ class OceanEngineClient:
         self,
         advertiser_id: int,
         data_topics: list[str] | None = None,
+        timeout: int = 30,
+        attempts: int = 4,
     ) -> dict[str, Any]:
         access_token = self.get_access_token()
         params = {
             "advertiser_id": advertiser_id,
             "data_topics": list(data_topics or UNI_PROMOTION_DATA_TOPICS),
         }
-        response = get_json_with_retries(UNI_PROMOTION_CONFIG_URL, access_token, params)
+        response = get_json_with_retries(
+            UNI_PROMOTION_CONFIG_URL,
+            access_token,
+            params,
+            timeout=timeout,
+            attempts=attempts,
+        )
         if response.get("code") != 0:
             raise ApiError(f"get uni promotion config failed: {response}")
         return response
@@ -1086,6 +1296,8 @@ class OceanEngineClient:
         order_by: list[dict[str, Any]] | None = None,
         page: int = 1,
         page_size: int = 10,
+        timeout: int = 30,
+        attempts: int = 4,
     ) -> dict[str, Any]:
         access_token = self.get_access_token()
         params: dict[str, Any] = {
@@ -1102,7 +1314,13 @@ class OceanEngineClient:
             params["filters"] = filters
         if order_by:
             params["order_by"] = order_by
-        response = get_json_with_retries(UNI_PROMOTION_DATA_URL, access_token, params)
+        response = get_json_with_retries(
+            UNI_PROMOTION_DATA_URL,
+            access_token,
+            params,
+            timeout=timeout,
+            attempts=attempts,
+        )
         if response.get("code") != 0:
             raise ApiError(f"get uni promotion data failed: {response}")
         return response
@@ -1582,8 +1800,10 @@ class OceanEngineClient:
         file_path: Path,
         video_signature: str | None = None,
         mime_type: str | None = None,
+        before_request: Any | None = None,
+        attempts: int = 1,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
+        access_token = self.get_latest_access_token()
         signature = str(video_signature or _file_md5_hex(file_path))
         detected_type = mime_type or mimetypes.guess_type(file_path.name)[0] or "video/mp4"
         fields = {
@@ -1606,7 +1826,20 @@ class OceanEngineClient:
             fields,
             files,
             timeout=180,
+            attempts=max(1, int(attempts or 1)),
+            before_request=before_request,
         )
+        if self._api_response_token_expired(response):
+            access_token = self.get_access_token_after_api_expired(access_token)
+            response = post_api_multipart_with_retries(
+                VIDEO_AD_UPLOAD_URL,
+                access_token,
+                fields,
+                files,
+                timeout=180,
+                attempts=max(1, int(attempts or 1)),
+                before_request=before_request,
+            )
         if response.get("code") != 0:
             raise ApiError(f"upload local video failed: {response}")
         data = response.get("data")
@@ -1631,8 +1864,78 @@ class OceanEngineClient:
             response["data"] = normalized_data
         return response
 
+    def upload_ebp_video(
+        self,
+        account_id: int,
+        file_path: Path,
+        video_signature: str | None = None,
+        mime_type: str | None = None,
+        before_request: Any | None = None,
+        attempts: int = 1,
+    ) -> dict[str, Any]:
+        access_token = self.get_latest_access_token()
+        signature = str(video_signature or _file_md5_hex(file_path))
+        detected_type = mime_type or mimetypes.guess_type(file_path.name)[0] or "video/mp4"
+        fields = {
+            "account_id": int(account_id),
+            "account_type": "EBP",
+            "upload_type": "UPLOAD_BY_FILE",
+            "video_signature": signature,
+        }
+        files = [
+            (
+                "video_file",
+                file_path.name,
+                detected_type,
+                file_path,
+            )
+        ]
+        response = post_api_multipart_with_retries(
+            EBP_VIDEO_UPLOAD_URL,
+            access_token,
+            fields,
+            files,
+            timeout=300,
+            attempts=max(1, int(attempts or 1)),
+            before_request=before_request,
+        )
+        if self._api_response_token_expired(response):
+            access_token = self.get_access_token_after_api_expired(access_token)
+            response = post_api_multipart_with_retries(
+                EBP_VIDEO_UPLOAD_URL,
+                access_token,
+                fields,
+                files,
+                timeout=300,
+                attempts=max(1, int(attempts or 1)),
+                before_request=before_request,
+            )
+        if response.get("code") != 0:
+            raise ApiError(f"upload ebp video failed: {response}")
+        data = response.get("data")
+        normalized_data = dict(data) if isinstance(data, dict) else {}
+        material_id = normalized_data.get("material_id")
+        if material_id is None:
+            material_id = normalized_data.get("materialId")
+        if material_id not in (None, ""):
+            normalized_data["material_id"] = str(material_id)
+        video_id = normalized_data.get("video_id")
+        if video_id is None:
+            video_id = normalized_data.get("videoId")
+        if video_id not in (None, ""):
+            normalized_data["video_id"] = str(video_id)
+        video_url = normalized_data.get("video_url")
+        if video_url is None:
+            video_url = normalized_data.get("videoUrl")
+        if video_url not in (None, ""):
+            normalized_data["video_url"] = str(video_url)
+        if normalized_data:
+            response = dict(response)
+            response["data"] = normalized_data
+        return response
+
     def get_uploaded_videos(self, advertiser_id: int, video_ids: list[str]) -> dict[str, Any]:
-        access_token = self.get_access_token()
+        access_token = self.get_latest_access_token()
         normalized_ids = [str(item).strip() for item in video_ids if str(item).strip()]
         if not normalized_ids:
             raise ValueError("video_ids is required")
@@ -1641,6 +1944,9 @@ class OceanEngineClient:
             "video_ids": CsvParam(normalized_ids),
         }
         response = get_json_with_retries(VIDEO_AD_GET_URL, access_token, params)
+        if self._api_response_token_expired(response):
+            access_token = self.get_access_token_after_api_expired(access_token)
+            response = get_json_with_retries(VIDEO_AD_GET_URL, access_token, params)
         if response.get("code") != 0:
             raise ApiError(f"get uploaded videos failed: {response}")
         return response
@@ -1683,7 +1989,7 @@ class OceanEngineClient:
         material_name: str,
         image_url: str,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
+        access_token = self.get_latest_access_token()
         image_url_text = str(image_url or "").strip()
         if not image_url_text:
             raise ValueError("image_url is required")
@@ -1700,6 +2006,15 @@ class OceanEngineClient:
             [],
             timeout=60,
         )
+        if self._api_response_token_expired(response):
+            access_token = self.get_access_token_after_api_expired(access_token)
+            response = post_api_multipart_with_retries(
+                IMAGE_AD_UPLOAD_URL,
+                access_token,
+                fields,
+                [],
+                timeout=60,
+            )
         if response.get("code") != 0:
             raise ApiError(f"upload image by url failed: {response}")
         data = response.get("data")
@@ -1733,7 +2048,7 @@ class OceanEngineClient:
         image_signature: str | None = None,
         mime_type: str | None = None,
     ) -> dict[str, Any]:
-        access_token = self.get_access_token()
+        access_token = self.get_latest_access_token()
         signature = str(image_signature or _file_md5_hex(file_path))
         detected_type = mime_type or mimetypes.guess_type(file_path.name)[0] or "image/jpeg"
         fields = {
@@ -1757,6 +2072,15 @@ class OceanEngineClient:
             files,
             timeout=120,
         )
+        if self._api_response_token_expired(response):
+            access_token = self.get_access_token_after_api_expired(access_token)
+            response = post_api_multipart_with_retries(
+                IMAGE_AD_UPLOAD_URL,
+                access_token,
+                fields,
+                files,
+                timeout=120,
+            )
         if response.get("code") != 0:
             raise ApiError(f"upload image file failed: {response}")
         data = response.get("data")
@@ -1793,9 +2117,10 @@ class OceanEngineClient:
         image_material: list[dict[str, Any]] | None = None,
         video_image_mode: str = "",
         video_cover_id: str = "",
+        include_title_material: bool = False,
     ) -> dict[str, Any]:
         self._wait_for_plan_material_request_slot()
-        access_token = self.get_access_token()
+        access_token = self.get_latest_access_token()
         title = sanitize_material_title(material_title)
         video_material_item: dict[str, Any] = {"video_id": str(video_id)}
         video_image_mode_text = str(video_image_mode or "").strip()
@@ -1805,7 +2130,7 @@ class OceanEngineClient:
         if video_cover_id_text:
             video_material_item["video_cover_id"] = video_cover_id_text
         video_material = [video_material_item]
-        title_material = [{"title": title}]
+        title_material = [{"title": title}] if include_title_material and title else []
         normalized_image_material = [
             dict(item)
             for item in (image_material or [])
@@ -1819,25 +2144,112 @@ class OceanEngineClient:
         if str(marketing_goal or "").strip() == "VIDEO_PROM_GOODS" and product_text.isdigit():
             creative_payload: dict[str, Any] = {
                 "product_id": int(product_text),
-                "title_material": title_material,
                 "video_material": video_material,
             }
+            if title_material:
+                creative_payload["title_material"] = title_material
             if normalized_image_material:
                 creative_payload["image_material"] = normalized_image_material
             payload["multi_product_creative_list"] = [creative_payload]
         else:
             payload["programmatic_creative_media_list"] = {
-                "title_material": title_material,
                 "video_material": video_material,
             }
+            if title_material:
+                payload["programmatic_creative_media_list"]["title_material"] = title_material
         response = post_api_json_with_retries(
             PLAN_MATERIAL_ADD_URL,
             access_token,
             payload,
             timeout=60,
         )
+        if self._api_response_token_expired(response):
+            access_token = self.get_access_token_after_api_expired(access_token)
+            response = post_api_json_with_retries(
+                PLAN_MATERIAL_ADD_URL,
+                access_token,
+                payload,
+                timeout=60,
+            )
         if response.get("code") != 0:
-            raise ApiError(f"add plan material failed: {response}")
+            raise ApiError.from_response(response, default_message="add plan material failed")
+        return response
+
+    def add_plan_video_materials(
+        self,
+        advertiser_id: int,
+        ad_id: int,
+        video_materials: list[dict[str, Any]],
+        marketing_goal: str = "",
+        product_id: str = "",
+        image_material: list[dict[str, Any]] | None = None,
+        material_title: str = "",
+        include_title_material: bool = False,
+    ) -> dict[str, Any]:
+        self._wait_for_plan_material_request_slot()
+        normalized_video_materials: list[dict[str, Any]] = []
+        for item in video_materials or []:
+            if not isinstance(item, dict):
+                continue
+            video_id = str(item.get("video_id") or "").strip()
+            if not video_id:
+                continue
+            video_item: dict[str, Any] = {"video_id": video_id}
+            image_mode = str(item.get("image_mode") or "").strip()
+            if image_mode:
+                video_item["image_mode"] = image_mode
+            video_cover_id = str(item.get("video_cover_id") or "").strip()
+            if video_cover_id:
+                video_item["video_cover_id"] = video_cover_id
+            normalized_video_materials.append(video_item)
+        if not normalized_video_materials:
+            raise ValueError("video_materials is required")
+
+        access_token = self.get_latest_access_token()
+        title = sanitize_material_title(material_title)
+        title_material = [{"title": title}] if include_title_material and title else []
+        normalized_image_material = [
+            dict(item)
+            for item in (image_material or [])
+            if isinstance(item, dict)
+        ]
+        payload: dict[str, Any] = {
+            "advertiser_id": int(advertiser_id),
+            "ad_id": int(ad_id),
+        }
+        product_text = str(product_id or "").strip()
+        if str(marketing_goal or "").strip() == "VIDEO_PROM_GOODS" and product_text.isdigit():
+            creative_payload: dict[str, Any] = {
+                "product_id": int(product_text),
+                "video_material": normalized_video_materials,
+            }
+            if title_material:
+                creative_payload["title_material"] = title_material
+            if normalized_image_material:
+                creative_payload["image_material"] = normalized_image_material
+            payload["multi_product_creative_list"] = [creative_payload]
+        else:
+            payload["programmatic_creative_media_list"] = {
+                "video_material": normalized_video_materials,
+            }
+            if title_material:
+                payload["programmatic_creative_media_list"]["title_material"] = title_material
+        response = post_api_json_with_retries(
+            PLAN_MATERIAL_ADD_URL,
+            access_token,
+            payload,
+            timeout=60,
+        )
+        if self._api_response_token_expired(response):
+            access_token = self.get_access_token_after_api_expired(access_token)
+            response = post_api_json_with_retries(
+                PLAN_MATERIAL_ADD_URL,
+                access_token,
+                payload,
+                timeout=60,
+            )
+        if response.get("code") != 0:
+            raise ApiError.from_response(response, default_message="add plan video materials failed")
         return response
 
     def get_original_videos(self, advertiser_id: int, material_ids: list[str]) -> dict[str, Any]:
@@ -2437,6 +2849,113 @@ class OceanEngineClient:
             hydrate_plan_detail=hydrate_plan_detail,
         )
 
+    def list_site_promotion_product_ad_plan_summaries(
+        self,
+        advertiser_id: int,
+        advertiser_name: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        *,
+        hydrate_plan_detail: bool = True,
+    ) -> list[PlanSummary]:
+        page = 1
+        page_size = min(normalize_plan_page_size(self.config), 100)
+        plans_by_ad_id: dict[int, PlanSummary] = {}
+        while True:
+            response = self.get_uni_promotion_data(
+                advertiser_id=advertiser_id,
+                data_topic=UNI_PRODUCT_AD_HISTORY_TOPIC,
+                dimensions=list(UNI_PRODUCT_AD_HISTORY_DIMENSIONS),
+                metrics=list(UNI_PRODUCT_AD_HISTORY_METRICS),
+                start_time=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_time=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                filters=[],
+                order_by=[{"field": "stat_cost", "type": 2}],
+                page=page,
+                page_size=page_size,
+            )
+            data = response.get("data") or {}
+            rows = data.get("rows") or []
+            for row in rows:
+                dimensions = row.get("dimensions") or {}
+                metrics = row.get("metrics") or {}
+                ad_id = int(self._report_cell_value(dimensions.get("ad_id")) or 0)
+                if not ad_id or ad_id in plans_by_ad_id:
+                    continue
+
+                stat_cost = normalize_metric(self._report_cell_value(metrics.get("stat_cost")))
+                pay_amount = normalize_metric(self._report_cell_value(metrics.get("total_pay_order_gmv_for_roi2")))
+                total_pay_amount = normalize_metric(
+                    self._report_cell_value(metrics.get("total_pay_order_gmv_include_coupon_for_roi2"))
+                )
+                order_count = int(
+                    float(self._report_cell_value(metrics.get("total_pay_order_count_for_roi2")) or 0.0)
+                )
+                settled_pay_amount = normalize_metric(
+                    self._report_cell_value(metrics.get("total_order_settle_amount_for_roi2_1h"))
+                )
+                settled_order_count = int(
+                    float(self._report_cell_value(metrics.get("total_order_settle_count_for_roi2_1h")) or 0.0)
+                )
+                refund_amount_1h = normalize_metric(
+                    self._report_cell_value(metrics.get("total_refund_order_gmv_for_roi2_1h_all"))
+                )
+                plan = PlanSummary(
+                    advertiser_id=advertiser_id,
+                    advertiser_name=advertiser_name,
+                    ad_id=ad_id,
+                    ad_name=f"ad_{ad_id}",
+                    product_id="",
+                    product_name="",
+                    anchor_name="",
+                    marketing_goal="VIDEO_PROM_GOODS",
+                    status="",
+                    opt_status="",
+                    roi_goal=0.0,
+                    stat_cost=stat_cost,
+                    roi=normalize_metric(self._report_cell_value(metrics.get("total_prepay_and_pay_order_roi2"))),
+                    order_count=order_count,
+                    pay_amount=pay_amount,
+                    total_pay_amount=total_pay_amount,
+                    settled_pay_amount=settled_pay_amount,
+                    settled_roi=normalize_metric(
+                        self._report_cell_value(metrics.get("total_prepay_and_pay_settle_roi2_1h"))
+                    ),
+                    settled_order_count=settled_order_count,
+                    pay_order_cost=derive_ratio(
+                        stat_cost,
+                        order_count,
+                        self._report_cell_value(metrics.get("total_cost_per_pay_order_for_roi2")),
+                    ),
+                    settled_amount_rate=derive_percent(
+                        settled_pay_amount,
+                        total_pay_amount,
+                        self._report_cell_value(metrics.get("total_order_settle_amount_rate_for_roi2_1h")),
+                    ),
+                    refund_rate_1h=derive_percent(
+                        refund_amount_1h,
+                        total_pay_amount,
+                        self._report_cell_value(metrics.get("total_refund_order_gmv_for_roi2_1h_rate")),
+                    ),
+                    refund_amount_1h=refund_amount_1h,
+                    plan_source=PLAN_SOURCE_UNI_REPORT,
+                    plan_delivery_type=PLAN_DELIVERY_TYPE_GLOBAL,
+                )
+                if hydrate_plan_detail:
+                    try:
+                        detail_response = self.get_plan_detail(advertiser_id, ad_id)
+                        self._apply_report_plan_detail(plan, detail_response.get("data") or {})
+                    except Exception:  # noqa: BLE001
+                        pass
+                plans_by_ad_id[ad_id] = plan
+
+            page_info = data.get("page_info") or {}
+            total_page = int(page_info.get("total_page", 1) or 1)
+            if page >= total_page:
+                break
+            page += 1
+        return list(plans_by_ad_id.values())
+
     def list_cubic_plan_summaries(
         self,
         advertiser_id: int,
@@ -2888,7 +3407,7 @@ def fetch_plan_bundle(
     errors: list[str] = []
     primary_plans: list[PlanSummary] = []
     cubic_plans: list[PlanSummary] = []
-    standard_metadata_plans: list[PlanSummary] = []
+    product_ad_history_plans: list[PlanSummary] = []
     try:
         primary_plans = client.list_plan_summaries(
             advertiser_id,
@@ -2910,26 +3429,26 @@ def fetch_plan_bundle(
     except Exception as exc:  # noqa: BLE001
         errors.append(f"uni_cubic: {exc}")
     try:
-        standard_metadata_plans = client._list_standard_plan_metadata_summaries(
+        product_ad_history_plans = client.list_site_promotion_product_ad_plan_summaries(
             advertiser_id,
             advertiser_name,
+            start_dt,
+            end_dt,
         )
     except Exception as exc:  # noqa: BLE001
-        errors.append(f"standard_metadata: {exc}")
+        errors.append(f"site_product_ad: {exc}")
 
     plans_by_ad_id: dict[int, PlanSummary] = {}
-    for plan in primary_plans:
-        ad_id = int(getattr(plan, "ad_id", 0) or 0)
-        if ad_id > 0:
-            plans_by_ad_id[ad_id] = plan
-    for plan in cubic_plans:
-        ad_id = int(getattr(plan, "ad_id", 0) or 0)
-        if ad_id > 0 and ad_id not in plans_by_ad_id:
-            plans_by_ad_id[ad_id] = plan
-    for plan in standard_metadata_plans:
-        ad_id = int(getattr(plan, "ad_id", 0) or 0)
-        if ad_id > 0 and ad_id not in plans_by_ad_id:
-            plans_by_ad_id[ad_id] = plan
+    for plan_group in (primary_plans, cubic_plans, product_ad_history_plans):
+        for plan in plan_group:
+            ad_id = int(getattr(plan, "ad_id", 0) or 0)
+            if ad_id <= 0:
+                continue
+            existing = plans_by_ad_id.get(ad_id)
+            if existing is None:
+                plans_by_ad_id[ad_id] = plan
+                continue
+            client._merge_plan_summary(existing, plan)
 
     merged_plans = sorted(
         plans_by_ad_id.values(),

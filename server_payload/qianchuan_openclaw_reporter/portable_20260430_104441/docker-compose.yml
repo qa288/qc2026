@@ -1,0 +1,147 @@
+name: qianchuan-nas
+
+services:
+  init-app-data:
+    image: alpine:3.20
+    container_name: qianchuan-init-app-data
+    restart: "no"
+    volumes:
+      - ./:/bundle:ro
+      - qianchuan_app_data:/app_data
+    command: >
+      sh -ec '
+        if [ -f /app_data/.init_done ]; then
+          echo "app data already initialized";
+          exit 0;
+        fi;
+        mkdir -p /tmp/runtime;
+        tar xzf /bundle/runtime_files.tar.gz -C /tmp/runtime;
+        mkdir -p /app_data;
+        cp -a /tmp/runtime/data/. /app_data/;
+        touch /app_data/.init_done;
+      '
+
+  postgres:
+    image: postgres:17
+    container_name: qianchuan-postgres
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - qianchuan_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    container_name: qianchuan-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - qianchuan_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  restore-db:
+    image: alpine:3.20
+    container_name: qianchuan-restore-db
+    restart: "no"
+    command: >
+      sh -ec '
+        echo "external database restore already handled";
+        exit 0;
+      '
+
+  web:
+    image: aa.tyos.cc/qc-dashboard:26.5.2-1
+    container_name: qianchuan-web
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      CONFIG_PATH: /app/config/config.json
+      DATA_DIR: /app/data
+      DATABASE_PATH: /app/data/dashboard.db
+      TOKEN_CACHE_PATH: /app/data/token_cache.json
+      LATEST_TOKEN_PATH: /app/data/qianchuan_latest_token.json
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      NIGHTLY_HISTORY_WORKERS: ${NIGHTLY_HISTORY_WORKERS:-6}
+      NIGHTLY_HISTORY_PLAN_MATERIAL_REQUESTS_PER_MINUTE: ${NIGHTLY_HISTORY_PLAN_MATERIAL_REQUESTS_PER_MINUTE:-300}
+      NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SIZE: ${NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SIZE:-0}
+      NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SLEEP_SECONDS: ${NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SLEEP_SECONDS:-0}
+      ENABLE_HOT_SYNC_SCHEDULES: "0"
+      ENABLE_IN_PROCESS_SCHEDULER: "0"
+    ports:
+      - "9898:9898"
+    volumes:
+      - qianchuan_app_data:/app/data
+    depends_on:
+      init-app-data:
+        condition: service_completed_successfully
+      restore-db:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  app:
+    image: aa.tyos.cc/qc-dashboard:26.5.2-1
+    container_name: qianchuan-app
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      CONFIG_PATH: /app/config/config.json
+      DATA_DIR: /app/data
+      DATABASE_PATH: /app/data/dashboard.db
+      TOKEN_CACHE_PATH: /app/data/token_cache.json
+      LATEST_TOKEN_PATH: /app/data/qianchuan_latest_token.json
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      NIGHTLY_HISTORY_WORKERS: ${NIGHTLY_HISTORY_WORKERS:-6}
+      NIGHTLY_HISTORY_PLAN_MATERIAL_REQUESTS_PER_MINUTE: ${NIGHTLY_HISTORY_PLAN_MATERIAL_REQUESTS_PER_MINUTE:-300}
+      NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SIZE: ${NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SIZE:-0}
+      NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SLEEP_SECONDS: ${NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SLEEP_SECONDS:-0}
+      ENABLE_HOT_SYNC_SCHEDULES: ${ENABLE_HOT_SYNC_SCHEDULES:-1}
+      DASHBOARD_RUNTIME_LOCK_SCOPE: compact
+    command: >
+      sh -ec '
+        celery -A dashboard.celery_app.celery_app worker -l info -Q celery,history,upload-library,upload,upload-bind --concurrency=${APP_WORKER_CONCURRENCY:-4} &
+        worker_pid=$$!;
+        celery -A dashboard.celery_app.celery_app beat -l info &
+        beat_pid=$$!;
+        while kill -0 "$$worker_pid" 2>/dev/null && kill -0 "$$beat_pid" 2>/dev/null; do
+          sleep 5;
+        done;
+        kill "$$worker_pid" "$$beat_pid" 2>/dev/null || true;
+        wait "$$worker_pid" 2>/dev/null || true;
+        wait "$$beat_pid" 2>/dev/null || true;
+        exit 1
+      '
+    volumes:
+      - qianchuan_app_data:/app/data
+    depends_on:
+      web:
+        condition: service_started
+
+volumes:
+  qianchuan_app_data:
+  qianchuan_postgres:
+  qianchuan_redis:

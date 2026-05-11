@@ -139,6 +139,60 @@ TIMEZONE = settings.timezone
 ALERT_COOLDOWN_DEFAULT = settings.alert_cooldown_default
 RETENTION_DAYS = settings.account_plan_retention_days
 EXTENDED_RETENTION_DAYS = settings.account_plan_retention_days
+MATERIAL_UPLOAD_RETENTION_DAYS = max(int(settings.material_upload_retention_days or 3), 1)
+MATERIAL_UPLOAD_VIDEO_MAX_DURATION_SECONDS = max(
+    float(str(os.environ.get("MATERIAL_UPLOAD_VIDEO_MAX_DURATION_SECONDS") or "300").strip() or "300"),
+    0.0,
+)
+MATERIAL_UPLOAD_VIDEO_MIN_DURATION_SECONDS = max(
+    float(str(os.environ.get("MATERIAL_UPLOAD_VIDEO_MIN_DURATION_SECONDS") or "4").strip() or "4"),
+    0.0,
+)
+MATERIAL_UPLOAD_VIDEO_OFFICIAL_MAX_FILE_SIZE_BYTES = 1000000000
+try:
+    configured_upload_video_max_file_size = int(
+        str(
+            os.environ.get("MATERIAL_UPLOAD_VIDEO_MAX_FILE_SIZE_BYTES")
+            or str(MATERIAL_UPLOAD_VIDEO_OFFICIAL_MAX_FILE_SIZE_BYTES)
+        ).strip()
+        or str(MATERIAL_UPLOAD_VIDEO_OFFICIAL_MAX_FILE_SIZE_BYTES)
+    )
+except Exception:
+    configured_upload_video_max_file_size = MATERIAL_UPLOAD_VIDEO_OFFICIAL_MAX_FILE_SIZE_BYTES
+MATERIAL_UPLOAD_VIDEO_MAX_FILE_SIZE_BYTES = max(
+    configured_upload_video_max_file_size,
+    MATERIAL_UPLOAD_VIDEO_OFFICIAL_MAX_FILE_SIZE_BYTES,
+)
+MATERIAL_UPLOAD_VIDEO_ALLOWED_ASPECT_RATIOS = tuple(
+    item.strip()
+    for item in str(os.environ.get("MATERIAL_UPLOAD_VIDEO_ALLOWED_ASPECT_RATIOS") or "9:16,16:9").split(",")
+    if item.strip()
+)
+MATERIAL_UPLOAD_VIDEO_OFFICIAL_ALLOWED_CONTAINERS = ("mp4", "mpeg", "mpg", "3gp", "3gpp", "avi")
+configured_upload_video_allowed_containers = tuple(
+    item.strip().lower().lstrip(".")
+    for item in str(
+        os.environ.get("MATERIAL_UPLOAD_VIDEO_ALLOWED_CONTAINERS")
+        or ",".join(MATERIAL_UPLOAD_VIDEO_OFFICIAL_ALLOWED_CONTAINERS)
+    ).split(",")
+    if item.strip()
+)
+MATERIAL_UPLOAD_VIDEO_ALLOWED_CONTAINERS = tuple(
+    dict.fromkeys([*configured_upload_video_allowed_containers, *MATERIAL_UPLOAD_VIDEO_OFFICIAL_ALLOWED_CONTAINERS])
+)
+MATERIAL_UPLOAD_VIDEO_ALLOWED_CODECS = tuple(
+    item.strip().lower()
+    for item in str(os.environ.get("MATERIAL_UPLOAD_VIDEO_ALLOWED_CODECS") or "h264,avc1,hevc,hvc1,hev1").split(",")
+    if item.strip()
+)
+MATERIAL_UPLOAD_VIDEO_MIN_BITRATE_BPS = max(
+    int(str(os.environ.get("MATERIAL_UPLOAD_VIDEO_MIN_BITRATE_BPS") or "516000").strip() or "516000"),
+    0,
+)
+MATERIAL_UPLOAD_VIDEO_AD_QPS = max(
+    float(str(os.environ.get("MATERIAL_UPLOAD_VIDEO_AD_QPS") or "10").strip() or "10"),
+    0.0,
+)
 MATERIAL_HISTORY_START_DATE = settings.material_history_start_date
 DASHBOARD_USERNAME = settings.dashboard_username
 DASHBOARD_PASSWORD = settings.dashboard_password
@@ -172,6 +226,8 @@ MATERIAL_VIEW_PERFORMANCE = "performance"
 MATERIAL_VIEW_LIBRARY = "library"
 MATERIAL_VIEW_RELATION = "relation"
 MATERIAL_VIEW_MODES = {MATERIAL_VIEW_PERFORMANCE, MATERIAL_VIEW_LIBRARY, MATERIAL_VIEW_RELATION}
+UNATTRIBUTED_MATERIAL_TYPE = "UNATTRIBUTED_DELETED"
+UNATTRIBUTED_MATERIAL_DISPLAY_NAME = "未归因关闭/暂停计划消耗"
 MATERIAL_CACHE_SCOPE_LIVE = "live"
 MATERIAL_CACHE_SCOPE_HISTORY = "history"
 MATERIAL_CACHE_SCOPES = {MATERIAL_CACHE_SCOPE_LIVE, MATERIAL_CACHE_SCOPE_HISTORY}
@@ -233,6 +289,23 @@ COMMENT_LEVEL_LABELS = {
     "LEVEL_TWO": "二级评论",
 }
 COMMENT_REPLY_MAX_LENGTH = 100
+COMMENT_QUERY_DEFAULT_PAGE_SIZE = 50
+COMMENT_QUERY_MAX_PAGE_SIZE = 100
+COMMENT_PREFETCH_PAGE_COUNT = 2
+COMMENT_SORTABLE_NUMERIC_KEYS = {"reply_count", "like_count"}
+COMMENT_SORTABLE_TEXT_KEYS = {
+    "comment_anchor_name",
+    "comment_type_text",
+    "comment_user_name",
+    "create_time",
+    "hide_status_text",
+    "item_title",
+    "level_type_text",
+    "material_display_name",
+    "promotion_display_name",
+    "reply_status_text",
+    "text",
+}
 COMMENT_INCREMENTAL_HOT_DAYS = 2
 MATERIAL_REPORT_CORE_METRICS = [
     "stat_cost_for_roi2",
@@ -505,11 +578,23 @@ def build_comment_cache_key(
     advertiser_id: int | None = None,
     allowed_advertiser_ids: set[int] | None = None,
     customer_center_id: str = "",
+    *,
+    search_text: str = "",
+    sort_key: str = "create_time",
+    sort_dir: str = "desc",
+    page: int = 1,
+    page_size: int = COMMENT_QUERY_DEFAULT_PAGE_SIZE,
+    scope_user_id: int = 0,
 ) -> str:
+    normalized_search = str(search_text or "").strip()
+    search_hash = hashlib.sha1(normalized_search.encode("utf-8")).hexdigest()[:16]
     return (
         f"{build_performance_cache_key(range_key, start_date, end_date, customer_center_id)}:"
         f"{build_scope_cache_key(allowed_advertiser_ids)}:"
-        f"{int(advertiser_id or 0)}"
+        f"{int(advertiser_id or 0)}:"
+        f"{max(1, int(page or 1))}:{max(1, int(page_size or COMMENT_QUERY_DEFAULT_PAGE_SIZE))}:"
+        f"{str(sort_key or 'create_time').strip()}:{str(sort_dir or 'desc').strip().lower()}:"
+        f"{max(int(scope_user_id or 0), 0)}:{search_hash}"
     )
 
 
@@ -610,6 +695,8 @@ class DashboardService:
         self._sync_lock = asyncio.Lock()
         self._detail_sync_lock = asyncio.Lock()
         self._upstream_token_sync_lock = threading.Lock()
+        self._video_upload_rate_lock = threading.Lock()
+        self._video_upload_next_request_at = 0.0
         self._upstream_token_payload_cache: dict[str, dict[str, Any]] = {}
         self._db_init_thread_lock = threading.Lock()
         self._db_init_pid: int | None = None
@@ -629,6 +716,7 @@ class DashboardService:
         self._latest_snapshot_cache_lock = threading.Lock()
         self._full_refresh_status_local: dict[str, Any] = {}
         self._hot_sync_pause_local: dict[str, Any] = {}
+        self._material_upload_pause_local: dict[str, Any] = {}
         self._redis_client: Any | None = None
         self._backfill_queue_marks: dict[str, float] = {}
         self._material_page_prewarm_marks: dict[str, str] = {}
@@ -800,6 +888,68 @@ class DashboardService:
             return
         try:
             client.delete(self._hot_sync_pause_key())
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _material_upload_pause_key() -> str:
+        return "dashboard:material-upload-pause"
+
+    def material_uploads_paused(self) -> bool:
+        client = self._redis()
+        if client is None:
+            return bool(self._material_upload_pause_local.get("paused"))
+        try:
+            raw = client.get(self._material_upload_pause_key())
+        except Exception:  # noqa: BLE001
+            return bool(self._material_upload_pause_local.get("paused"))
+        if not raw:
+            self._material_upload_pause_local = {}
+            return False
+        try:
+            payload = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            self._material_upload_pause_local = {"paused": True, "reason": "unknown"}
+            return True
+        if isinstance(payload, dict):
+            self._material_upload_pause_local = dict(payload)
+            return bool(payload.get("paused"))
+        self._material_upload_pause_local = {"paused": True, "reason": "unknown"}
+        return True
+
+    def material_upload_pause_status(self) -> dict[str, Any]:
+        paused = self.material_uploads_paused()
+        return {
+            "paused": paused,
+            "reason": str(self._material_upload_pause_local.get("reason") or ""),
+            "updated_at": str(self._material_upload_pause_local.get("updated_at") or ""),
+        }
+
+    def pause_material_uploads(self, reason: str = "") -> dict[str, Any]:
+        payload = {
+            "paused": True,
+            "reason": str(reason or "manual").strip() or "manual",
+            "updated_at": now_text(),
+        }
+        self._material_upload_pause_local = dict(payload)
+        client = self._redis()
+        if client is not None:
+            try:
+                client.set(
+                    self._material_upload_pause_key(),
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return dict(payload)
+
+    def resume_material_uploads(self) -> None:
+        self._material_upload_pause_local = {}
+        client = self._redis()
+        if client is None:
+            return
+        try:
+            client.delete(self._material_upload_pause_key())
         except Exception:  # noqa: BLE001
             pass
 
@@ -3911,24 +4061,100 @@ class DashboardService:
     @staticmethod
     def _material_upload_library_concurrency() -> int:
         raw_value = (
-            os.environ.get("MATERIAL_UPLOAD_LIBRARY_CONCURRENCY")
+            os.environ.get("MATERIAL_UPLOAD_LIBRARY_GLOBAL_CONCURRENCY")
+            or os.environ.get("MATERIAL_UPLOAD_LIBRARY_CONCURRENCY")
             or os.environ.get("MATERIAL_UPLOAD_CONCURRENCY")
-            or "3"
+            or "12"
         )
         try:
             value = int(raw_value)
         except Exception:  # noqa: BLE001
-            value = 3
-        return max(1, min(value, 4))
+            value = 12
+        return max(1, min(max(value, 12), 16))
 
     @staticmethod
-    def _material_upload_bind_concurrency() -> int:
-        raw_value = str(os.environ.get("MATERIAL_UPLOAD_BIND_CONCURRENCY") or "3").strip()
+    def _material_upload_library_per_advertiser_concurrency() -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_LIBRARY_PER_ADVERTISER_CONCURRENCY") or "1").strip()
         try:
             value = int(raw_value)
         except Exception:  # noqa: BLE001
-            value = 3
-        return max(1, min(value, 6))
+            value = 1
+        return max(1, min(value, 1))
+
+    @staticmethod
+    def _material_upload_library_per_file_concurrency() -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_LIBRARY_PER_FILE_CONCURRENCY") or "4").strip()
+        try:
+            value = int(raw_value)
+        except Exception:  # noqa: BLE001
+            value = 4
+        return max(1, min(value, 4))
+
+    @staticmethod
+    def _material_upload_library_batch_size(upload_concurrency: int | None = None) -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_LIBRARY_BATCH_SIZE") or "").strip()
+        fallback = max(int(upload_concurrency or 1), 4)
+        try:
+            value = int(raw_value) if raw_value else fallback
+        except Exception:  # noqa: BLE001
+            value = fallback
+        return max(1, min(max(value, fallback), 32))
+
+    @staticmethod
+    def _material_upload_bind_concurrency() -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_BIND_CONCURRENCY") or "32").strip()
+        try:
+            value = int(raw_value)
+        except Exception:  # noqa: BLE001
+            value = 32
+        return max(1, min(value, 64))
+
+    @staticmethod
+    def _material_upload_bind_per_advertiser_concurrency() -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_BIND_PER_ADVERTISER_CONCURRENCY") or "8").strip()
+        try:
+            value = int(raw_value)
+        except Exception:  # noqa: BLE001
+            value = 8
+        return max(1, min(value, 16))
+
+    @staticmethod
+    def _material_upload_bind_batch_size(bind_concurrency: int | None = None) -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_BIND_BATCH_SIZE") or "").strip()
+        fallback = max(int(bind_concurrency or 1) * 4, 32)
+        try:
+            value = int(raw_value) if raw_value else fallback
+        except Exception:  # noqa: BLE001
+            value = fallback
+        return max(1, min(value, 256))
+
+    @staticmethod
+    def _material_upload_running_timeout_seconds() -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_RUNNING_TIMEOUT_SECONDS") or "1800").strip()
+        try:
+            value = int(raw_value)
+        except Exception:  # noqa: BLE001
+            value = 1800
+        return max(300, min(value, 21600))
+
+    @staticmethod
+    def _material_upload_bind_title_material() -> bool:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_BIND_TITLE_MATERIAL") or "0").strip().lower()
+        return raw_value in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _material_upload_use_ebp_shared_video() -> bool:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_USE_EBP_SHARED_VIDEO") or "1").strip().lower()
+        return raw_value not in {"0", "false", "no", "off"}
+
+    @staticmethod
+    def _material_upload_ebp_account_id() -> int:
+        raw_value = str(os.environ.get("MATERIAL_UPLOAD_EBP_ACCOUNT_ID") or "1854456986700803").strip()
+        try:
+            value = int(raw_value)
+        except Exception:  # noqa: BLE001
+            value = 1854456986700803
+        return max(value, 0)
 
     @staticmethod
     def _material_upload_max_files() -> int:
@@ -3940,6 +4166,100 @@ class DashboardService:
         return max(1, min(value, 200))
 
     @staticmethod
+    def _material_upload_video_ad_qps() -> float:
+        return max(float(MATERIAL_UPLOAD_VIDEO_AD_QPS or 0.0), 0.0)
+
+    def _rate_limit_material_video_upload_api(self) -> None:
+        qps = self._material_upload_video_ad_qps()
+        if qps <= 0:
+            return
+        interval_seconds = max(1.0 / qps, 0.001)
+        client = self._redis()
+        if client is not None:
+            lock = client.lock(
+                self._runtime_lock_key("oceanengine:file-video-ad:rate"),
+                timeout=10,
+                blocking_timeout=10,
+            )
+            try:
+                acquired = bool(lock.acquire(blocking=True))
+            except Exception:  # noqa: BLE001
+                acquired = False
+            if acquired:
+                try:
+                    key = "dashboard:oceanengine:file-video-ad:next-at"
+                    now_value = time.time()
+                    try:
+                        next_at = float(client.get(key) or 0.0)
+                    except Exception:  # noqa: BLE001
+                        next_at = 0.0
+                    wait_seconds = max(0.0, next_at - now_value)
+                    client.set(key, str(max(now_value, next_at) + interval_seconds), ex=60)
+                finally:
+                    try:
+                        lock.release()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if wait_seconds > 0:
+                    time.sleep(wait_seconds)
+                return
+        with self._video_upload_rate_lock:
+            now_value = time.monotonic()
+            wait_seconds = max(0.0, float(self._video_upload_next_request_at or 0.0) - now_value)
+            self._video_upload_next_request_at = max(now_value, float(self._video_upload_next_request_at or 0.0)) + interval_seconds
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    def _cooldown_material_video_upload_api(self, delay_seconds: float | None = None) -> None:
+        try:
+            delay = float(
+                delay_seconds
+                if delay_seconds is not None
+                else str(os.environ.get("MATERIAL_UPLOAD_VIDEO_AD_RETRY_BACKOFF_SECONDS") or "30").strip()
+            )
+        except Exception:  # noqa: BLE001
+            delay = 30.0
+        delay = max(delay, 0.0)
+        if delay <= 0:
+            return
+        client = self._redis()
+        if client is not None:
+            lock = client.lock(
+                self._runtime_lock_key("oceanengine:file-video-ad:rate"),
+                timeout=10,
+                blocking_timeout=10,
+            )
+            try:
+                acquired = bool(lock.acquire(blocking=True))
+            except Exception:  # noqa: BLE001
+                acquired = False
+            if acquired:
+                try:
+                    key = "dashboard:oceanengine:file-video-ad:next-at"
+                    now_value = time.time()
+                    try:
+                        next_at = float(client.get(key) or 0.0)
+                    except Exception:  # noqa: BLE001
+                        next_at = 0.0
+                    client.set(key, str(max(now_value, next_at) + delay), ex=max(int(delay * 2), 60))
+                    return
+                finally:
+                    try:
+                        lock.release()
+                    except Exception:  # noqa: BLE001
+                        pass
+        with self._video_upload_rate_lock:
+            now_value = time.monotonic()
+            self._video_upload_next_request_at = max(
+                now_value,
+                float(self._video_upload_next_request_at or 0.0),
+            ) + delay
+
+    @staticmethod
+    def _material_upload_terminal_statuses() -> set[str]:
+        return {"success", "failed", "partial"}
+
+    @staticmethod
     def _is_material_upload_target_limit_error(message: Any) -> bool:
         normalized = str(message or "").strip()
         if not normalized:
@@ -3948,14 +4268,303 @@ class DashboardService:
         return (
             "添加素材数量超过上限" in normalized
             or "素材数量超过上限" in normalized
+            or "计划素材数量已达上限" in normalized
             or "material count exceeds limit" in lowered
             or "material number exceeds limit" in lowered
         )
+
+    @staticmethod
+    def _is_material_upload_plan_deleted_error(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return (
+            "计划已删除" in normalized
+            or ("计划" in normalized and "不支持修改" in normalized)
+            or ("plan" in lowered and "deleted" in lowered)
+        )
+
+    @staticmethod
+    def _is_material_upload_video_param_error(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return "视频参数错误" in normalized or "video parameter" in lowered or "video param" in lowered
+
+    @staticmethod
+    def _is_material_upload_official_payload_too_large_error(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return (
+            "http 413" in lowered
+            or "request entity too large" in lowered
+            or "payload too large" in lowered
+            or "capacity limit" in lowered
+        )
+
+    @staticmethod
+    def _is_material_upload_official_video_format_error(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        if "40100" in normalized or "40110" in normalized or "频率" in normalized or "限流" in normalized:
+            return False
+        if DashboardService._is_material_upload_official_payload_too_large_error(message):
+            return False
+        return (
+            "视频尺寸错误" in normalized
+            or "视频参数错误" in normalized
+            or "视频格式" in normalized
+            or "文件格式" in normalized
+            or "素材格式" in normalized
+            or "video size" in lowered
+            or "video dimension" in lowered
+            or "video format" in lowered
+            or "video parameter" in lowered
+            or "invalid video" in lowered
+        )
+
+    @staticmethod
+    def _is_material_upload_retryable_official_error(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return (
+            "40100" in normalized
+            or "40110" in normalized
+            or "50000" in normalized
+            or "无法解析本次请求所需的账户ID" in normalized
+            or "系统请求频率超限" in normalized
+            or "开发者频控" in normalized
+            or "频率超限" in normalized
+            or "too many requests" in lowered
+            or "rate limit" in lowered
+            or "qps" in lowered
+            or "http 502" in lowered
+            or "http 503" in lowered
+            or "http 504" in lowered
+            or "gateway time-out" in lowered
+            or "gateway timeout" in lowered
+            or "timed out" in lowered
+            or "ssl" in lowered
+            or "eof occurred" in lowered
+            or "unexpected_eof" in lowered
+            or "connection reset" in lowered
+            or "connection aborted" in lowered
+            or "server closed the connection" in lowered
+            or "remote end closed connection" in lowered
+            or "temporarily unavailable" in lowered
+        )
+
+    @staticmethod
+    def _is_material_upload_system_limit_error(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        return "40100" in normalized or "系统请求频率超限" in normalized
+
+    @staticmethod
+    def _is_material_upload_shop_scope_permission_lost_error(message: Any) -> bool:
+        normalized = str(message or "").strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        return (
+            "当前账户已失去该抖音号下对应店铺的商品全域投放权限" in normalized
+            or "商品全域投放权限，请重新获取权限后重试" in normalized
+            or ("permission" in lowered and "shop" in lowered and "scope" in lowered)
+        )
+
+    @staticmethod
+    def _material_upload_bind_error_message(exc: Any) -> str:
+        if isinstance(exc, ApiError):
+            response = dict(exc.response or {})
+            candidates = [
+                str(exc or "").strip(),
+                str(exc.help_message or "").strip(),
+                str(response.get("message") or "").strip(),
+                str(response.get("msg") or "").strip(),
+                str(response.get("help_message") or "").strip(),
+            ]
+            for candidate in candidates:
+                if candidate:
+                    return candidate
+            return ""
+        return str(exc or "").strip()
+
+    @classmethod
+    def _material_upload_bind_error_category(cls, exc: Any) -> str:
+        message = cls._material_upload_bind_error_message(exc)
+        if cls._is_material_upload_target_limit_error(message):
+            return "material_limit_exceeded"
+        if cls._is_material_upload_shop_scope_permission_lost_error(message):
+            return "shop_scope_permission_lost"
+        if cls._is_material_upload_video_param_error(message):
+            return "video_param_invalid"
+        return "unknown"
+
+    @classmethod
+    def _material_upload_bind_failure_message(cls, exc: Any, *, auto_retried: bool = False) -> str:
+        raw_message = cls._material_upload_bind_error_message(exc)
+        category = cls._material_upload_bind_error_category(raw_message)
+        if category == "material_limit_exceeded":
+            return "计划素材数量已达上限，请清理后重试。"
+        if category == "shop_scope_permission_lost":
+            return "当前账户已失去该抖音号下对应店铺的商品全域投放权限，请重新获取权限后重试。"
+        if category == "video_param_invalid" and auto_retried:
+            return "视频参数错误，系统已自动重试一次，请稍后重试。"
+        return raw_message
+
+    @classmethod
+    def _material_upload_preferred_failure_message(cls, messages: list[str]) -> str:
+        normalized_messages = [str(item or "").strip() for item in messages if str(item or "").strip()]
+        if not normalized_messages:
+            return ""
+        explicit_limit = next((item for item in normalized_messages if cls._is_material_upload_target_limit_error(item)), "")
+        if explicit_limit:
+            return explicit_limit
+        return normalized_messages[0]
 
     @classmethod
     def _material_upload_target_limit_skip_message(cls, message: Any) -> str:
         normalized = str(message or "").strip() or "添加素材数量超过上限，请刷新后重试"
         return f"{normalized}；已停止该计划后续素材绑定。"
+
+    def _add_plan_material_with_single_retry(
+        self,
+        *,
+        client: OceanEngineClient,
+        advertiser_lock: threading.Semaphore,
+        advertiser_id: int,
+        ad_id: int,
+        material_title: str,
+        video_id: str,
+        marketing_goal: str,
+        product_id: str,
+        image_material: list[dict[str, Any]] | None,
+        video_image_mode: str,
+        video_cover_id: str,
+        bind_title_material: bool,
+    ) -> tuple[bool, str, str]:
+        payload = {
+            "advertiser_id": advertiser_id,
+            "ad_id": ad_id,
+            "material_title": material_title,
+            "video_id": str(video_id or ""),
+            "marketing_goal": marketing_goal,
+            "product_id": str(product_id or ""),
+            "image_material": [dict(item) for item in (image_material or []) if isinstance(item, dict)],
+            "video_image_mode": str(video_image_mode or ""),
+            "video_cover_id": str(video_cover_id or ""),
+        }
+
+        def do_bind(include_title_material: bool) -> None:
+            with advertiser_lock:
+                client.add_plan_material(**payload, include_title_material=include_title_material)
+
+        try:
+            do_bind(bind_title_material)
+            return True, "", ""
+        except Exception as exc:  # noqa: BLE001
+            category = self._material_upload_bind_error_category(exc)
+            if category == "video_param_invalid":
+                time.sleep(0.2)
+                try:
+                    do_bind(bind_title_material)
+                    return True, "", ""
+                except Exception as retry_exc:  # noqa: BLE001
+                    return (
+                        False,
+                        self._material_upload_bind_failure_message(retry_exc, auto_retried=True),
+                        self._material_upload_bind_error_category(retry_exc),
+                    )
+            return False, self._material_upload_bind_failure_message(exc), category
+
+    def _add_plan_video_materials_with_single_retry(
+        self,
+        *,
+        client: OceanEngineClient,
+        advertiser_lock: threading.Semaphore,
+        advertiser_id: int,
+        ad_id: int,
+        video_materials: list[dict[str, Any]],
+        marketing_goal: str,
+        product_id: str,
+        image_material: list[dict[str, Any]] | None,
+        material_title: str,
+        bind_title_material: bool,
+    ) -> tuple[bool, str, str]:
+        payload = {
+            "advertiser_id": advertiser_id,
+            "ad_id": ad_id,
+            "video_materials": [dict(item) for item in video_materials if isinstance(item, dict)],
+            "marketing_goal": marketing_goal,
+            "product_id": str(product_id or ""),
+            "image_material": [dict(item) for item in (image_material or []) if isinstance(item, dict)],
+            "material_title": material_title,
+        }
+
+        def do_bind(include_title_material: bool) -> None:
+            with advertiser_lock:
+                client.add_plan_video_materials(**payload, include_title_material=include_title_material)
+
+        try:
+            do_bind(bind_title_material)
+            return True, "", ""
+        except Exception as exc:  # noqa: BLE001
+            category = self._material_upload_bind_error_category(exc)
+            if category == "video_param_invalid":
+                time.sleep(0.2)
+                try:
+                    do_bind(bind_title_material)
+                    return True, "", ""
+                except Exception as retry_exc:  # noqa: BLE001
+                    return (
+                        False,
+                        self._material_upload_bind_failure_message(retry_exc, auto_retried=True),
+                        self._material_upload_bind_error_category(retry_exc),
+                    )
+            return False, self._material_upload_bind_failure_message(exc), category
+
+    def _material_upload_reusable_file_asset_locked(
+        self,
+        conn: Any,
+        *,
+        advertiser_id: int,
+        file_sha256: Any = "",
+        file_asset_status: Any = "",
+        material_id: Any = "",
+        video_id: Any = "",
+        video_url: Any = "",
+    ) -> dict[str, str]:
+        asset_status = str(file_asset_status or "").strip().lower()
+        asset_video_id = str(video_id or "").strip()
+        if asset_status == "success" and asset_video_id:
+            return {
+                "material_id": str(material_id or "").strip(),
+                "video_id": asset_video_id,
+                "video_url": str(video_url or "").strip(),
+            }
+        normalized_sha256 = str(file_sha256 or "").strip()
+        if not normalized_sha256 or int(advertiser_id or 0) <= 0:
+            return {}
+        cached = self._find_advertiser_material_asset_locked(conn, int(advertiser_id), normalized_sha256)
+        if not cached:
+            return {}
+        cached_video_id = str(cached.get("video_id") or "").strip()
+        if not cached_video_id:
+            return {}
+        return {
+            "material_id": str(cached.get("material_id") or "").strip(),
+            "video_id": cached_video_id,
+            "video_url": str(cached.get("video_url") or "").strip(),
+        }
 
     def _latest_plan_context_map(self, ad_ids: list[int]) -> dict[int, dict[str, Any]]:
         return self.upload_access.latest_plan_context_map(ad_ids)
@@ -3975,7 +4584,7 @@ class DashboardService:
             context = hydrated.get(ad_id)
             if not context:
                 continue
-            if self._json_object(context.get("raw_json")):
+            if self._plan_context_has_creative_detail_payload(context):
                 continue
             try:
                 detail_response = client.get_plan_detail(advertiser_id, ad_id)
@@ -4202,14 +4811,495 @@ class DashboardService:
             message,
         )
 
-    def attach_material_upload_task(self, job_id: int, task_id: str) -> None:
-        self.upload_access.attach_material_upload_task(job_id, task_id)
+    def attach_material_upload_task(
+        self,
+        job_id: int,
+        task_id: str,
+        status_text: str = "queued",
+        note: str = "",
+    ) -> None:
+        self.upload_access.attach_material_upload_task(job_id, task_id, status_text=status_text, note=note)
 
     def mark_material_upload_job_failed(self, job_id: int, message: str) -> None:
         self.upload_access.mark_material_upload_job_failed(job_id, message)
 
     def list_material_upload_jobs(self, user: dict[str, Any]) -> list[dict[str, Any]]:
         return self.upload_access.list_material_upload_jobs(user)
+
+    def _material_upload_detail_item_from_row(
+        self,
+        row: dict[str, Any],
+        *,
+        target_has_limit_failure: bool = False,
+    ) -> dict[str, Any]:
+        target_asset_status = str(row.get("target_asset_status") or "").strip().lower()
+        file_asset_status = str(row.get("file_asset_status") or "").strip().lower()
+        file_status = str(row.get("file_status") or "").strip().lower()
+        target_asset_id = int(row.get("target_asset_id", 0) or 0)
+        target_id = int(row.get("target_id", 0) or 0)
+        file_id = int(row.get("file_id", 0) or 0)
+        advertiser_id = int(row.get("advertiser_id", 0) or 0)
+        file_asset_failed = file_asset_status == "failed"
+        material_ready = bool(str(row.get("video_id") or "").strip() or str(row.get("material_id") or "").strip())
+        target_message = str(row.get("target_message") or "").strip()
+        file_asset_message = str(row.get("file_asset_message") or "").strip()
+        file_message = str(row.get("file_message") or "").strip()
+        upload_only_messages = {
+            "上传成功。",
+            "等待账户素材库上传完成。",
+            "素材上传完成，等待绑定计划。",
+            "等待上传素材。",
+        }
+        if target_asset_status == "success":
+            stage = "done"
+            display_status = "success"
+            message = target_message
+        elif target_asset_status == "failed":
+            display_status = "failed"
+            if file_asset_failed:
+                stage = "upload_failed"
+                message = file_asset_message or "上传素材失败。"
+            elif not material_ready:
+                stage = "upload_failed"
+                message = (
+                    "该账户未生成官方素材，需先重试素材库上传。"
+                    if target_message in upload_only_messages or not target_message
+                    else target_message
+                )
+            else:
+                stage = "bind_failed"
+                message = (
+                    "素材库上传成功，但计划绑定失败；请重试计划绑定。"
+                    if target_message in upload_only_messages or not target_message
+                    else target_message
+                )
+        elif target_asset_status == "running":
+            stage = "binding"
+            display_status = "running"
+            message = target_message or "正在绑定计划。"
+        elif file_asset_status == "running":
+            stage = "uploading"
+            display_status = "running"
+            message = file_asset_message or "正在上传素材。"
+        elif file_asset_status == "success":
+            stage = "bind_queued"
+            display_status = "queued"
+            message = "素材上传完成，等待绑定计划。"
+        elif file_asset_status == "skipped":
+            stage = "upload_failed"
+            display_status = "failed"
+            message = file_asset_message or target_message or "关联计划已结束，无需继续上传。"
+        elif file_asset_status == "failed" or file_status == "failed":
+            stage = "upload_failed"
+            display_status = "failed"
+            message = file_asset_message or file_message or "上传素材失败。"
+        else:
+            stage = "upload_queued"
+            display_status = "queued"
+            message = "等待上传素材。"
+        facing_message = self.upload_access._customer_facing_upload_detail_message(
+            stage,
+            display_status,
+            self.upload_access._customer_facing_upload_failure_message(
+                target_has_limit_failure=bool(target_has_limit_failure),
+                message=message,
+            ),
+        )
+        retryable = (
+            target_asset_status == "failed"
+            and not self._material_upload_failure_row_is_terminal(row)
+        )
+        return {
+            "target_asset_id": target_asset_id,
+            "target_id": target_id,
+            "file_id": file_id,
+            "failure_stage": "upload" if file_asset_failed or stage == "upload_failed" else "bind",
+            "stage": stage,
+            "status": display_status,
+            "original_name": str(row.get("original_name") or ""),
+            "file_size": int(row.get("file_size", 0) or 0),
+            "mime_type": str(row.get("mime_type") or ""),
+            "message": facing_message,
+            "advertiser_id": advertiser_id,
+            "advertiser_name": str(row.get("advertiser_name") or ""),
+            "ad_id": int(row.get("ad_id", 0) or 0),
+            "ad_name": str(row.get("ad_name") or ""),
+            "material_id": str(row.get("material_id") or ""),
+            "video_id": str(row.get("video_id") or ""),
+            "video_url": str(row.get("video_url") or ""),
+            "file_status": file_status,
+            "file_asset_status": file_asset_status,
+            "target_asset_status": target_asset_status,
+            "retryable": retryable,
+            "updated_at": str(row.get("target_asset_updated_at") or row.get("file_asset_updated_at") or ""),
+        }
+
+    def _material_upload_failure_row_is_terminal(self, row: dict[str, Any]) -> bool:
+        return bool(self._material_upload_failure_row_retry_block_message(row))
+
+    def _material_upload_failure_row_retry_block_message(self, row: dict[str, Any]) -> str:
+        def is_terminal_message(message: Any) -> bool:
+            return (
+                self.upload_access._is_material_upload_format_error_text(message)
+                or self._is_material_upload_official_payload_too_large_error(message)
+            )
+
+        messages = [
+            row.get("target_message"),
+            row.get("target_asset_message"),
+            row.get("file_asset_message"),
+            row.get("file_message"),
+        ]
+        if any(self._is_material_upload_plan_deleted_error(message) for message in messages):
+            return "计划已删除，不能直接重试。"
+        if any(
+            self._is_material_upload_official_payload_too_large_error(message)
+            for message in [row.get("file_asset_message"), row.get("file_message")]
+        ):
+            return "官方上传网关拒绝该文件大小，请压缩视频后重新上传。"
+        if any(
+            self.upload_access._is_material_upload_format_error_text(message)
+            for message in [row.get("file_asset_message"), row.get("file_message")]
+        ):
+            return "视频规格不符合官方要求，请更换或转码视频后重新上传。"
+
+        file_asset_status = str(row.get("file_asset_status") or "").strip().lower()
+        material_ready = any(
+            str(row.get(key) or "").strip()
+            for key in (
+                "file_asset_material_id",
+                "file_asset_video_id",
+                "material_id",
+                "video_id",
+            )
+        )
+        if file_asset_status == "success" or material_ready:
+            return ""
+
+        if is_terminal_message(row.get("target_message") or row.get("target_asset_message")):
+            return "视频规格不符合官方要求，请更换或转码视频后重新上传。"
+        return ""
+
+    def _material_upload_job_detail_counts_locked(self, conn: Any, job_id: int) -> dict[str, int]:
+        detail_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS detail_count,
+                COALESCE(SUM(CASE WHEN status IN ('success', 'failed') THEN 1 ELSE 0 END), 0) AS completed_detail_count,
+                COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) AS success_detail_count,
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_detail_count
+            FROM material_upload_job_target_assets
+            WHERE job_id = ?
+            """,
+            (int(job_id),),
+        ).fetchone()
+        upload_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS upload_operation_count,
+                COALESCE(SUM(CASE WHEN status IN ('success', 'failed', 'skipped') THEN 1 ELSE 0 END), 0) AS completed_upload_operation_count
+            FROM material_upload_job_file_assets
+            WHERE job_id = ?
+            """,
+            (int(job_id),),
+        ).fetchone()
+        return {
+            "detail_count": int((detail_row or {}).get("detail_count", 0) or 0),
+            "completed_detail_count": int((detail_row or {}).get("completed_detail_count", 0) or 0),
+            "success_detail_count": int((detail_row or {}).get("success_detail_count", 0) or 0),
+            "failed_detail_count": int((detail_row or {}).get("failed_detail_count", 0) or 0),
+            "upload_operation_count": int((upload_row or {}).get("upload_operation_count", 0) or 0),
+            "completed_upload_operation_count": int((upload_row or {}).get("completed_upload_operation_count", 0) or 0),
+        }
+
+    def list_material_upload_job_targets(self, user: dict[str, Any], job_id: int) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        normalized_job_id = int(job_id)
+        with self.db() as conn:
+            job = self._material_upload_job_row_for_user_locked(conn, user, normalized_job_id)
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="上传任务不存在")
+            job = dict(job)
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT
+                        t.id AS target_id,
+                        t.advertiser_id,
+                        t.advertiser_name,
+                        t.ad_id,
+                        t.ad_name,
+                        t.status AS target_status,
+                        t.message AS target_message,
+                        t.updated_at AS target_updated_at,
+                        COUNT(ta.id) AS detail_count,
+                        COALESCE(SUM(CASE WHEN ta.status IN ('success', 'failed') THEN 1 ELSE 0 END), 0) AS completed_detail_count,
+                        COALESCE(SUM(CASE WHEN ta.status = 'success' THEN 1 ELSE 0 END), 0) AS success_detail_count,
+                        COALESCE(SUM(CASE WHEN ta.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_detail_count,
+                        COALESCE(SUM(CASE WHEN ta.status IN ('queued', 'running') THEN 1 ELSE 0 END), 0) AS pending_detail_count,
+                        COALESCE(SUM(CASE WHEN ta.status = 'failed' AND (fa.status = 'failed' OR fa.id IS NULL OR COALESCE(fa.video_id, '') = '') THEN 1 ELSE 0 END), 0) AS failed_upload_count,
+                        COALESCE(SUM(CASE WHEN ta.status = 'failed' AND fa.status = 'success' AND COALESCE(fa.video_id, '') <> '' THEN 1 ELSE 0 END), 0) AS failed_bind_count
+                    FROM material_upload_job_targets t
+                    LEFT JOIN material_upload_job_target_assets ta
+                        ON ta.job_id = t.job_id AND ta.target_id = t.id
+                    LEFT JOIN material_upload_job_files f ON f.id = ta.file_id
+                    LEFT JOIN material_upload_job_file_assets fa
+                        ON fa.job_id = ta.job_id
+                       AND fa.file_id = ta.file_id
+                       AND fa.advertiser_id = t.advertiser_id
+                    WHERE t.job_id = ?
+                    GROUP BY
+                        t.id, t.advertiser_id, t.advertiser_name, t.ad_id, t.ad_name,
+                        t.status, t.message, t.updated_at
+                    ORDER BY
+                        failed_detail_count DESC,
+                        pending_detail_count DESC,
+                        t.id ASC
+                    """,
+                    (normalized_job_id,),
+                ).fetchall()
+            ]
+            counts = self._material_upload_job_detail_counts_locked(conn, normalized_job_id)
+        job_status = str(job.get("status") or "").strip().lower()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            detail_count = int(row.get("detail_count", 0) or 0)
+            completed = int(row.get("completed_detail_count", 0) or 0)
+            success_count = int(row.get("success_detail_count", 0) or 0)
+            failed_count = int(row.get("failed_detail_count", 0) or 0)
+            pending_count = int(row.get("pending_detail_count", 0) or 0)
+            progress_percent = round(max(0, min(100, completed * 100 / detail_count))) if detail_count > 0 else 0
+            retryable = failed_count > 0 and job_status not in {"queued", "running", "receiving"}
+            items.append(
+                {
+                    "target_id": int(row.get("target_id", 0) or 0),
+                    "advertiser_id": int(row.get("advertiser_id", 0) or 0),
+                    "advertiser_name": str(row.get("advertiser_name") or ""),
+                    "ad_id": int(row.get("ad_id", 0) or 0),
+                    "ad_name": str(row.get("ad_name") or ""),
+                    "status": str(row.get("target_status") or ""),
+                    "message": str(row.get("target_message") or ""),
+                    "detail_count": detail_count,
+                    "completed_detail_count": completed,
+                    "success_detail_count": success_count,
+                    "failed_detail_count": failed_count,
+                    "pending_detail_count": pending_count,
+                    "failed_upload_count": int(row.get("failed_upload_count", 0) or 0),
+                    "failed_bind_count": int(row.get("failed_bind_count", 0) or 0),
+                    "progress_percent": progress_percent,
+                    "retryable": retryable,
+                    "updated_at": str(row.get("target_updated_at") or ""),
+                }
+            )
+        total_operations = int(counts.get("upload_operation_count", 0) or 0) + int(counts.get("detail_count", 0) or 0)
+        completed_operations = int(counts.get("completed_upload_operation_count", 0) or 0) + int(
+            counts.get("completed_detail_count", 0) or 0
+        )
+        progress_percent = (
+            round(max(0, min(100, completed_operations * 100 / total_operations)))
+            if total_operations > 0
+            else (100 if job_status in {"success", "ok"} else 0)
+        )
+        return {
+            "job": {
+                "id": normalized_job_id,
+                "status": job_status,
+                "scope": str(job.get("scope") or "plan"),
+                "total_files": int(job.get("total_files", 0) or 0),
+                "total_targets": int(job.get("total_targets", 0) or 0),
+                "note": self.upload_access._customer_facing_upload_job_note(job_status, job.get("note")),
+                "progress_percent": progress_percent,
+                **counts,
+            },
+            "items": items,
+            "count": len(items),
+        }
+
+    def list_material_upload_job_target_files(
+        self,
+        user: dict[str, Any],
+        job_id: int,
+        target_id: int,
+    ) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        normalized_job_id = int(job_id)
+        normalized_target_id = int(target_id)
+        with self.db() as conn:
+            job = self._material_upload_job_row_for_user_locked(conn, user, normalized_job_id)
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="上传任务不存在")
+            target = conn.execute(
+                """
+                SELECT *
+                FROM material_upload_job_targets
+                WHERE job_id = ? AND id = ?
+                LIMIT 1
+                """,
+                (normalized_job_id, normalized_target_id),
+            ).fetchone()
+            if not target:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="计划明细不存在")
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT
+                        ta.id AS target_asset_id,
+                        ta.target_id,
+                        ta.file_id,
+                        ta.status AS target_asset_status,
+                        ta.message AS target_message,
+                        ta.updated_at AS target_asset_updated_at,
+                        f.original_name,
+                        f.file_size,
+                        f.mime_type,
+                        f.status AS file_status,
+                        f.message AS file_message,
+                        f.file_sha256,
+                        fa.status AS file_asset_status,
+                        fa.message AS file_asset_message,
+                        fa.material_id,
+                        fa.video_id,
+                        fa.video_url,
+                        fa.updated_at AS file_asset_updated_at,
+                        t.advertiser_id,
+                        t.advertiser_name,
+                        t.ad_id,
+                        t.ad_name
+                    FROM material_upload_job_target_assets ta
+                    JOIN material_upload_job_files f ON f.id = ta.file_id
+                    JOIN material_upload_job_targets t ON t.id = ta.target_id
+                    LEFT JOIN material_upload_job_file_assets fa
+                        ON fa.job_id = ta.job_id
+                       AND fa.file_id = ta.file_id
+                       AND fa.advertiser_id = t.advertiser_id
+                    WHERE ta.job_id = ? AND ta.target_id = ?
+                    ORDER BY f.id ASC
+                    """,
+                    (normalized_job_id, normalized_target_id),
+                ).fetchall()
+            ]
+        target_limit_failure = any(
+            self.upload_access._is_material_upload_limit_error_text(row.get("target_message"))
+            or self.upload_access._is_material_upload_limit_error_text(row.get("file_asset_message"))
+            or self.upload_access._is_material_upload_limit_error_text(row.get("file_message"))
+            for row in rows
+        )
+        items = [
+            self._material_upload_detail_item_from_row(row, target_has_limit_failure=target_limit_failure)
+            for row in rows
+        ]
+        return {
+            "target": {
+                "target_id": normalized_target_id,
+                "advertiser_id": int(target.get("advertiser_id", 0) or 0),
+                "advertiser_name": str(target.get("advertiser_name") or ""),
+                "ad_id": int(target.get("ad_id", 0) or 0),
+                "ad_name": str(target.get("ad_name") or ""),
+                "status": str(target.get("status") or ""),
+                "message": str(target.get("message") or ""),
+            },
+            "items": items,
+            "count": len(items),
+            "success_count": sum(1 for item in items if item.get("status") == "success"),
+            "failed_count": sum(1 for item in items if item.get("status") == "failed"),
+            "pending_count": sum(1 for item in items if item.get("status") in {"queued", "running"}),
+        }
+
+    def _material_upload_finish_or_wait_locked(
+        self,
+        conn: Any,
+        *,
+        job_id: int,
+        total_files: int,
+        final_success_note: str,
+        final_failure_note: str,
+        bind_wait_note: str = "视频已全部上传到服务器，后台正在处理绑定。",
+    ) -> dict[str, Any]:
+        counts = self._recompute_material_upload_job_locked(conn, int(job_id))
+        received_files = int(
+            conn.execute(
+                "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                (int(job_id),),
+            ).fetchone()["count"]
+        )
+        pending_file_assets = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM material_upload_job_file_assets
+                WHERE job_id = ?
+                  AND status IN ('queued', 'running')
+                """,
+                (int(job_id),),
+            ).fetchone()["count"]
+        )
+        pending_target_assets = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM material_upload_job_target_assets
+                WHERE job_id = ?
+                  AND status IN ('queued', 'running')
+                """,
+                (int(job_id),),
+            ).fetchone()["count"]
+        )
+        if received_files < total_files or pending_file_assets > 0 or pending_target_assets > 0:
+            if received_files < total_files:
+                next_status = "receiving"
+                next_note = f"已接收 {received_files}/{total_files} 个视频，后台会优先处理已上传的视频。"
+            elif pending_file_assets > 0:
+                next_status = "running"
+                next_note = "视频已全部上传到服务器，后台正在上传到账户素材库。"
+            else:
+                next_status = "running"
+                next_note = str(bind_wait_note or "视频已全部上传到服务器，后台正在处理绑定。")
+            self._update_material_upload_job(
+                conn,
+                int(job_id),
+                status=next_status,
+                note=next_note,
+                completed_at="",
+                updated_at=now_text(),
+            )
+            return {
+                "job_id": int(job_id),
+                "status": next_status,
+                "pending_file_assets": pending_file_assets,
+                "pending_target_assets": pending_target_assets,
+                **counts,
+            }
+        target_status_rows = conn.execute(
+            "SELECT status FROM material_upload_job_targets WHERE job_id = ?",
+            (int(job_id),),
+        ).fetchall()
+        statuses = {str(row["status"] or "") for row in target_status_rows}
+        final_status = "success" if statuses == {"success"} else "failed"
+        if "partial" in statuses or ("success" in statuses and "failed" in statuses):
+            final_status = "partial"
+        if not statuses:
+            final_status = "failed"
+        self._update_material_upload_job(
+            conn,
+            int(job_id),
+            status=final_status,
+            note=final_success_note if final_status == "success" else final_failure_note,
+            completed_at=now_text(),
+            updated_at=now_text(),
+        )
+        return {
+            "job_id": int(job_id),
+            "status": final_status,
+            "pending_file_assets": pending_file_assets,
+            "pending_target_assets": pending_target_assets,
+            **counts,
+        }
 
     def _material_upload_targets_for_request(
         self,
@@ -4302,6 +5392,443 @@ class DashboardService:
             "stored",
             created_at,
         )
+
+    @staticmethod
+    def _material_upload_chunk_session_dir(job_id: int, file_index: int) -> Path:
+        return UPLOAD_DIR / "_chunks" / str(int(job_id)) / f"{int(file_index):03d}"
+
+    @staticmethod
+    def _material_upload_chunk_size_for(file_size: int, chunk_index: int, chunk_size: int) -> int:
+        start = int(chunk_index) * int(chunk_size)
+        if start >= int(file_size):
+            return 0
+        return min(int(chunk_size), int(file_size) - start)
+
+    def material_upload_job_file_chunk_status(
+        self,
+        user: dict[str, Any],
+        job_id: int,
+        *,
+        file_index: int,
+        file_name: str,
+        file_size: int,
+        total_chunks: int,
+        chunk_size: int,
+    ) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        normalized_job_id = int(job_id)
+        normalized_file_index = int(file_index or 0)
+        normalized_total_chunks = max(1, int(total_chunks or 0))
+        normalized_file_size = max(0, int(file_size or 0))
+        normalized_chunk_size = max(1, int(chunk_size or 1))
+        with self.db() as conn:
+            job = self._material_upload_job_row_for_user_locked(conn, user, normalized_job_id)
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="upload job not found")
+            total_files = max(1, int(job.get("total_files", 0) or 0))
+            if normalized_file_index <= 0 or normalized_file_index > total_files:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_index is invalid")
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM material_upload_job_files
+                WHERE job_id = ? AND original_name = ? AND file_size = ? AND substr(stored_name, 1, 4) = ?
+                LIMIT 1
+                """,
+                (
+                    normalized_job_id,
+                    Path(str(file_name or "")).name,
+                    normalized_file_size,
+                    f"{normalized_file_index:03d}_",
+                ),
+            ).fetchone()
+        if existing:
+            return {
+                "id": normalized_job_id,
+                "file_index": normalized_file_index,
+                "file_completed": True,
+                "file_id": int(existing["id"]),
+                "uploaded_chunks": list(range(normalized_total_chunks)),
+                "total_chunks": normalized_total_chunks,
+            }
+        chunk_dir = self._material_upload_chunk_session_dir(normalized_job_id, normalized_file_index)
+        uploaded_chunks: list[int] = []
+        if chunk_dir.exists():
+            for index in range(normalized_total_chunks):
+                chunk_path = chunk_dir / f"{index:06d}.part"
+                expected_size = self._material_upload_chunk_size_for(normalized_file_size, index, normalized_chunk_size)
+                if chunk_path.exists() and (expected_size <= 0 or chunk_path.stat().st_size == expected_size):
+                    uploaded_chunks.append(index)
+        return {
+            "id": normalized_job_id,
+            "file_index": normalized_file_index,
+            "file_completed": False,
+            "uploaded_chunks": uploaded_chunks,
+            "total_chunks": normalized_total_chunks,
+        }
+
+    async def receive_material_upload_job_file_chunk(
+        self,
+        user: dict[str, Any],
+        job_id: int,
+        upload: UploadFile,
+        *,
+        file_index: int,
+        chunk_index: int,
+        total_chunks: int,
+        file_name: str,
+        file_size: int,
+        file_last_modified: str = "",
+        mime_type: str = "",
+        chunk_size: int = 0,
+    ) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        normalized_job_id = int(job_id)
+        normalized_file_index = int(file_index or 0)
+        normalized_chunk_index = int(chunk_index or 0)
+        normalized_total_chunks = max(1, int(total_chunks or 0))
+        normalized_file_size = max(0, int(file_size or 0))
+        normalized_name = Path(str(file_name or upload.filename or "")).name or f"video-{normalized_file_index}.mp4"
+        normalized_mime_type = str(mime_type or upload.content_type or "").strip()
+        if normalized_file_index <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_index is invalid")
+        if normalized_chunk_index < 0 or normalized_chunk_index >= normalized_total_chunks:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="chunk_index is invalid")
+        if normalized_file_size <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_size is invalid")
+        inferred_chunk_size = int(chunk_size or 0)
+        if inferred_chunk_size <= 0:
+            inferred_chunk_size = max(1, math.ceil(normalized_file_size / normalized_total_chunks))
+
+        incoming_dir = UPLOAD_DIR / "_incoming"
+        incoming_dir.mkdir(parents=True, exist_ok=True)
+        chunk_dir = self._material_upload_chunk_session_dir(normalized_job_id, normalized_file_index)
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = chunk_dir / "manifest.json"
+        manifest = {
+            "job_id": normalized_job_id,
+            "file_index": normalized_file_index,
+            "file_name": normalized_name,
+            "file_size": normalized_file_size,
+            "file_last_modified": str(file_last_modified or ""),
+            "mime_type": normalized_mime_type,
+            "total_chunks": normalized_total_chunks,
+            "chunk_size": inferred_chunk_size,
+        }
+        if manifest_path.exists():
+            try:
+                existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                existing_manifest = {}
+            if (
+                str(existing_manifest.get("file_name") or "") != normalized_name
+                or int(existing_manifest.get("file_size", 0) or 0) != normalized_file_size
+                or int(existing_manifest.get("total_chunks", 0) or 0) != normalized_total_chunks
+            ):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="同一文件序号已存在不同的视频分片")
+        else:
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix=f"upload_chunk_{normalized_job_id}_{normalized_file_index}_{normalized_chunk_index}_",
+            suffix=".part",
+            dir=incoming_dir,
+        )
+        os.close(temp_fd)
+        temp_path = Path(temp_name)
+        chunk_bytes = 0
+        try:
+            with temp_path.open("wb") as handle:
+                while True:
+                    data = await upload.read(1024 * 1024)
+                    if not data:
+                        break
+                    handle.write(data)
+                    chunk_bytes += len(data)
+            expected_chunk_size = self._material_upload_chunk_size_for(
+                normalized_file_size,
+                normalized_chunk_index,
+                inferred_chunk_size,
+            )
+            if expected_chunk_size > 0 and chunk_bytes != expected_chunk_size:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="分片大小不完整，请重试该分片")
+            chunk_path = chunk_dir / f"{normalized_chunk_index:06d}.part"
+            shutil.move(str(temp_path), str(chunk_path))
+
+            with self.db() as conn:
+                job = self._material_upload_job_row_for_user_locked(conn, user, normalized_job_id)
+                if not job:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="upload job not found")
+                status_text = str(job.get("status") or "").strip().lower()
+                if status_text not in {"receiving", "queued", "running"}:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该任务当前不能继续接收视频")
+                total_files = max(1, int(job.get("total_files", 0) or 0))
+                if normalized_file_index > total_files:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_index is invalid")
+                existing = conn.execute(
+                    """
+                    SELECT id
+                    FROM material_upload_job_files
+                    WHERE job_id = ? AND original_name = ? AND file_size = ? AND substr(stored_name, 1, 4) = ?
+                    LIMIT 1
+                    """,
+                    (normalized_job_id, normalized_name, normalized_file_size, f"{normalized_file_index:03d}_"),
+                ).fetchone()
+                if existing:
+                    received_count = int(
+                        conn.execute(
+                            "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                            (normalized_job_id,),
+                        ).fetchone()["count"]
+                    )
+                    ready_to_queue = received_count >= total_files
+                    return {
+                        "id": normalized_job_id,
+                        "status": str(job.get("status") or ""),
+                        "uploaded_files": received_count,
+                        "total_files": total_files,
+                        "file_completed": True,
+                        "file_id": int(existing["id"]),
+                        "ready_to_queue": ready_to_queue,
+                        "should_queue": False,
+                    }
+
+            uploaded_chunks = []
+            for index in range(normalized_total_chunks):
+                part = chunk_dir / f"{index:06d}.part"
+                expected_size = self._material_upload_chunk_size_for(normalized_file_size, index, inferred_chunk_size)
+                if part.exists() and (expected_size <= 0 or part.stat().st_size == expected_size):
+                    uploaded_chunks.append(index)
+            file_completed = len(uploaded_chunks) >= normalized_total_chunks
+            if not file_completed:
+                return {
+                    "id": normalized_job_id,
+                    "file_index": normalized_file_index,
+                    "chunk_index": normalized_chunk_index,
+                    "uploaded_chunks": uploaded_chunks,
+                    "total_chunks": normalized_total_chunks,
+                    "file_completed": False,
+                    "should_queue": False,
+                }
+
+            assembled_fd, assembled_name = tempfile.mkstemp(
+                prefix=f"upload_file_{normalized_job_id}_{normalized_file_index}_",
+                suffix=Path(normalized_name).suffix or ".mp4",
+                dir=incoming_dir,
+            )
+            os.close(assembled_fd)
+            assembled_path = Path(assembled_name)
+            sha256 = hashlib.sha256()
+            md5 = hashlib.md5()
+            assembled_size = 0
+            try:
+                with assembled_path.open("wb") as output:
+                    for index in range(normalized_total_chunks):
+                        part = chunk_dir / f"{index:06d}.part"
+                        with part.open("rb") as handle:
+                            while True:
+                                data = handle.read(1024 * 1024)
+                                if not data:
+                                    break
+                                output.write(data)
+                                assembled_size += len(data)
+                                sha256.update(data)
+                                md5.update(data)
+                if assembled_size != normalized_file_size:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="合并后文件大小不一致，请重新上传")
+                try:
+                    self._validate_material_upload_video_before_accept(normalized_name, assembled_path)
+                except HTTPException:
+                    try:
+                        shutil.rmtree(chunk_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                    raise
+
+                with self.db() as conn:
+                    job = self._material_upload_job_row_for_user_locked(conn, user, normalized_job_id)
+                    if not job:
+                        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="upload job not found")
+                    status_text = str(job.get("status") or "").strip().lower()
+                    if status_text not in {"receiving", "queued", "running"}:
+                        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该任务当前不能继续接收视频")
+                    total_files = max(1, int(job.get("total_files", 0) or 0))
+                    existing = conn.execute(
+                        """
+                        SELECT id
+                        FROM material_upload_job_files
+                        WHERE job_id = ? AND original_name = ? AND file_sha256 = ? AND substr(stored_name, 1, 4) = ?
+                        LIMIT 1
+                        """,
+                        (normalized_job_id, normalized_name, sha256.hexdigest(), f"{normalized_file_index:03d}_"),
+                    ).fetchone()
+                    created_file_id = int((existing or {}).get("id", 0) or 0)
+                    if not existing:
+                        received_before = int(
+                            conn.execute(
+                                "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                                (normalized_job_id,),
+                            ).fetchone()["count"]
+                        )
+                        if received_before >= total_files:
+                            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该任务的视频文件已上传完成")
+                        file_row = self._store_material_upload_file_source(
+                            normalized_job_id,
+                            normalized_file_index,
+                            {
+                                "original_name": normalized_name,
+                                "mime_type": normalized_mime_type,
+                                "source_path": assembled_path,
+                                "file_size": normalized_file_size,
+                                "file_sha256": sha256.hexdigest(),
+                                "file_md5": md5.hexdigest(),
+                                "move_source": True,
+                            },
+                            now_text(),
+                        )
+                        conn.execute(
+                            """
+                            INSERT INTO material_upload_job_files (
+                                job_id, original_name, stored_name, relative_path, file_size, mime_type,
+                                file_sha256, file_md5, updated_at, status, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            file_row,
+                        )
+                        created_file_row = conn.execute(
+                            """
+                            SELECT id
+                            FROM material_upload_job_files
+                            WHERE job_id = ? AND original_name = ? AND file_sha256 = ? AND substr(stored_name, 1, 4) = ?
+                            ORDER BY id DESC
+                            LIMIT 1
+                            """,
+                            (normalized_job_id, normalized_name, sha256.hexdigest(), f"{normalized_file_index:03d}_"),
+                        ).fetchone()
+                        created_file_id = int((created_file_row or {}).get("id", 0) or 0)
+                        if created_file_id > 0:
+                            target_rows = conn.execute(
+                                """
+                                SELECT id
+                                FROM material_upload_job_targets
+                                WHERE job_id = ?
+                                ORDER BY id ASC
+                                """,
+                                (normalized_job_id,),
+                            ).fetchall()
+                            for target_row in target_rows:
+                                self._upsert_material_upload_target_asset_locked(
+                                    conn,
+                                    normalized_job_id,
+                                    int(target_row["id"] or 0),
+                                    created_file_id,
+                                    "queued",
+                                )
+                    received_count = int(
+                        conn.execute(
+                            "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                            (normalized_job_id,),
+                        ).fetchone()["count"]
+                    )
+                    ready_to_queue = received_count >= total_files
+                    should_queue = created_file_id > 0 and ready_to_queue and status_text == "receiving"
+                    next_status = status_text if status_text in {"queued", "running"} else "receiving"
+                    if ready_to_queue and next_status == "receiving":
+                        next_status = "queued"
+                    next_note = (
+                        "视频已全部上传到服务器，后台处理中。"
+                        if ready_to_queue
+                        else f"正在上传视频到服务器：{received_count}/{total_files}，全部上传完成后才会开始后台处理。"
+                    )
+                    self._update_material_upload_job(
+                        conn,
+                        normalized_job_id,
+                        status=next_status,
+                        uploaded_files=received_count,
+                        note=next_note,
+                        updated_at=now_text(),
+                    )
+                try:
+                    shutil.rmtree(chunk_dir, ignore_errors=True)
+                except Exception:
+                    pass
+                return {
+                    "id": normalized_job_id,
+                    "status": next_status,
+                    "uploaded_files": received_count,
+                    "total_files": total_files,
+                    "file_completed": True,
+                    "file_id": created_file_id,
+                    "ready_to_queue": ready_to_queue,
+                    "should_queue": should_queue,
+                    "note": next_note,
+                }
+            finally:
+                try:
+                    assembled_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def finalize_material_upload_job_files(self, user: dict[str, Any], job_id: int) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        normalized_job_id = int(job_id)
+        with self.db() as conn:
+            job = self._material_upload_job_row_for_user_locked(conn, user, normalized_job_id)
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="upload job not found")
+            status_text = str(job.get("status") or "").strip().lower()
+            if status_text not in {"receiving", "queued", "running"}:
+                return {
+                    "id": normalized_job_id,
+                    "status": status_text,
+                    "should_queue": False,
+                    "note": str(job.get("note") or ""),
+                }
+            total_files = max(1, int(job.get("total_files", 0) or 0))
+            received_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                    (normalized_job_id,),
+                ).fetchone()["count"]
+            )
+            if received_count < total_files:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"视频尚未全部上传到服务器：{received_count}/{total_files}",
+                )
+            should_queue = status_text == "receiving" or (
+                status_text == "queued" and not str(job.get("task_id") or "").strip()
+            )
+            next_status = "queued" if status_text == "receiving" else status_text
+            next_note = "视频已全部上传到服务器，后台处理中。"
+            self._update_material_upload_job(
+                conn,
+                normalized_job_id,
+                status=next_status,
+                uploaded_files=received_count,
+                note=next_note,
+                updated_at=now_text(),
+            )
+            return {
+                "id": normalized_job_id,
+                "status": next_status,
+                "uploaded_files": received_count,
+                "total_files": total_files,
+                "ready_to_queue": True,
+                "should_queue": should_queue,
+                "note": next_note,
+            }
 
     def _create_material_upload_job_locked(
         self,
@@ -4456,15 +5983,30 @@ class DashboardService:
             dict(row)
             for row in conn.execute(
                 f"""
-                SELECT
-                    ta.id AS target_asset_id,
-                    ta.target_id,
-                    ta.file_id,
-                    ta.status,
-                    t.advertiser_id,
-                    t.advertiser_name
+                    SELECT
+                        ta.id AS target_asset_id,
+                        ta.target_id,
+                        ta.file_id,
+                        ta.status,
+                        ta.message AS target_message,
+                        f.message AS file_message,
+                        f.original_name,
+                        f.relative_path,
+                        f.file_sha256,
+                        t.advertiser_id,
+                        t.advertiser_name,
+                        fa.message AS file_asset_message,
+                        fa.status AS file_asset_status,
+                        fa.material_id AS file_asset_material_id,
+                        fa.video_id AS file_asset_video_id,
+                        fa.video_url AS file_asset_video_url
                 FROM material_upload_job_target_assets ta
+                JOIN material_upload_job_files f ON f.id = ta.file_id
                 JOIN material_upload_job_targets t ON t.id = ta.target_id
+                LEFT JOIN material_upload_job_file_assets fa
+                    ON fa.job_id = ta.job_id
+                   AND fa.file_id = ta.file_id
+                   AND fa.advertiser_id = t.advertiser_id
                 WHERE ta.job_id = ?
                   AND ta.id IN ({placeholders})
                 ORDER BY ta.id ASC
@@ -4472,11 +6014,98 @@ class DashboardService:
                 [job_id, *normalized_ids],
             ).fetchall()
         ]
-        failed_rows = [row for row in retry_rows if str(row.get("status") or "").strip().lower() == "failed"]
+        blocked_retry_messages: list[str] = []
+        failed_rows = []
+        for row in retry_rows:
+            if str(row.get("status") or "").strip().lower() != "failed":
+                continue
+            block_message = self._material_upload_failure_row_retry_block_message(row)
+            if block_message:
+                if block_message not in blocked_retry_messages:
+                    blocked_retry_messages.append(block_message)
+                continue
+            failed_rows.append(row)
         if not failed_rows:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
+            detail = "当前任务没有可直接重试的失败项"
+            if blocked_retry_messages:
+                detail = f"{detail}；{'；'.join(blocked_retry_messages[:3])}"
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
         now = now_text()
+        bind_only_retry_count = 0
+        upload_retry_count = 0
+        retry_plan: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        skipped_unavailable_names: list[str] = []
+        skipped_unavailable_count = 0
+        unavailable_message = "本地上传到服务器的素材已失效，重试已跳过；请重新上传该视频后创建新任务。"
         for row in failed_rows:
+            file_id = int(row.get("file_id", 0) or 0)
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            reusable_asset = self._material_upload_reusable_file_asset_locked(
+                conn,
+                advertiser_id=advertiser_id,
+                file_sha256=row.get("file_sha256"),
+                file_asset_status=row.get("file_asset_status"),
+                material_id=row.get("file_asset_material_id"),
+                video_id=row.get("file_asset_video_id"),
+                video_url=row.get("file_asset_video_url"),
+            )
+            source_path = UPLOAD_DIR / str(row.get("relative_path") or "")
+            if reusable_asset or source_path.exists():
+                retry_plan.append((row, reusable_asset))
+                continue
+
+            skipped_unavailable_count += 1
+            target_asset_id = int(row.get("target_asset_id", 0) or 0)
+            target_id = int(row.get("target_id", 0) or 0)
+            label = str(row.get("original_name") or file_id).strip() or str(file_id)
+            if label not in skipped_unavailable_names:
+                skipped_unavailable_names.append(label)
+            conn.execute(
+                """
+                UPDATE material_upload_job_target_assets
+                SET status = 'failed', message = ?, updated_at = ?
+                WHERE id = ? AND job_id = ?
+                """,
+                (unavailable_message, now, target_asset_id, job_id),
+            )
+            conn.execute(
+                """
+                UPDATE material_upload_job_targets
+                SET status = 'failed', message = ?, updated_at = ?
+                WHERE id = ? AND job_id = ? AND status <> 'success'
+                """,
+                (unavailable_message, now, target_id, job_id),
+            )
+            existing_file_asset = conn.execute(
+                """
+                SELECT id
+                FROM material_upload_job_file_assets
+                WHERE job_id = ? AND file_id = ? AND advertiser_id = ?
+                LIMIT 1
+                """,
+                (job_id, file_id, advertiser_id),
+            ).fetchone()
+            if existing_file_asset:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_file_assets
+                    SET advertiser_name = ?, status = 'failed', message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (str(row.get("advertiser_name") or ""), unavailable_message, now, int(existing_file_asset["id"])),
+                )
+        if not retry_plan:
+            if skipped_unavailable_names:
+                sample_names = "、".join(skipped_unavailable_names[:5])
+                suffix = " 等" if len(skipped_unavailable_names) > 5 else ""
+                detail = f"当前任务没有可重试的服务器侧失败项；{sample_names}{suffix} 已跳过，请重新上传视频后创建新任务。"
+            else:
+                detail = "当前任务没有可重试的失败项"
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=detail,
+            )
+        for row, reusable_asset in retry_plan:
             target_asset_id = int(row.get("target_asset_id", 0) or 0)
             target_id = int(row.get("target_id", 0) or 0)
             file_id = int(row.get("file_id", 0) or 0)
@@ -4498,6 +6127,22 @@ class DashboardService:
                 """,
                 ("等待重试。", now, target_id, job_id),
             )
+            if reusable_asset:
+                bind_only_retry_count += 1
+                self._upsert_material_upload_file_asset_locked(
+                    conn,
+                    job_id,
+                    file_id,
+                    advertiser_id,
+                    advertiser_name,
+                    "success",
+                    material_id=str(reusable_asset.get("material_id") or ""),
+                    video_id=str(reusable_asset.get("video_id") or ""),
+                    video_url=str(reusable_asset.get("video_url") or ""),
+                    message="素材已在账户素材库中，等待重新绑定计划。",
+                )
+                continue
+            upload_retry_count += 1
             conn.execute(
                 """
                 UPDATE material_upload_job_files
@@ -4506,24 +6151,15 @@ class DashboardService:
                 """,
                 ("等待重试。", now, file_id, job_id),
             )
-            existing_file_asset = conn.execute(
-                """
-                SELECT id
-                FROM material_upload_job_file_assets
-                WHERE job_id = ? AND file_id = ? AND advertiser_id = ?
-                LIMIT 1
-                """,
-                (job_id, file_id, advertiser_id),
-            ).fetchone()
-            if existing_file_asset:
-                conn.execute(
-                    """
-                    UPDATE material_upload_job_file_assets
-                    SET advertiser_name = ?, status = 'queued', message = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (advertiser_name, "等待重试。", now, int(existing_file_asset["id"])),
-                )
+            self._upsert_material_upload_file_asset_locked(
+                conn,
+                job_id,
+                file_id,
+                advertiser_id,
+                advertiser_name,
+                "queued",
+                message="等待重试。",
+            )
         self._recompute_material_upload_job_locked(conn, job_id)
         self._update_material_upload_job(
             conn,
@@ -4542,8 +6178,204 @@ class DashboardService:
             "total_targets": int(job.get("total_targets", 0) or 0),
             "note": str(note or "失败项已重新入队，等待后台执行。"),
             "created_at": str(job.get("created_at") or ""),
-            "retry_target_asset_count": len(failed_rows),
+            "retry_target_asset_count": len(retry_plan),
+            "bind_only_retry_count": bind_only_retry_count,
+            "upload_retry_count": upload_retry_count,
+            "skipped_unavailable_count": skipped_unavailable_count,
             "same_job_retry": True,
+        }
+
+    def _reset_material_upload_job_preflight_retry_locked(
+        self,
+        conn: Any,
+        job: dict[str, Any],
+        note: str,
+    ) -> dict[str, Any]:
+        job_id = int(job.get("id", 0) or 0)
+        if not job_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
+        now = now_text()
+        retry_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT
+                    ta.id AS target_asset_id,
+                    ta.target_id,
+                    ta.file_id,
+                    ta.status AS target_asset_status,
+                    f.original_name,
+                    f.relative_path,
+                    f.file_sha256,
+                    t.advertiser_id,
+                    t.advertiser_name,
+                    fa.id AS file_asset_id,
+                    fa.status AS file_asset_status,
+                    fa.material_id AS file_asset_material_id,
+                    fa.video_id AS file_asset_video_id,
+                    fa.video_url AS file_asset_video_url
+                FROM material_upload_job_target_assets ta
+                JOIN material_upload_job_files f ON f.id = ta.file_id
+                JOIN material_upload_job_targets t ON t.id = ta.target_id
+                LEFT JOIN material_upload_job_file_assets fa
+                    ON fa.job_id = ta.job_id
+                   AND fa.file_id = ta.file_id
+                   AND fa.advertiser_id = t.advertiser_id
+                WHERE ta.job_id = ?
+                  AND COALESCE(ta.status, '') <> 'success'
+                ORDER BY ta.id ASC
+                """,
+                (job_id,),
+            ).fetchall()
+        ]
+        if not retry_rows:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
+
+        bind_only_retry_count = 0
+        upload_retry_keys: set[tuple[int, int]] = set()
+        retry_target_asset_count = 0
+        skipped_unavailable_names: list[str] = []
+        skipped_unavailable_count = 0
+        unavailable_message = "本地上传到服务器的素材已失效，重试已跳过；请重新上传该视频后创建新任务。"
+
+        for row in retry_rows:
+            target_asset_id = int(row.get("target_asset_id", 0) or 0)
+            target_id = int(row.get("target_id", 0) or 0)
+            file_id = int(row.get("file_id", 0) or 0)
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            advertiser_name = str(row.get("advertiser_name") or "")
+            reusable_asset = self._material_upload_reusable_file_asset_locked(
+                conn,
+                advertiser_id=advertiser_id,
+                file_sha256=row.get("file_sha256"),
+                file_asset_status=row.get("file_asset_status"),
+                material_id=row.get("file_asset_material_id"),
+                video_id=row.get("file_asset_video_id"),
+                video_url=row.get("file_asset_video_url"),
+            )
+            file_asset_status = str(row.get("file_asset_status") or "").strip().lower()
+            file_asset_ready = (
+                file_asset_status == "success"
+                and bool(str(row.get("file_asset_material_id") or row.get("file_asset_video_id") or "").strip())
+            )
+            if reusable_asset:
+                bind_only_retry_count += 1
+                self._upsert_material_upload_file_asset_locked(
+                    conn,
+                    job_id,
+                    file_id,
+                    advertiser_id,
+                    advertiser_name,
+                    "success",
+                    material_id=str(reusable_asset.get("material_id") or ""),
+                    video_id=str(reusable_asset.get("video_id") or ""),
+                    video_url=str(reusable_asset.get("video_url") or ""),
+                    message="素材已在账户素材库中，等待重新绑定计划。",
+                )
+            elif file_asset_ready:
+                bind_only_retry_count += 1
+            elif (UPLOAD_DIR / str(row.get("relative_path") or "")).exists():
+                upload_retry_keys.add((file_id, advertiser_id))
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_files
+                    SET status = 'queued', message = ?, updated_at = ?
+                    WHERE id = ? AND job_id = ?
+                    """,
+                    ("等待重试。", now, file_id, job_id),
+                )
+                self._upsert_material_upload_file_asset_locked(
+                    conn,
+                    job_id,
+                    file_id,
+                    advertiser_id,
+                    advertiser_name,
+                    "queued",
+                    message="等待重试。",
+                )
+            else:
+                skipped_unavailable_count += 1
+                label = str(row.get("original_name") or file_id).strip() or str(file_id)
+                if label not in skipped_unavailable_names:
+                    skipped_unavailable_names.append(label)
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_target_assets
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE id = ? AND job_id = ?
+                    """,
+                    (unavailable_message, now, target_asset_id, job_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_targets
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE id = ? AND job_id = ? AND status <> 'success'
+                    """,
+                    (unavailable_message, now, target_id, job_id),
+                )
+                if row.get("file_asset_id"):
+                    conn.execute(
+                        """
+                        UPDATE material_upload_job_file_assets
+                        SET advertiser_name = ?, status = 'failed', message = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (advertiser_name, unavailable_message, now, int(row["file_asset_id"])),
+                    )
+                continue
+
+            retry_target_asset_count += 1
+            conn.execute(
+                """
+                UPDATE material_upload_job_target_assets
+                SET status = 'queued', message = ?, updated_at = ?
+                WHERE id = ? AND job_id = ?
+                """,
+                ("等待重试。", now, target_asset_id, job_id),
+            )
+            conn.execute(
+                """
+                UPDATE material_upload_job_targets
+                SET status = 'queued', message = ?, updated_at = ?
+                WHERE id = ? AND job_id = ? AND status <> 'success'
+                """,
+                ("等待重试。", now, target_id, job_id),
+            )
+
+        if retry_target_asset_count <= 0:
+            if skipped_unavailable_names:
+                sample_names = "、".join(skipped_unavailable_names[:5])
+                suffix = " 等" if len(skipped_unavailable_names) > 5 else ""
+                detail = f"当前任务没有可重试的服务器侧失败项；{sample_names}{suffix} 已跳过，请重新上传视频后创建新任务。"
+            else:
+                detail = "当前任务没有可重试的失败项"
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+        self._recompute_material_upload_job_locked(conn, job_id)
+        self._update_material_upload_job(
+            conn,
+            job_id,
+            status="queued",
+            note=str(note or "任务已重新入队，等待后台执行。"),
+            completed_at="",
+            updated_at=now,
+        )
+        return {
+            "id": job_id,
+            "status": "queued",
+            "scope": str(job.get("scope") or "plan"),
+            "query_text": str(job.get("query_text") or ""),
+            "total_files": int(job.get("total_files", 0) or 0),
+            "total_targets": int(job.get("total_targets", 0) or 0),
+            "note": str(note or "任务已重新入队，等待后台执行。"),
+            "created_at": str(job.get("created_at") or ""),
+            "retry_target_asset_count": retry_target_asset_count,
+            "bind_only_retry_count": bind_only_retry_count,
+            "upload_retry_count": len(upload_retry_keys),
+            "skipped_unavailable_count": skipped_unavailable_count,
+            "same_job_retry": True,
+            "job_level_retry": True,
         }
 
     def retry_material_upload_job(self, user: dict[str, Any], job_id: int) -> dict[str, Any]:
@@ -4556,7 +6388,7 @@ class DashboardService:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="上传任务不存在")
             job = dict(job)
             status_text = str(job.get("status") or "").strip().lower()
-            if status_text in {"queued", "running"}:
+            if status_text in {"queued", "running", "receiving"}:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务仍在执行中，暂时不能重试")
             retry_pair_rows = [
                 dict(row)
@@ -4572,14 +6404,165 @@ class DashboardService:
             ]
             retry_ids = [int(row["id"]) for row in retry_pair_rows]
             if not retry_ids:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
+                if status_text != "failed":
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前任务没有可重试的失败项")
+                payload = self._reset_material_upload_job_preflight_retry_locked(
+                    conn,
+                    job,
+                    f"任务 #{int(job_id)} 已重新入队，等待后台执行。",
+                )
+            else:
+                payload = self._reset_material_upload_target_assets_for_retry_locked(
+                    conn,
+                    job,
+                    retry_ids,
+                    f"任务 #{int(job_id)} 的失败项已重新入队，等待后台执行。",
+                )
+        payload["source_job_id"] = int(job_id)
+        return payload
+
+    def retry_material_upload_target(
+        self,
+        user: dict[str, Any],
+        job_id: int,
+        target_id: int,
+    ) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        with self.db() as conn:
+            job = self._material_upload_job_row_for_user_locked(conn, user, int(job_id))
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="上传任务不存在")
+            job = dict(job)
+            status_text = str(job.get("status") or "").strip().lower()
+            if status_text in {"queued", "running", "receiving"}:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务仍在执行中，暂时不能重试")
+            target = conn.execute(
+                """
+                SELECT id, ad_id, ad_name
+                FROM material_upload_job_targets
+                WHERE job_id = ? AND id = ?
+                LIMIT 1
+                """,
+                (int(job_id), int(target_id)),
+            ).fetchone()
+            if not target:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="计划明细不存在")
+            failure_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT
+                        ta.id AS target_asset_id,
+                        ta.message AS target_message,
+                        f.message AS file_message,
+                        fa.message AS file_asset_message,
+                        fa.status AS file_asset_status,
+                        fa.material_id AS file_asset_material_id,
+                        fa.video_id AS file_asset_video_id
+                    FROM material_upload_job_target_assets ta
+                    JOIN material_upload_job_files f ON f.id = ta.file_id
+                    JOIN material_upload_job_targets t ON t.id = ta.target_id
+                    LEFT JOIN material_upload_job_file_assets fa
+                        ON fa.job_id = ta.job_id
+                       AND fa.file_id = ta.file_id
+                       AND fa.advertiser_id = t.advertiser_id
+                    WHERE ta.job_id = ? AND ta.target_id = ? AND ta.status = 'failed'
+                    ORDER BY ta.id ASC
+                    """,
+                    (int(job_id), int(target_id)),
+                ).fetchall()
+            ]
+            retry_ids = [
+                int(row["target_asset_id"])
+                for row in failure_rows
+                if not self._material_upload_failure_row_is_terminal(row)
+            ]
+            if not retry_ids:
+                if failure_rows:
+                    block_messages: list[str] = []
+                    for row in failure_rows:
+                        block_message = self._material_upload_failure_row_retry_block_message(row)
+                        if block_message and block_message not in block_messages:
+                            block_messages.append(block_message)
+                    detail = "该计划没有可直接重试的失败项"
+                    if block_messages:
+                        detail = f"{detail}；{'；'.join(block_messages[:3])}"
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该计划没有可重试的失败项")
+            plan_label = str(target.get("ad_name") or target.get("ad_id") or "").strip()
             payload = self._reset_material_upload_target_assets_for_retry_locked(
                 conn,
                 job,
                 retry_ids,
-                f"任务 #{int(job_id)} 的失败项已重新入队，等待后台执行。",
+                f"计划 {plan_label} 已在原任务 #{int(job_id)} 内重新入队，等待后台执行。",
             )
         payload["source_job_id"] = int(job_id)
+        payload["retry_target_id"] = int(target_id)
+        return payload
+
+    def retry_material_upload_target_file(
+        self,
+        user: dict[str, Any],
+        job_id: int,
+        target_id: int,
+        file_id: int,
+    ) -> dict[str, Any]:
+        role = str(user.get("role") or "")
+        if role not in {ROLE_ADMIN, ROLE_SUPERVISOR} or not self.can_upload_materials(user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+        with self.db() as conn:
+            job = self._material_upload_job_row_for_user_locked(conn, user, int(job_id))
+            if not job:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="上传任务不存在")
+            job = dict(job)
+            status_text = str(job.get("status") or "").strip().lower()
+            if status_text in {"queued", "running", "receiving"}:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务仍在执行中，暂时不能重试")
+            failure = conn.execute(
+                """
+                SELECT
+                    ta.id AS target_asset_id,
+                    ta.status AS target_asset_status,
+                    ta.message AS target_message,
+                    f.message AS file_message,
+                    fa.message AS file_asset_message,
+                    fa.status AS file_asset_status,
+                    fa.material_id AS file_asset_material_id,
+                    fa.video_id AS file_asset_video_id,
+                    t.ad_id,
+                    t.ad_name
+                FROM material_upload_job_target_assets ta
+                JOIN material_upload_job_files f ON f.id = ta.file_id
+                JOIN material_upload_job_targets t ON t.id = ta.target_id
+                LEFT JOIN material_upload_job_file_assets fa
+                    ON fa.job_id = ta.job_id
+                   AND fa.file_id = ta.file_id
+                   AND fa.advertiser_id = t.advertiser_id
+                WHERE ta.job_id = ? AND ta.target_id = ? AND ta.file_id = ?
+                LIMIT 1
+                """,
+                (int(job_id), int(target_id), int(file_id)),
+            ).fetchone()
+            if not failure:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="素材明细不存在")
+            failure = dict(failure)
+            if str(failure.get("target_asset_status") or "").strip().lower() != "failed":
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该素材当前不是失败状态，无需重试")
+            block_message = self._material_upload_failure_row_retry_block_message(failure)
+            if block_message:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=block_message)
+            plan_label = str(failure.get("ad_name") or failure.get("ad_id") or "").strip()
+            payload = self._reset_material_upload_target_assets_for_retry_locked(
+                conn,
+                job,
+                [int(failure["target_asset_id"])],
+                f"计划 {plan_label} 的素材已在原任务 #{int(job_id)} 内重新入队，等待后台执行。",
+            )
+        payload["source_job_id"] = int(job_id)
+        payload["retry_target_id"] = int(target_id)
+        payload["retry_file_id"] = int(file_id)
         return payload
 
     def retry_material_upload_target_asset(
@@ -4597,7 +6580,7 @@ class DashboardService:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="上传任务不存在")
             job = dict(job)
             status_text = str(job.get("status") or "").strip().lower()
-            if status_text in {"queued", "running"}:
+            if status_text in {"queued", "running", "receiving"}:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="任务仍在执行中，暂时不能重试")
             failure = conn.execute(
                 """
@@ -4613,6 +6596,10 @@ class DashboardService:
                     f.mime_type,
                     f.file_sha256,
                     f.file_md5,
+                    fa.status AS file_asset_status,
+                    fa.material_id AS file_asset_material_id,
+                    fa.video_id AS file_asset_video_id,
+                    fa.video_url AS file_asset_video_url,
                     t.advertiser_id,
                     t.advertiser_name,
                     t.ad_id,
@@ -4620,6 +6607,10 @@ class DashboardService:
                 FROM material_upload_job_target_assets ta
                 JOIN material_upload_job_files f ON f.id = ta.file_id
                 JOIN material_upload_job_targets t ON t.id = ta.target_id
+                LEFT JOIN material_upload_job_file_assets fa
+                    ON fa.job_id = ta.job_id
+                   AND fa.file_id = ta.file_id
+                   AND fa.advertiser_id = t.advertiser_id
                 WHERE ta.job_id = ? AND ta.id = ?
                 LIMIT 1
                 """,
@@ -4631,7 +6622,16 @@ class DashboardService:
             if str(failure.get("target_asset_status") or "").strip().lower() != "failed":
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该明细当前不是失败状态，无需重试")
             source_path = UPLOAD_DIR / str(failure.get("relative_path") or "")
-            if not source_path.exists():
+            reusable_asset = self._material_upload_reusable_file_asset_locked(
+                conn,
+                advertiser_id=int(failure.get("advertiser_id", 0) or 0),
+                file_sha256=failure.get("file_sha256"),
+                file_asset_status=failure.get("file_asset_status"),
+                material_id=failure.get("file_asset_material_id"),
+                video_id=failure.get("file_asset_video_id"),
+                video_url=failure.get("file_asset_video_url"),
+            )
+            if not reusable_asset and not source_path.exists():
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="失败文件已丢失，无法重试")
             plan_label = str(failure.get("ad_name") or failure.get("ad_id") or "").strip()
             payload = self._reset_material_upload_target_assets_for_retry_locked(
@@ -4670,6 +6670,49 @@ class DashboardService:
         except Exception:
             pass
         return {"id": int(job_id), "deleted": True}
+
+    def _cleanup_material_upload_storage(self, cutoff_dt: datetime) -> None:
+        cutoff_text = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+        job_ids: list[int] = []
+        with self.db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM material_upload_jobs
+                WHERE COALESCE(NULLIF(completed_at, ''), NULLIF(updated_at, ''), created_at) < ?
+                """,
+                (cutoff_text,),
+            ).fetchall()
+            job_ids = [int(row["id"] or 0) for row in rows if int(row["id"] or 0) > 0]
+        for job_id in job_ids:
+            cleanup_dir = UPLOAD_DIR / str(job_id)
+            try:
+                if cleanup_dir.exists():
+                    shutil.rmtree(cleanup_dir, ignore_errors=True)
+            except Exception:
+                pass
+        incoming_dir = UPLOAD_DIR / "_incoming"
+        if not incoming_dir.exists():
+            return
+        cutoff_epoch = cutoff_dt.timestamp()
+        try:
+            incoming_paths = list(incoming_dir.iterdir())
+        except Exception:
+            return
+        for path in incoming_paths:
+            try:
+                last_modified = path.stat().st_mtime
+            except Exception:
+                continue
+            if last_modified >= cutoff_epoch:
+                continue
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _collect_balance_snapshot(self, client: OceanEngineClient, accounts: list[dict[str, Any]]) -> dict[str, Any]:
         return self.balance_access.collect_balance_snapshot(client, accounts)
@@ -5733,6 +7776,20 @@ class DashboardService:
                     namespaces.append(f"{base_namespace}:page")
         return namespaces
 
+    def _material_operator_cache_namespaces(self, scope: str = "all") -> list[str]:
+        normalized_scope = self._normalize_material_cache_scope(scope)
+        scopes = (
+            [MATERIAL_CACHE_SCOPE_LIVE, MATERIAL_CACHE_SCOPE_HISTORY]
+            if normalized_scope == "all"
+            else [normalized_scope]
+        )
+        namespaces = ["material-operator-rankings"]
+        for item_scope in scopes:
+            namespaces.append(
+                f"{build_material_cache_namespace(MATERIAL_VIEW_PERFORMANCE, scope=item_scope)}:operator-page"
+            )
+        return namespaces
+
     def _prune_local_material_cache_store(
         self,
         cache_store: dict[str, dict[str, Any]],
@@ -5772,10 +7829,15 @@ class DashboardService:
                 include_page=True,
             )
         ]
+        refresh_prefixes.extend(
+            f"{namespace}:"
+            for namespace in self._material_operator_cache_namespaces(normalized_scope)
+        )
         refresh_prefixes.append("dashboard-overview:")
         self._prune_payload_refresh_markers(refresh_prefixes)
         self._invalidate_cache_namespaces(
             "dashboard-overview",
+            *self._material_operator_cache_namespaces(normalized_scope),
             *self._material_cache_namespaces(
                 normalized_scope,
                 include_query=True,
@@ -6117,9 +8179,13 @@ class DashboardService:
             (DISPLAY_SCOPE_CURRENT, "day", "account"),
             (DISPLAY_SCOPE_CURRENT, "day", "plan"),
             (DISPLAY_SCOPE_CURRENT, "day", "breakdown"),
+            (DISPLAY_SCOPE_CURRENT, "week", "breakdown"),
+            (DISPLAY_SCOPE_CURRENT, "month", "breakdown"),
             (DISPLAY_SCOPE_ALL, "day", "account"),
             (DISPLAY_SCOPE_ALL, "day", "plan"),
             (DISPLAY_SCOPE_ALL, "day", "breakdown"),
+            (DISPLAY_SCOPE_ALL, "week", "breakdown"),
+            (DISPLAY_SCOPE_ALL, "month", "breakdown"),
         ]
 
     def _prewarm_performance_range_caches(self) -> None:
@@ -6135,6 +8201,36 @@ class DashboardService:
                     "performance_cache_prewarm_error",
                     display_scope=display_scope,
                     section=section,
+                    range_key=range_key,
+                    error=str(exc),
+                )
+
+    @staticmethod
+    def _comment_cache_prewarm_targets() -> list[str]:
+        return ["day", "week", "month"]
+
+    def _prewarm_comment_range_caches(self) -> None:
+        for range_key in self._comment_cache_prewarm_targets():
+            try:
+                first_page = self.comment_items(
+                    range_key,
+                    page=1,
+                    page_size=COMMENT_QUERY_DEFAULT_PAGE_SIZE,
+                    sort_key="create_time",
+                    sort_dir="desc",
+                )
+                total_pages = int((first_page.get("pagination") or {}).get("total_pages") or 1)
+                for page in range(2, min(total_pages, COMMENT_PREFETCH_PAGE_COUNT) + 1):
+                    self.comment_items(
+                        range_key,
+                        page=page,
+                        page_size=COMMENT_QUERY_DEFAULT_PAGE_SIZE,
+                        sort_key="create_time",
+                        sort_dir="desc",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._emit_material_sync_observation(
+                    "comment_cache_prewarm_error",
                     range_key=range_key,
                     error=str(exc),
                 )
@@ -6566,13 +8662,11 @@ class DashboardService:
                 ),
             ).fetchone()
         if row:
-            snapshot_time = str(row["snapshot_time"] or "").strip()
-            if snapshot_time:
-                return {
-                    "snapshot_time": snapshot_time,
-                    "window_start": f"{day_key} 00:00:00",
-                    "window_end": f"{day_key} 23:59:59",
-                }
+            return {
+                "snapshot_time": self._closed_day_snapshot_time(target_day),
+                "window_start": f"{day_key} 00:00:00",
+                "window_end": f"{day_key} 23:59:59",
+            }
 
         if not db_table_exists(conn, "summary_current"):
             return None
@@ -8951,20 +11045,34 @@ class DashboardService:
             return 0.0
 
     @staticmethod
-    def _report_dimension_value(payload: dict[str, Any], field: str) -> str:
+    def _report_dimension_value(payload: dict[str, Any], field: str, *, prefer_value: bool = False) -> str:
         node = (payload or {}).get(field) or {}
         if isinstance(node, dict):
-            return str(node.get("ValueStr") or node.get("Value") or "").strip()
+            keys = ("Value", "ValueStr") if prefer_value else ("ValueStr", "Value")
+            for key in keys:
+                value = node.get(key)
+                if value not in (None, ""):
+                    return str(value).strip()
+            return ""
         return str(node or "").strip()
 
     @staticmethod
     def _report_metric_value(payload: dict[str, Any], field: str) -> float:
         node = (payload or {}).get(field) or {}
         value = node.get("Value") if isinstance(node, dict) else node
+        if value in (None, "") and isinstance(node, dict):
+            value = node.get("ValueStr")
         try:
             return round(float(value or 0.0), 2)
         except Exception:
-            return 0.0
+            text = str(value or "").strip().replace(",", "")
+            match = re.search(r"-?\d+(?:\.\d+)?", text)
+            if not match:
+                return 0.0
+            try:
+                return round(float(match.group(0)), 2)
+            except Exception:
+                return 0.0
 
     @staticmethod
     def _report_metric_present(payload: dict[str, Any], field: str) -> bool:
@@ -9105,7 +11213,16 @@ class DashboardService:
                     for item in page_rows:
                         dimensions = item.get("dimensions") or {}
                         metrics = item.get("metrics") or {}
-                        material_id = self._report_dimension_value(dimensions, "material_id")
+                        material_id_field = (
+                            "roi2_title_material_v3"
+                            if material_type == "TITLE"
+                            else "material_id"
+                        )
+                        material_id = self._report_dimension_value(
+                            dimensions,
+                            material_id_field,
+                            prefer_value=True,
+                        )
                         material_name = ""
                         for field in config["name_fields"]:
                             material_name = self._report_dimension_value(dimensions, str(field))
@@ -9463,7 +11580,7 @@ class DashboardService:
                 or str(profile.get("top_account_name") or "").strip()
             )
             resolved_material_id = material_id or str(profile.get("material_id") or "").strip()
-            resolved_material_name = material_name or str(profile.get("material_name") or "").strip()
+            resolved_material_name = "" if material_type == "TITLE" else (material_name or str(profile.get("material_name") or "").strip())
             resolved_create_time = str(row.get("create_time") or "").strip() or str(profile.get("create_time") or "").strip()
             stat_cost = round(float(row.get("stat_cost", 0.0) or 0.0), 2)
             pay_amount = round(float(row.get("pay_amount", 0.0) or 0.0), 2)
@@ -9858,7 +11975,8 @@ class DashboardService:
         plans = [
             row
             for row in plans
-            if str(row.get("plan_source") or "").strip().upper() in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC}
+            if str(row.get("plan_source") or "").strip().upper()
+            in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC, PLAN_SOURCE_UNI_REPORT}
         ]
         if lightweight_history:
             plans = [row for row in plans if self._plan_row_has_material_activity(row)]
@@ -10671,6 +12789,17 @@ class DashboardService:
         ).strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
+    def _closed_day_snapshot_time(target_day: datetime) -> str:
+        return datetime(
+            target_day.year,
+            target_day.month,
+            target_day.day,
+            23,
+            59,
+            59,
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
     def _snapshot_time_owner(conn: Any, table_name: str, snapshot_time: str) -> str:
         row = conn.execute(
             f"SELECT customer_center_id FROM {table_name} WHERE snapshot_time = ? LIMIT 1",
@@ -10831,6 +12960,20 @@ class DashboardService:
             if text:
                 return text
         return ""
+
+    @staticmethod
+    def _looks_like_publish_caption(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        if "#" in text or "http://" in text.lower() or "https://" in text.lower():
+            return True
+        punctuation_count = sum(1 for char in text if char in "，。！？!?；;：:,、")
+        if len(text) >= 28 and punctuation_count > 0:
+            return True
+        if len(text) >= 36 and any(char.isspace() for char in text):
+            return True
+        return False
 
     @staticmethod
     def _format_unix_time_text(value: Any) -> str:
@@ -11072,6 +13215,44 @@ class DashboardService:
             cls._json_text(detail_data),
         )
 
+    @staticmethod
+    def _creative_material_items(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, dict):
+            return [payload]
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
+
+    @classmethod
+    def _backend_material_name_from_video_item(cls, item: dict[str, Any] | None) -> str:
+        payload = item if isinstance(item, dict) else {}
+        direct_name = cls._first_text(
+            payload.get("backend_material_name"),
+            payload.get("material_name"),
+            payload.get("name"),
+            payload.get("file_name"),
+            payload.get("filename"),
+            payload.get("video_file_name"),
+            payload.get("original_name"),
+        )
+        if direct_name:
+            return direct_name
+        title = cls._first_text(payload.get("title"), payload.get("video_name"))
+        if title and not cls._looks_like_publish_caption(title):
+            return title
+        return ""
+
+    @classmethod
+    def _publish_title_from_title_item(cls, item: dict[str, Any] | None) -> str:
+        payload = item if isinstance(item, dict) else {}
+        return cls._first_text(
+            payload.get("publish_title"),
+            payload.get("title"),
+            payload.get("text"),
+            payload.get("material_name"),
+            payload.get("name"),
+        )
+
     @classmethod
     def _normalize_product_row(
         cls,
@@ -11108,6 +13289,7 @@ class DashboardService:
 
     @classmethod
     def _extract_material_identity(cls, material_type: str, row: dict[str, Any]) -> dict[str, str]:
+        normalized_material_type = str(material_type or "").strip().upper() or "OTHER"
         material_info = row.get("material_info") or {}
         preferred_keys = {
             "VIDEO": ["video_material"],
@@ -11141,6 +13323,7 @@ class DashboardService:
                     "id",
                     "video_id",
                     "aweme_id",
+                    "aweme_item_id",
                     "room_id",
                     "material_name",
                     "name",
@@ -11163,24 +13346,28 @@ class DashboardService:
             chosen.get("id"),
         )
         video_id = cls._first_text(chosen.get("video_id"), chosen.get("aweme_id"))
-        material_name = cls._first_text(
+        material_name_candidates: list[Any] = [
             chosen.get("material_name"),
             chosen.get("name"),
-            chosen.get("title"),
-            chosen.get("text"),
-            chosen.get("video_name"),
-            chosen.get("room_name"),
-        )
+        ]
+        if normalized_material_type == "VIDEO":
+            title_name = cls._first_text(chosen.get("title"), chosen.get("video_name"))
+            if title_name and not cls._looks_like_publish_caption(title_name):
+                material_name_candidates.append(title_name)
+        elif normalized_material_type == "LIVE_ROOM":
+            material_name_candidates.append(chosen.get("room_name"))
+        material_name = cls._first_text(*material_name_candidates)
         material_key = cls._first_text(
             material_id,
             video_id,
+            chosen.get("aweme_item_id"),
             chosen.get("image_uri"),
             chosen.get("image_url"),
             chosen.get("cover_url"),
-            material_name,
         )
         if not material_key:
-            material_key = cls._json_text(material_info)[:200]
+            raw_identity = cls._json_text(chosen or material_info)
+            material_key = f"{normalized_material_type}:anon:{hashlib.sha1(raw_identity.encode('utf-8')).hexdigest()[:24]}"
         return {
             "material_key": material_key,
             "material_id": material_id,
@@ -11411,6 +13598,384 @@ class DashboardService:
                     return defaults
         return {}
 
+    @classmethod
+    def _plan_context_creative_entries(cls, plan_context: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_payload = cls._json_object(plan_context.get("raw_json"))
+        if not raw_payload:
+            return []
+        product_id = cls._first_text(plan_context.get("product_id"))
+        entries: list[dict[str, Any]] = []
+        creative_list = raw_payload.get("multi_product_creative_list")
+        if isinstance(creative_list, list):
+            creative_entries = [item for item in creative_list if isinstance(item, dict)]
+            if product_id:
+                matched_entries = [
+                    item
+                    for item in creative_entries
+                    if cls._first_text(item.get("product_id")) == product_id
+                ]
+                if matched_entries:
+                    creative_entries = matched_entries
+            entries.extend(creative_entries)
+        programmatic = cls._json_object(raw_payload.get("programmatic_creative_media_list"))
+        if programmatic:
+            entries.append(programmatic)
+        return entries
+
+    @classmethod
+    def _plan_context_has_creative_detail_payload(cls, plan_context: dict[str, Any]) -> bool:
+        raw_payload = cls._json_object(plan_context.get("raw_json"))
+        if not raw_payload:
+            return False
+        if "multi_product_creative_list" in raw_payload or "programmatic_creative_media_list" in raw_payload:
+            return True
+        for entry in cls._plan_context_creative_entries(plan_context):
+            if (
+                cls._creative_material_items(entry.get("title_material"))
+                or cls._creative_material_items(entry.get("video_material"))
+                or cls._normalize_image_material_payload(entry.get("image_material"))
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _creative_title_video_context(cls, plan_context: dict[str, Any]) -> dict[str, Any]:
+        title_texts: list[str] = []
+        title_material_ids: list[str] = []
+        titles_by_text: dict[str, dict[str, Any]] = {}
+        videos_by_video_id: dict[str, dict[str, Any]] = {}
+        videos_by_material_id: dict[str, dict[str, Any]] = {}
+        videos_by_name: dict[str, dict[str, Any]] = {}
+        for entry in cls._plan_context_creative_entries(plan_context):
+            entry_titles: list[str] = []
+            entry_title_ids: list[str] = []
+            for title_item in cls._creative_material_items(entry.get("title_material")):
+                title_text = cls._publish_title_from_title_item(title_item)
+                if title_text and title_text not in entry_titles:
+                    entry_titles.append(title_text)
+                title_material_id = cls._first_text(
+                    title_item.get("material_id"),
+                    title_item.get("title_material_id"),
+                    title_item.get("id"),
+                )
+                if title_material_id and title_material_id not in entry_title_ids:
+                    entry_title_ids.append(title_material_id)
+                normalized_title = cls._normalize_match_text(title_text)
+                if normalized_title and title_material_id:
+                    titles_by_text[normalized_title] = {
+                        "title": title_text,
+                        "material_id": title_material_id,
+                        "source": "creative_detail",
+                    }
+            for title_text in entry_titles:
+                if title_text not in title_texts:
+                    title_texts.append(title_text)
+            for title_material_id in entry_title_ids:
+                if title_material_id not in title_material_ids:
+                    title_material_ids.append(title_material_id)
+            for video_item in cls._creative_material_items(entry.get("video_material")):
+                video_id = cls._first_text(video_item.get("video_id"), video_item.get("videoId"))
+                material_id = cls._first_text(
+                    video_item.get("material_id"),
+                    video_item.get("video_material_id"),
+                    video_item.get("id"),
+                )
+                backend_material_name = cls._backend_material_name_from_video_item(video_item)
+                context = {
+                    "video_id": video_id,
+                    "material_id": material_id,
+                    "backend_material_name": backend_material_name,
+                    "publish_titles": list(entry_titles),
+                    "title_material_ids": list(entry_title_ids),
+                    "source": "creative_detail",
+                }
+                for video_key in (
+                    video_id,
+                    cls._first_text(video_item.get("aweme_id")),
+                    cls._first_text(video_item.get("aweme_item_id")),
+                    cls._first_text(video_item.get("item_id")),
+                ):
+                    if video_key:
+                        videos_by_video_id.setdefault(video_key, context)
+                if material_id:
+                    videos_by_material_id[material_id] = context
+                normalized_video_name = cls._normalize_match_text(backend_material_name)
+                if normalized_video_name:
+                    videos_by_name.setdefault(normalized_video_name, context)
+        return {
+            "publish_titles": title_texts,
+            "title_material_ids": title_material_ids,
+            "titles_by_text": titles_by_text,
+            "videos_by_video_id": videos_by_video_id,
+            "videos_by_material_id": videos_by_material_id,
+            "videos_by_name": videos_by_name,
+        }
+
+    @classmethod
+    def _material_creative_context_for_tuple(
+        cls,
+        row: tuple[Any, ...] | list[Any],
+        plan_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(row, (list, tuple)) or len(row) <= 25:
+            return {}
+        creative_context = cls._creative_title_video_context(plan_context)
+        material_type = str(row[7] or "").strip().upper()
+        material_id = str(row[9] or "").strip()
+        material_name = str(row[10] or "").strip()
+        video_id = str(row[12] or "").strip()
+        payload: dict[str, Any] = {"source": "creative_detail"}
+        if material_type == "VIDEO":
+            video_context = (
+                dict(creative_context.get("videos_by_video_id", {}).get(video_id) or {})
+                or dict(creative_context.get("videos_by_material_id", {}).get(material_id) or {})
+                or dict(creative_context.get("videos_by_name", {}).get(cls._normalize_match_text(material_name)) or {})
+            )
+            creative_material_id = cls._first_text(video_context.get("material_id"))
+            creative_video_id = cls._first_text(video_context.get("video_id"))
+            backend_name = cls._first_text(
+                video_context.get("backend_material_name"),
+                "" if cls._looks_like_publish_caption(material_name) else material_name,
+            )
+            publish_titles = [
+                str(item or "").strip()
+                for item in (video_context.get("publish_titles") or creative_context.get("publish_titles") or [])
+                if str(item or "").strip()
+            ]
+            title_material_ids = [
+                str(item or "").strip()
+                for item in (video_context.get("title_material_ids") or creative_context.get("title_material_ids") or [])
+                if str(item or "").strip()
+            ]
+            payload.update(
+                {
+                    "backend_material_name": backend_name,
+                    "publish_titles": list(dict.fromkeys(publish_titles)),
+                    "title_material_ids": list(dict.fromkeys(title_material_ids)),
+                    "material_id": creative_material_id,
+                    "video_id": creative_video_id,
+                }
+            )
+            return payload
+        if material_type == "TITLE":
+            publish_title = material_name
+            raw_payload = cls._json_object(row[25])
+            title_material = cls._json_object((raw_payload.get("material_info") or {}).get("title_material"))
+            if title_material:
+                publish_title = cls._publish_title_from_title_item(title_material) or publish_title
+            title_context = dict(
+                (creative_context.get("titles_by_text") or {}).get(cls._normalize_match_text(publish_title)) or {}
+            )
+            title_material_ids = list(creative_context.get("title_material_ids") or [])
+            title_material_id = cls._first_text(title_context.get("material_id"))
+            if not title_material_id and len(title_material_ids) == 1:
+                title_material_id = cls._first_text(title_material_ids[0])
+            payload.update(
+                {
+                    "backend_material_name": "",
+                    "publish_titles": [publish_title] if publish_title else list(creative_context.get("publish_titles") or []),
+                    "title_material_ids": title_material_ids,
+                    "material_id": title_material_id,
+                }
+            )
+            return payload
+        return payload
+
+    @classmethod
+    def _annotate_material_rows_with_creative_context(
+        cls,
+        material_rows: list[tuple[Any, ...]],
+        plan_context: dict[str, Any],
+    ) -> list[tuple[Any, ...]]:
+        if not material_rows or not cls._json_object((plan_context or {}).get("raw_json")):
+            return material_rows
+        annotated_rows: list[tuple[Any, ...]] = []
+        for raw_row in material_rows:
+            row = list(raw_row)
+            context = cls._material_creative_context_for_tuple(row, plan_context)
+            if context:
+                raw_payload = cls._json_object(row[25])
+                raw_payload["_creative_context"] = context
+                row[25] = cls._json_text(raw_payload)
+                if str(row[7] or "").strip().upper() == "VIDEO":
+                    creative_material_id = cls._first_text(context.get("material_id"))
+                    if creative_material_id:
+                        row[8] = creative_material_id
+                        row[9] = creative_material_id
+                    creative_video_id = cls._first_text(context.get("video_id"))
+                    if creative_video_id:
+                        row[12] = creative_video_id
+                    backend_name = cls._first_text(context.get("backend_material_name"))
+                    if backend_name:
+                        row[10] = backend_name
+                elif str(row[7] or "").strip().upper() == "TITLE":
+                    creative_material_id = cls._first_text(context.get("material_id"))
+                    if creative_material_id:
+                        row[8] = creative_material_id
+                        row[9] = creative_material_id
+                    row[10] = ""
+            annotated_rows.append(tuple(row))
+        return annotated_rows
+
+    @classmethod
+    def _plan_context_has_title_video_creative_pool(cls, plan_context: dict[str, Any]) -> bool:
+        for entry in cls._plan_context_creative_entries(plan_context):
+            title_items = cls._creative_material_items(entry.get("title_material"))
+            video_items = cls._creative_material_items(entry.get("video_material"))
+            if title_items and video_items:
+                return True
+        return False
+
+    @staticmethod
+    def _material_tuple_type(row: Any) -> str:
+        if not isinstance(row, (list, tuple)) or len(row) <= 7:
+            return ""
+        return str(row[7] or "").strip().upper()
+
+    @staticmethod
+    def _material_tuple_key(row: Any) -> tuple[str, str]:
+        if not isinstance(row, (list, tuple)):
+            return ("", "")
+        material_type = DashboardService._material_tuple_type(row)
+        material_key = str((row[8] if len(row) > 8 else "") or "").strip()
+        return (material_type, material_key)
+
+    @staticmethod
+    def _material_tuple_has_positive_metrics(row: Any) -> bool:
+        if not isinstance(row, (list, tuple)):
+            return False
+        metric_indexes = (16, 17, 18, 19, 20, 21, 22, 23)
+        for index in metric_indexes:
+            if len(row) <= index:
+                continue
+            try:
+                if float(row[index] or 0) > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _zero_material_source_row_metrics(row: dict[str, Any]) -> None:
+        for field in (
+            "product_show_count",
+            "product_click_count",
+            "overall_show_count",
+            "overall_click_count",
+            "stat_cost",
+            "pay_amount",
+            "total_pay_amount",
+            "settled_pay_amount",
+            "order_count",
+            "settled_order_count",
+        ):
+            if field in {"stat_cost", "pay_amount", "total_pay_amount", "settled_pay_amount"}:
+                row[field] = 0.0
+            else:
+                row[field] = 0
+        row["roi"] = 0.0
+        row["settled_roi"] = 0.0
+        row["pay_order_cost"] = 0.0
+        row["settled_amount_rate"] = 0.0
+        row["refund_amount_1h"] = 0.0
+        row["refund_rate_1h"] = None
+
+    @staticmethod
+    def _material_source_row_has_positive_metrics(row: dict[str, Any]) -> bool:
+        for field in (
+            "product_show_count",
+            "product_click_count",
+            "overall_show_count",
+            "overall_click_count",
+            "stat_cost",
+            "pay_amount",
+            "total_pay_amount",
+            "settled_pay_amount",
+            "order_count",
+            "settled_order_count",
+        ):
+            try:
+                if float(row.get(field, 0) or 0) > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @classmethod
+    def _plan_material_rows_need_creative_video_fallback(cls, material_rows: list[tuple[Any, ...]]) -> bool:
+        title_rows = [row for row in material_rows if cls._material_tuple_type(row) == "TITLE"]
+        if not title_rows:
+            return False
+        if not any(cls._material_tuple_has_positive_metrics(row) for row in title_rows):
+            return False
+        video_rows = [row for row in material_rows if cls._material_tuple_type(row) == "VIDEO"]
+        return not bool(video_rows)
+
+    @classmethod
+    def _merge_material_tuple_rows(
+        cls,
+        existing_rows: list[tuple[Any, ...]],
+        incoming_rows: list[tuple[Any, ...]],
+    ) -> list[tuple[Any, ...]]:
+        merged_rows = list(existing_rows or [])
+        index_by_key: dict[tuple[str, str], int] = {}
+        for index, row in enumerate(merged_rows):
+            key = cls._material_tuple_key(row)
+            if key[0] and key[1]:
+                index_by_key[key] = index
+        for row in incoming_rows or []:
+            key = cls._material_tuple_key(row)
+            if key[0] and key[1] and key in index_by_key:
+                merged_rows[index_by_key[key]] = row
+                continue
+            if key[0] and key[1]:
+                index_by_key[key] = len(merged_rows)
+            merged_rows.append(row)
+        return merged_rows
+
+    def _hydrate_reporting_plan_context_with_detail(
+        self,
+        client: OceanEngineClient,
+        plan_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        hydrated = dict(plan_context or {})
+        if self._plan_context_has_creative_detail_payload(hydrated):
+            return hydrated
+        advertiser_id = int(hydrated.get("advertiser_id", 0) or 0)
+        ad_id = int(hydrated.get("ad_id", 0) or 0)
+        if advertiser_id <= 0 or ad_id <= 0:
+            return hydrated
+        try:
+            detail_response = client.get_plan_detail(advertiser_id, ad_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "hydrate reporting plan detail failed: advertiser_id=%s ad_id=%s error=%s",
+                advertiser_id,
+                ad_id,
+                exc,
+            )
+            return hydrated
+        detail_data = detail_response.get("data") or {}
+        if not isinstance(detail_data, dict) or not detail_data:
+            return hydrated
+        hydrated["raw_json"] = json.dumps(detail_data, ensure_ascii=False)
+        for key in ("marketing_goal", "plan_source", "plan_delivery_type", "status", "opt_status", "ad_name"):
+            if not self._first_text(hydrated.get(key)):
+                value = self._first_text(detail_data.get(key))
+                if value:
+                    hydrated[key] = value
+        if not self._first_text(hydrated.get("product_id")):
+            creative_list = detail_data.get("multi_product_creative_list")
+            if isinstance(creative_list, list):
+                for item in creative_list:
+                    if not isinstance(item, dict):
+                        continue
+                    product_id = self._first_text(item.get("product_id"))
+                    if product_id:
+                        hydrated["product_id"] = product_id
+                        break
+        return hydrated
+
     @staticmethod
     def _resolve_ffmpeg_executable() -> str:
         binary = shutil.which("ffmpeg")
@@ -11509,6 +14074,11 @@ class DashboardService:
             return summary
         return f"{base}; {summary}"
 
+    @staticmethod
+    def _format_upload_file_size(value: int | float) -> str:
+        normalized = max(int(value or 0), 0)
+        return f"{normalized / 1000 / 1000:.1f}MB"
+
     @classmethod
     def _probe_upload_video(cls, file_row: dict[str, Any], file_path: Path) -> tuple[str, str]:
         material_name = str(file_row.get("original_name") or file_row.get("stored_name") or file_path.name)
@@ -11517,10 +14087,30 @@ class DashboardService:
         except VideoProbeError as exc:
             summary = f"\u89c6\u9891\u5143\u6570\u636e\u63a2\u6d4b\u5931\u8d25: {exc}"
             print(f"[upload-video-probe] {material_name} | {summary}", file=sys.stderr)
-            return summary, ""
+            return summary, summary
         summary = format_video_probe_summary(probe_result)
         print(f"[upload-video-probe] {material_name} | {summary}", file=sys.stderr)
-        problems = validate_video_probe_for_upload(probe_result)
+        problems: list[str] = []
+        try:
+            file_size = int(file_row.get("file_size") or 0) or int(file_path.stat().st_size)
+        except Exception:
+            file_size = 0
+        max_file_size = int(MATERIAL_UPLOAD_VIDEO_MAX_FILE_SIZE_BYTES or 0)
+        if max_file_size > 0 and file_size > max_file_size:
+            problems.append(
+                "文件大小 "
+                f"{cls._format_upload_file_size(file_size)} 超过上传限制 "
+                f"{cls._format_upload_file_size(max_file_size)}"
+            )
+        problems.extend(validate_video_probe_for_upload(
+            probe_result,
+            allowed_display_aspect_ratios=MATERIAL_UPLOAD_VIDEO_ALLOWED_ASPECT_RATIOS,
+            min_duration_seconds=MATERIAL_UPLOAD_VIDEO_MIN_DURATION_SECONDS,
+            max_duration_seconds=MATERIAL_UPLOAD_VIDEO_MAX_DURATION_SECONDS,
+            min_bitrate_bps=MATERIAL_UPLOAD_VIDEO_MIN_BITRATE_BPS,
+            allowed_containers=MATERIAL_UPLOAD_VIDEO_ALLOWED_CONTAINERS,
+            allowed_codecs=MATERIAL_UPLOAD_VIDEO_ALLOWED_CODECS,
+        ))
         if not problems:
             return summary, ""
         failure_message = (
@@ -11530,6 +14120,16 @@ class DashboardService:
             + summary
         )
         return summary, failure_message
+
+    @classmethod
+    def _validate_material_upload_video_before_accept(cls, file_name: str, file_path: Path) -> str:
+        summary, failure_message = cls._probe_upload_video(
+            {"original_name": str(file_name or file_path.name)},
+            Path(file_path),
+        )
+        if failure_message:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=failure_message)
+        return summary
 
     @classmethod
     def _normalize_material_row(
@@ -12463,14 +15063,26 @@ class DashboardService:
             material_key = str(row.get("material_key") or "").strip()
             if not material_key:
                 continue
+            material_type = str(row.get("material_type") or "").strip() or "OTHER"
+            alignment = self._material_alignment_fields_from_source_row(row)
             group = groups.setdefault(
                 material_key,
                 {
                     "material_key": material_key,
                     "material_id": str(row.get("material_id") or "").strip(),
                     "create_time": str(row.get("create_time") or "").strip(),
-                    "material_name": str(row.get("material_name") or "").strip() or "未命名素材",
-                    "material_type": str(row.get("material_type") or "").strip() or "OTHER",
+                    "material_name": self._material_display_name_value(
+                        material_type,
+                        alignment.get("material_name") or row.get("material_name"),
+                    ),
+                    "backend_material_name": str(alignment.get("backend_material_name") or "").strip(),
+                    "backend_material_name_costs": {},
+                    "publish_titles": self._split_publish_titles(alignment.get("publish_title")),
+                    "creative_title_material_ids": self._json_text_list(
+                        alignment.get("creative_title_material_ids_json")
+                    ),
+                    "creative_source": str(alignment.get("creative_source") or "").strip(),
+                    "material_type": material_type,
                     "video_id": str(row.get("video_id") or "").strip(),
                     "cover_url": str(row.get("cover_url") or "").strip(),
                     "aweme_item_id": str(row.get("aweme_item_id") or "").strip(),
@@ -12510,6 +15122,25 @@ class DashboardService:
             overall_click_count = int(float(row.get("overall_click_count", row.get("product_click_count", 0.0)) or 0.0))
             explicit_plan_ids = self._json_int_set(row.get("plan_ids"))
             explicit_advertiser_ids = self._json_int_set(row.get("advertiser_ids"))
+            backend_name = str(alignment.get("backend_material_name") or "").strip()
+            if backend_name:
+                backend_costs = group.setdefault("backend_material_name_costs", {})
+                backend_costs[backend_name] = round(
+                    float(backend_costs.get(backend_name, 0.0) or 0.0) + stat_cost,
+                    2,
+                )
+                group["backend_material_name"] = sorted(
+                    backend_costs.items(),
+                    key=lambda item: (-float(item[1] or 0.0), item[0]),
+                )[0][0]
+            for title in self._split_publish_titles(alignment.get("publish_title")):
+                if title and title not in group.setdefault("publish_titles", []):
+                    group["publish_titles"].append(title)
+            for title_id in self._json_text_list(alignment.get("creative_title_material_ids_json")):
+                if title_id and title_id not in group.setdefault("creative_title_material_ids", []):
+                    group["creative_title_material_ids"].append(title_id)
+            if not str(group.get("creative_source") or "").strip() and str(alignment.get("creative_source") or "").strip():
+                group["creative_source"] = str(alignment.get("creative_source") or "").strip()
             group["stat_cost"] = round(group["stat_cost"] + stat_cost, 2)
             group["pay_amount"] = round(group["pay_amount"] + pay_amount, 2)
             group["total_pay_amount"] = round(group["total_pay_amount"] + total_pay_amount, 2)
@@ -12583,6 +15214,15 @@ class DashboardService:
             settled_order_count = int(group.get("settled_order_count", 0) or 0)
             overall_show_count = int(group.get("overall_show_count", 0) or 0)
             overall_click_count = int(group.get("overall_click_count", 0) or 0)
+            backend_name = str(group.get("backend_material_name") or "").strip()
+            if not backend_name:
+                backend_costs = dict(group.get("backend_material_name_costs") or {})
+                if backend_costs:
+                    backend_name = sorted(
+                        backend_costs.items(),
+                        key=lambda item: (-float(item[1] or 0.0), item[0]),
+                    )[0][0]
+            display_name = str(group.get("material_name") or "").strip() or backend_name
             product_info_text = self._summarize_material_product_names(
                 sorted(str(name) for name in group.get("product_names", set()) if str(name or "").strip())
             ) or str(group.get("product_info_text") or "")
@@ -12594,7 +15234,13 @@ class DashboardService:
                 {
                     "material_key": group["material_key"],
                     "material_id": group["material_id"],
-                    "material_name": group["material_name"],
+                    "material_name": self._material_display_name_value(group.get("material_type"), display_name),
+                    "backend_material_name": backend_name,
+                    "publish_title": self._join_publish_titles(list(group.get("publish_titles") or [])),
+                    "creative_title_material_ids_json": self._json_text(
+                        list(dict.fromkeys(group.get("creative_title_material_ids") or []))
+                    ),
+                    "creative_source": str(group.get("creative_source") or "").strip(),
                     "create_time": str(group.get("create_time") or ""),
                     "material_type": group["material_type"],
                     "video_id": group["video_id"],
@@ -12675,6 +15321,19 @@ class DashboardService:
             product_names = sorted(str(name) for name in group.get("product_names", set()) if str(name or "").strip())
             product_info_text = self._summarize_material_product_names(product_names) or str(group.get("product_info_text") or "")
             overall_ctr = round(overall_click_count / overall_show_count * 100.0, 2) if overall_show_count > 0 else 0.0
+            backend_name = str(group.get("backend_material_name") or "").strip()
+            backend_costs = dict(group.get("backend_material_name_costs") or {})
+            if backend_costs:
+                backend_name = sorted(
+                    backend_costs.items(),
+                    key=lambda item: (-float(item[1] or 0.0), item[0]),
+                )[0][0]
+            publish_title = self._join_publish_titles(list(group.get("publish_titles") or []))
+            title_ids_json = self._json_text(list(dict.fromkeys(group.get("creative_title_material_ids") or [])))
+            creative_source = str(group.get("creative_source") or "").strip()
+            if not creative_source and (publish_title or title_ids_json != "[]" or backend_name):
+                creative_source = "creative_detail" if publish_title or title_ids_json != "[]" else "material_raw"
+            display_name = str(group.get("material_name") or "").strip() or backend_name
             rollups.append(
                 (
                     snapshot_time,
@@ -12682,7 +15341,7 @@ class DashboardService:
                     window_end,
                     str(group["material_key"] or ""),
                     str(group["material_id"] or ""),
-                    str(group["material_name"] or ""),
+                    self._material_display_name_value(group.get("material_type"), display_name),
                     str(group.get("create_time") or ""),
                     str(group["material_type"] or ""),
                     str(group["video_id"] or ""),
@@ -12718,6 +15377,10 @@ class DashboardService:
                         if total_pay_amount > 0 and bool(group.get("has_refund_metric"))
                         else None
                     ),
+                    backend_name,
+                    publish_title,
+                    title_ids_json,
+                    creative_source,
                 )
             )
         return rollups
@@ -12917,26 +15580,23 @@ class DashboardService:
         rows: list[dict[str, Any]],
         target: dict[str, Any],
     ) -> None:
-        title_rows = [row for row in rows if str(row.get("material_type") or "").strip().upper() == "TITLE"]
-        non_title_rows = [row for row in rows if str(row.get("material_type") or "").strip().upper() != "TITLE"]
-        if not title_rows or not non_title_rows:
+        title_rows = [
+            row
+            for row in rows
+            if str(row.get("material_type") or "").strip().upper() == "TITLE"
+        ]
+        if not title_rows:
             return
-        target_stat_cost = round(float(target.get("stat_cost", 0.0) or 0.0), 2)
-        if target_stat_cost <= 0:
+        non_title_rows = [
+            row
+            for row in rows
+            if str(row.get("material_type") or "").strip().upper() != "TITLE"
+        ]
+        if not non_title_rows:
             return
         for row in title_rows:
-            row["stat_cost"] = 0.0
-            row["pay_amount"] = 0.0
-            row["total_pay_amount"] = 0.0
-            row["settled_pay_amount"] = 0.0
-            row["order_count"] = 0
-            row["settled_order_count"] = 0
-            row["product_show_count"] = 0
-            row["product_click_count"] = 0
-            if "overall_show_count" in row:
-                row["overall_show_count"] = 0
-            if "overall_click_count" in row:
-                row["overall_click_count"] = 0
+            if self._material_source_row_has_positive_metrics(row):
+                self._zero_material_source_row_metrics(row)
 
     def _normalize_material_source_rows_to_plan_metrics(
         self,
@@ -12958,7 +15618,13 @@ class DashboardService:
             return normalized_rows
 
         targets: dict[tuple[int, int], dict[str, Any]] = {}
+        targets_by_ad_id: dict[int, dict[str, Any]] = {}
         exact_snapshot_by_plan: dict[tuple[int, int], str] = {}
+        official_plan_sources = (
+            PLAN_SOURCE_UNI_PROMOTION,
+            PLAN_SOURCE_UNI_CUBIC,
+            PLAN_SOURCE_UNI_REPORT,
+        )
         if use_current:
             for row in normalized_rows:
                 advertiser_id = int(row.get("advertiser_id", 0) or 0)
@@ -12971,6 +15637,22 @@ class DashboardService:
                 if not previous_snapshot_time or row_snapshot_time > previous_snapshot_time:
                     exact_snapshot_by_plan[key] = row_snapshot_time
 
+        def target_has_activity(row: dict[str, Any]) -> bool:
+            for field in (
+                "stat_cost",
+                "pay_amount",
+                "total_pay_amount",
+                "settled_pay_amount",
+                "order_count",
+                "settled_order_count",
+            ):
+                try:
+                    if float(row.get(field, 0) or 0) > 0:
+                        return True
+                except Exception:
+                    continue
+            return False
+
         def store_plan_rows(rows: list[Any]) -> None:
             for raw_row in rows:
                 row = dict(raw_row)
@@ -12979,6 +15661,9 @@ class DashboardService:
                 if advertiser_id <= 0 or ad_id <= 0:
                     continue
                 targets.setdefault((advertiser_id, ad_id), row)
+                existing = targets_by_ad_id.get(ad_id)
+                if existing is None or (not target_has_activity(existing) and target_has_activity(row)):
+                    targets_by_ad_id[ad_id] = row
 
         def query_plan_rows(table_name: str, extra_where: str, extra_params: list[Any], missing_only: bool = False) -> None:
             target_ad_ids = [ad_id for ad_id in ad_ids if not missing_only or not any(key[1] == ad_id for key in targets)]
@@ -12989,15 +15674,16 @@ class DashboardService:
                 id_clause = ",".join("?" for _ in chunk)
                 rows = conn.execute(
                     f"""
-                    SELECT advertiser_id, ad_id, stat_cost, pay_amount, total_pay_amount,
+                    SELECT advertiser_id, ad_id, plan_source, stat_cost, pay_amount, total_pay_amount,
                            settled_pay_amount, order_count, settled_order_count
                     FROM {table_name}
                     WHERE customer_center_id = ?
                       {extra_where}
+                      AND UPPER(COALESCE(plan_source, '')) IN (?, ?, ?)
                       AND ad_id IN ({id_clause})
                     ORDER BY ad_id ASC, snapshot_time DESC
                     """,
-                    [normalized_customer_center_id, *extra_params, *chunk],
+                    [normalized_customer_center_id, *extra_params, *official_plan_sources, *chunk],
                 ).fetchall()
                 store_plan_rows(list(rows))
 
@@ -13020,15 +15706,16 @@ class DashboardService:
                     time_clause = ",".join("?" for _ in time_chunk)
                     rows = conn.execute(
                         f"""
-                        SELECT snapshot_time, advertiser_id, ad_id, stat_cost, pay_amount, total_pay_amount,
+                        SELECT snapshot_time, advertiser_id, ad_id, plan_source, stat_cost, pay_amount, total_pay_amount,
                                settled_pay_amount, order_count, settled_order_count
                         FROM plan_snapshots
                         WHERE customer_center_id = ?
+                          AND UPPER(COALESCE(plan_source, '')) IN (?, ?, ?)
                           AND ad_id IN ({ad_clause})
                           AND snapshot_time IN ({time_clause})
                         ORDER BY snapshot_time DESC, ad_id ASC
                         """,
-                        [normalized_customer_center_id, *ad_chunk, *time_chunk],
+                        [normalized_customer_center_id, *official_plan_sources, *ad_chunk, *time_chunk],
                     ).fetchall()
                     for raw_row in rows:
                         row = dict(raw_row)
@@ -13079,7 +15766,7 @@ class DashboardService:
             return material_integer_sum(plan_rows, field) > int(float(target_value or 0))
 
         for key, plan_rows in rows_by_plan.items():
-            target = targets.get(key)
+            target = targets.get(key) or targets_by_ad_id.get(key[1])
             if not target:
                 continue
             self._prefer_non_title_material_metrics(plan_rows, target)
@@ -13163,6 +15850,7 @@ class DashboardService:
             material_type = str(row.get("material_type") or "").strip() or "OTHER"
             if advertiser_id <= 0 or ad_id <= 0 or not material_key:
                 continue
+            alignment = self._material_alignment_fields_from_source_row(row)
             key = (advertiser_id, ad_id, material_type, material_key)
             bucket = relation_groups.setdefault(
                 key,
@@ -13174,7 +15862,16 @@ class DashboardService:
                     "material_type": material_type,
                     "material_key": material_key,
                     "material_id": str(row.get("material_id") or "").strip(),
-                    "material_name": str(row.get("material_name") or "").strip() or "未命名素材",
+                    "material_name": self._material_display_name_value(
+                        material_type,
+                        alignment.get("material_name") or row.get("material_name"),
+                    ),
+                    "backend_material_name": str(alignment.get("backend_material_name") or "").strip(),
+                    "publish_titles": self._split_publish_titles(alignment.get("publish_title")),
+                    "creative_title_material_ids": self._json_text_list(
+                        alignment.get("creative_title_material_ids_json")
+                    ),
+                    "creative_source": str(alignment.get("creative_source") or "").strip(),
                     "create_time": self._normalize_datetime_text(row.get("create_time")),
                     "video_id": str(row.get("video_id") or "").strip(),
                     "cover_url": self._normalize_media_url(row.get("cover_url")),
@@ -13201,7 +15898,23 @@ class DashboardService:
             if not str(bucket.get("material_id") or "").strip():
                 bucket["material_id"] = str(row.get("material_id") or "").strip()
             if str(bucket.get("material_name") or "").strip() in {"", "未命名素材"}:
-                bucket["material_name"] = str(row.get("material_name") or "").strip() or "未命名素材"
+                bucket["material_name"] = self._material_display_name_value(
+                    material_type,
+                    alignment.get("material_name") or row.get("material_name"),
+                )
+            backend_name = str(alignment.get("backend_material_name") or "").strip()
+            if backend_name:
+                bucket["backend_material_name"] = backend_name
+                if str(material_type or "").strip().upper() != "TITLE":
+                    bucket["material_name"] = backend_name
+            for title in self._split_publish_titles(alignment.get("publish_title")):
+                if title and title not in bucket.setdefault("publish_titles", []):
+                    bucket["publish_titles"].append(title)
+            for title_id in self._json_text_list(alignment.get("creative_title_material_ids_json")):
+                if title_id and title_id not in bucket.setdefault("creative_title_material_ids", []):
+                    bucket["creative_title_material_ids"].append(title_id)
+            if not str(bucket.get("creative_source") or "").strip() and str(alignment.get("creative_source") or "").strip():
+                bucket["creative_source"] = str(alignment.get("creative_source") or "").strip()
             row_create_time = self._normalize_datetime_text(row.get("create_time"))
             bucket_create_time = self._normalize_datetime_text(bucket.get("create_time"))
             if row_create_time and (not bucket_create_time or row_create_time < bucket_create_time):
@@ -13266,6 +15979,12 @@ class DashboardService:
         for group in relation_groups.values():
             product_names = sorted(str(item).strip() for item in group.get("product_names", set()) if str(item).strip())
             product_info_text = self._summarize_material_product_names(product_names) or str(group.get("product_info_text") or "")
+            backend_name = str(group.get("backend_material_name") or "").strip()
+            publish_title = self._join_publish_titles(list(group.get("publish_titles") or []))
+            title_ids_json = self._json_text(list(dict.fromkeys(group.get("creative_title_material_ids") or [])))
+            creative_source = str(group.get("creative_source") or "").strip()
+            if not creative_source and (backend_name or publish_title or title_ids_json != "[]"):
+                creative_source = "creative_detail" if publish_title or title_ids_json != "[]" else "material_raw"
             relation_rows.append(
                 (
                     str(snapshot_time or ""),
@@ -13278,7 +15997,7 @@ class DashboardService:
                     str(group.get("material_type") or ""),
                     str(group.get("material_key") or ""),
                     str(group.get("material_id") or ""),
-                    str(group.get("material_name") or "") or "未命名素材",
+                    self._material_display_name_value(group.get("material_type"), group.get("material_name")),
                     str(group.get("create_time") or ""),
                     str(group.get("video_id") or ""),
                     str(group.get("cover_url") or ""),
@@ -13295,6 +16014,10 @@ class DashboardService:
                     str(group.get("top_anchor_name") or ""),
                     product_info_text,
                     1 if bool(group.get("is_original")) else 0,
+                    backend_name,
+                    publish_title,
+                    title_ids_json,
+                    creative_source,
                 )
             )
         relation_rows.sort(
@@ -13565,6 +16288,836 @@ class DashboardService:
             ],
         )
 
+    @classmethod
+    def _material_raw_alignment_metadata(
+        cls,
+        material_type: str,
+        material_name: str,
+        raw_json: Any,
+    ) -> dict[str, Any]:
+        normalized_type = str(material_type or "").strip().upper()
+        raw_payload = cls._json_object(raw_json)
+        material_info = cls._json_object(raw_payload.get("material_info"))
+        creative_context = cls._json_object(raw_payload.get("_creative_context"))
+        publish_titles = cls._json_text_list(creative_context.get("publish_titles"))
+        title_material_ids = cls._json_text_list(creative_context.get("title_material_ids"))
+        backend_name = cls._first_text(creative_context.get("backend_material_name"))
+        if normalized_type == "VIDEO":
+            video_material = cls._json_object(material_info.get("video_material"))
+            backend_name = cls._first_text(
+                backend_name,
+                cls._backend_material_name_from_video_item(video_material),
+                "" if cls._looks_like_publish_caption(material_name) else material_name,
+            )
+        elif normalized_type == "TITLE":
+            title_material = cls._json_object(material_info.get("title_material"))
+            publish_title = cls._publish_title_from_title_item(title_material) or str(material_name or "").strip()
+            if publish_title and publish_title not in publish_titles:
+                publish_titles.insert(0, publish_title)
+            title_material_id = cls._first_text(
+                title_material.get("material_id"),
+                title_material.get("title_material_id"),
+                title_material.get("id"),
+            )
+            if title_material_id and title_material_id not in title_material_ids:
+                title_material_ids.insert(0, title_material_id)
+            backend_name = ""
+        return {
+            "backend_material_name": backend_name,
+            "publish_titles": list(dict.fromkeys(publish_titles)),
+            "title_material_ids": list(dict.fromkeys(title_material_ids)),
+        }
+
+    @staticmethod
+    def _join_publish_titles(values: list[str], *, limit: int = 3) -> str:
+        titles = [str(item or "").strip() for item in values if str(item or "").strip()]
+        return " / ".join(list(dict.fromkeys(titles))[:limit])
+
+    @staticmethod
+    def _split_publish_titles(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple, set)):
+            raw_values = [str(item or "").strip() for item in value]
+        else:
+            raw_values = [part.strip() for part in str(value or "").split(" / ")]
+        return list(dict.fromkeys([item for item in raw_values if item]))
+
+    @classmethod
+    def _material_alignment_fields(
+        cls,
+        material_type: Any,
+        material_name: Any,
+        raw_json: Any = "",
+        *,
+        backend_material_name: Any = "",
+        publish_title: Any = "",
+        creative_title_material_ids_json: Any = "",
+        creative_source: Any = "",
+    ) -> dict[str, str]:
+        normalized_type = str(material_type or "").strip().upper()
+        original_name = str(material_name or "").strip()
+        raw_payload = cls._json_object(raw_json)
+        has_creative_context = bool(cls._json_object(raw_payload.get("_creative_context")))
+        raw_meta = cls._material_raw_alignment_metadata(normalized_type, original_name, raw_json)
+        backend_name = cls._first_text(backend_material_name, raw_meta.get("backend_material_name"))
+        publish_titles = cls._split_publish_titles(publish_title)
+        for title in cls._json_text_list(raw_meta.get("publish_titles")):
+            if title and title not in publish_titles:
+                publish_titles.append(title)
+        title_material_ids = cls._json_text_list(creative_title_material_ids_json)
+        for title_id in cls._json_text_list(raw_meta.get("title_material_ids")):
+            if title_id and title_id not in title_material_ids:
+                title_material_ids.append(title_id)
+
+        if normalized_type == "VIDEO":
+            backend_name = cls._first_text(
+                backend_name,
+                "" if cls._looks_like_publish_caption(original_name) else original_name,
+            )
+            display_name = original_name or backend_name
+        elif normalized_type == "TITLE":
+            if original_name and original_name not in publish_titles:
+                publish_titles.insert(0, original_name)
+            display_name = ""
+            backend_name = ""
+        elif normalized_type == UNATTRIBUTED_MATERIAL_TYPE:
+            display_name = UNATTRIBUTED_MATERIAL_DISPLAY_NAME
+            backend_name = ""
+        else:
+            backend_name = cls._first_text(
+                backend_name,
+                "" if cls._looks_like_publish_caption(original_name) else original_name,
+            )
+            display_name = original_name or backend_name
+
+        resolved_source = str(creative_source or "").strip()
+        if not resolved_source:
+            if has_creative_context:
+                resolved_source = "creative_detail"
+            elif backend_name or publish_titles or title_material_ids:
+                resolved_source = "material_raw"
+
+        return {
+            "material_name": display_name,
+            "backend_material_name": backend_name,
+            "publish_title": cls._join_publish_titles(publish_titles),
+            "creative_title_material_ids_json": cls._json_text(list(dict.fromkeys(title_material_ids))),
+            "creative_source": resolved_source,
+        }
+
+    @classmethod
+    def _material_alignment_fields_from_source_row(cls, row: dict[str, Any]) -> dict[str, str]:
+        return cls._material_alignment_fields(
+            row.get("material_type"),
+            row.get("material_name"),
+            row.get("raw_json"),
+            backend_material_name=row.get("backend_material_name"),
+            publish_title=row.get("publish_title"),
+            creative_title_material_ids_json=row.get("creative_title_material_ids_json"),
+            creative_source=row.get("creative_source"),
+        )
+
+    @classmethod
+    def _material_alignment_fields_from_snapshot_tuple(cls, row: tuple[Any, ...] | list[Any]) -> dict[str, str]:
+        if not isinstance(row, (list, tuple)) or len(row) <= 25:
+            return cls._material_alignment_fields("", "")
+        return cls._material_alignment_fields(
+            row[7],
+            row[10],
+            row[25],
+        )
+
+    @staticmethod
+    def _optional_tuple_text(row: tuple[Any, ...] | list[Any], index: int, default: str = "") -> str:
+        if not isinstance(row, (list, tuple)) or len(row) <= index:
+            return default
+        value = row[index]
+        if value is None:
+            return default
+        return str(value or default).strip()
+
+    @classmethod
+    def _material_rollup_alignment_from_tuple(cls, row: tuple[Any, ...] | list[Any]) -> dict[str, str]:
+        return {
+            "backend_material_name": cls._optional_tuple_text(row, 37),
+            "publish_title": cls._optional_tuple_text(row, 38),
+            "creative_title_material_ids_json": cls._optional_tuple_text(row, 39, "[]") or "[]",
+            "creative_source": cls._optional_tuple_text(row, 40),
+        }
+
+    @classmethod
+    def _material_relation_alignment_from_tuple(cls, row: tuple[Any, ...] | list[Any]) -> dict[str, str]:
+        return {
+            "backend_material_name": cls._optional_tuple_text(row, 27),
+            "publish_title": cls._optional_tuple_text(row, 28),
+            "creative_title_material_ids_json": cls._optional_tuple_text(row, 29, "[]") or "[]",
+            "creative_source": cls._optional_tuple_text(row, 30),
+        }
+
+    def repair_material_title_video_alignment_day(
+        self,
+        customer_center_id: str,
+        day_key: str,
+        *,
+        client: OceanEngineClient | None = None,
+        fetch_creative: bool = True,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        normalized_day = str(day_key or "").strip()[:10]
+        if not normalized_customer_center_id or not normalized_day:
+            return {"ok": False, "reason": "invalid_target", "updated": False}
+
+        errors: list[dict[str, Any]] = []
+        with self.db() as conn:
+            relation_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM material_relation_daily
+                    WHERE customer_center_id = ?
+                      AND biz_date = ?
+                    ORDER BY stat_cost DESC, material_key ASC
+                    """,
+                    (normalized_customer_center_id, normalized_day),
+                ).fetchall()
+            ]
+            snapshot_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM material_snapshots
+                    WHERE customer_center_id = ?
+                      AND substr(snapshot_time, 1, 10) = ?
+                    ORDER BY stat_cost DESC, material_key ASC
+                    """,
+                    (normalized_customer_center_id, normalized_day),
+                ).fetchall()
+            ]
+            daily_rows_by_key = {
+                str(row.get("material_key") or "").strip(): dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT material_key, material_name, material_type
+                    FROM material_daily
+                    WHERE customer_center_id = ?
+                      AND biz_date = ?
+                    """,
+                    (normalized_customer_center_id, normalized_day),
+                ).fetchall()
+            }
+            profile_rows_by_key = {
+                str(row.get("material_key") or "").strip(): dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT material_key, material_name, material_type
+                    FROM material_profile
+                    WHERE customer_center_id = ?
+                    """,
+                    (normalized_customer_center_id,),
+                ).fetchall()
+            }
+
+        if not relation_rows and not snapshot_rows:
+            return {
+                "ok": True,
+                "updated": False,
+                "reason": "no_material_rows",
+                "customer_center_id": normalized_customer_center_id,
+                "day": normalized_day,
+                "relation_row_count": 0,
+                "snapshot_row_count": 0,
+            }
+
+        runtime_client = client
+        if runtime_client is None and fetch_creative:
+            runtime_client = self._build_scoped_customer_center_client(normalized_customer_center_id)
+
+        plan_pairs = sorted(
+            {
+                (int(row.get("advertiser_id", 0) or 0), int(row.get("ad_id", 0) or 0))
+                for row in [*relation_rows, *snapshot_rows]
+                if int(row.get("advertiser_id", 0) or 0) > 0 and int(row.get("ad_id", 0) or 0) > 0
+            }
+        )
+        creative_by_plan: dict[tuple[int, int], dict[str, Any]] = {}
+        if fetch_creative and runtime_client is not None:
+            def fetch_creative_context(pair: tuple[int, int]) -> tuple[tuple[int, int], dict[str, Any] | None, dict[str, Any] | None]:
+                advertiser_id, ad_id = pair
+                try:
+                    detail_response = runtime_client.get_plan_detail(advertiser_id, ad_id)
+                    detail_data = detail_response.get("data") or {}
+                    if isinstance(detail_data, dict) and detail_data:
+                        return pair, self._creative_title_video_context({"raw_json": self._json_text(detail_data)}), None
+                    return pair, {}, None
+                except Exception as exc:  # noqa: BLE001
+                    return pair, None, self._api_error_payload(
+                            exc,
+                            stage="creative_detail",
+                            advertiser_id=advertiser_id,
+                            ad_id=ad_id,
+                            start_date=normalized_day,
+                            end_date=normalized_day,
+                    )
+            try:
+                scoped_config = self._scoped_config_for_customer_center(normalized_customer_center_id)
+            except Exception:
+                scoped_config = {}
+            creative_workers = max(
+                1,
+                min(
+                    int(scoped_config.get("max_workers") or settings.nightly_history_workers or settings.material_sync_workers or 4),
+                    8,
+                    len(plan_pairs) or 1,
+                ),
+            )
+            with ThreadPoolExecutor(max_workers=creative_workers) as pool:
+                future_map = {pool.submit(fetch_creative_context, pair): pair for pair in plan_pairs}
+                for future in as_completed(future_map):
+                    pair, context, error = future.result()
+                    if error:
+                        errors.append(error)
+                        continue
+                    creative_by_plan[pair] = dict(context or {})
+
+        video_ids_by_advertiser: dict[int, set[str]] = {}
+        material_ids_by_advertiser: dict[int, set[str]] = {}
+        for row in [*relation_rows, *snapshot_rows]:
+            if str(row.get("material_type") or "").strip().upper() != "VIDEO":
+                continue
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            if advertiser_id <= 0:
+                continue
+            current_backend_name = str(row.get("backend_material_name") or "").strip()
+            current_material_name = str(row.get("material_name") or "").strip()
+            if current_backend_name or (
+                current_material_name
+                and len(current_material_name) < 60
+                and not self._looks_like_publish_caption(current_material_name)
+            ):
+                continue
+            video_id = str(row.get("video_id") or "").strip()
+            material_id = self._numeric_material_id_text(row.get("material_id"))
+            if video_id:
+                video_ids_by_advertiser.setdefault(advertiser_id, set()).add(video_id)
+            if material_id:
+                material_ids_by_advertiser.setdefault(advertiser_id, set()).add(material_id)
+
+        library_name_by_video: dict[tuple[int, str], str] = {}
+        library_name_by_material: dict[tuple[int, str], str] = {}
+        if runtime_client is not None:
+            for advertiser_id in sorted(set(video_ids_by_advertiser) | set(material_ids_by_advertiser)):
+                video_ids = sorted(video_ids_by_advertiser.get(advertiser_id, set()))
+                for start in range(0, len(video_ids), 100):
+                    batch = video_ids[start : start + 100]
+                    if not batch:
+                        continue
+                    try:
+                        rows = runtime_client.list_qianchuan_videos(
+                            advertiser_id=advertiser_id,
+                            filtering={"video_ids": batch},
+                            page_size=max(20, min(100, len(batch))),
+                            max_pages=1,
+                        )
+                        for item in rows:
+                            video_id = str(item.get("id") or item.get("video_id") or item.get("videoId") or "").strip()
+                            material_id = self._numeric_material_id_text(item.get("material_id"))
+                            backend_name = self._backend_material_name_from_video_item(item)
+                            if video_id and backend_name:
+                                library_name_by_video[(advertiser_id, video_id)] = backend_name
+                            if material_id and backend_name:
+                                library_name_by_material[(advertiser_id, material_id)] = backend_name
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(
+                            self._api_error_payload(
+                                exc,
+                                stage="qianchuan_video_get_video_ids",
+                                advertiser_id=advertiser_id,
+                                video_ids=batch,
+                                start_date=normalized_day,
+                                end_date=normalized_day,
+                            )
+                        )
+                material_ids = sorted(material_ids_by_advertiser.get(advertiser_id, set()))
+                for start in range(0, len(material_ids), 100):
+                    batch = material_ids[start : start + 100]
+                    if not batch:
+                        continue
+                    try:
+                        rows = runtime_client.list_qianchuan_videos(
+                            advertiser_id=advertiser_id,
+                            filtering={"material_ids": [int(item) for item in batch]},
+                            page_size=max(20, min(100, len(batch))),
+                            max_pages=1,
+                        )
+                        for item in rows:
+                            video_id = str(item.get("id") or item.get("video_id") or item.get("videoId") or "").strip()
+                            material_id = self._numeric_material_id_text(item.get("material_id"))
+                            backend_name = self._backend_material_name_from_video_item(item)
+                            if video_id and backend_name:
+                                library_name_by_video[(advertiser_id, video_id)] = backend_name
+                            if material_id and backend_name:
+                                library_name_by_material[(advertiser_id, material_id)] = backend_name
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(
+                            self._api_error_payload(
+                                exc,
+                                stage="qianchuan_video_get_material_ids",
+                                advertiser_id=advertiser_id,
+                                material_ids=batch,
+                                start_date=normalized_day,
+                                end_date=normalized_day,
+                            )
+                        )
+
+        snapshot_by_relation_key = {
+            (
+                int(row.get("advertiser_id", 0) or 0),
+                int(row.get("ad_id", 0) or 0),
+                str(row.get("material_type") or "").strip().upper(),
+                str(row.get("material_key") or "").strip(),
+            ): row
+            for row in snapshot_rows
+        }
+
+        relation_updates: list[tuple[Any, ...]] = []
+        snapshot_updates: list[tuple[Any, ...]] = []
+        material_meta: dict[str, dict[str, Any]] = {}
+        material_name_changed = 0
+        backend_name_row_count = 0
+        publish_title_row_count = 0
+
+        def resolved_row_alignment(row: dict[str, Any], raw_json: Any = "") -> dict[str, Any]:
+            material_type = str(row.get("material_type") or "").strip().upper()
+            material_name = str(row.get("material_name") or "").strip()
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            ad_id = int(row.get("ad_id", 0) or 0)
+            material_id = str(row.get("material_id") or "").strip()
+            numeric_material_id = self._numeric_material_id_text(material_id)
+            video_id = str(row.get("video_id") or "").strip()
+            existing_backend_name = str(row.get("backend_material_name") or "").strip()
+            raw_meta = self._material_raw_alignment_metadata(material_type, material_name, raw_json)
+            creative_context = creative_by_plan.get((advertiser_id, ad_id), {})
+            video_context = {}
+            if material_type == "VIDEO" and creative_context:
+                video_context = (
+                    dict(creative_context.get("videos_by_video_id", {}).get(video_id) or {})
+                    or dict(creative_context.get("videos_by_material_id", {}).get(material_id) or {})
+                    or dict(creative_context.get("videos_by_material_id", {}).get(numeric_material_id) or {})
+                    or dict(creative_context.get("videos_by_name", {}).get(self._normalize_match_text(material_name)) or {})
+                )
+            publish_titles = self._json_text_list(raw_meta.get("publish_titles"))
+            title_material_ids = self._json_text_list(raw_meta.get("title_material_ids"))
+            if video_context:
+                publish_titles = self._json_text_list(video_context.get("publish_titles")) or publish_titles
+                title_material_ids = self._json_text_list(video_context.get("title_material_ids")) or title_material_ids
+            if not publish_titles and creative_context:
+                publish_titles = self._json_text_list(creative_context.get("publish_titles"))
+            if not title_material_ids and creative_context:
+                title_material_ids = self._json_text_list(creative_context.get("title_material_ids"))
+
+            if material_type == "VIDEO":
+                backend_name = self._first_text(
+                    video_context.get("backend_material_name") if video_context else "",
+                    existing_backend_name,
+                    library_name_by_video.get((advertiser_id, video_id), ""),
+                    library_name_by_material.get((advertiser_id, numeric_material_id), ""),
+                    raw_meta.get("backend_material_name"),
+                    "" if self._looks_like_publish_caption(material_name) else material_name,
+                )
+                display_name = backend_name or (
+                    "" if self._looks_like_publish_caption(material_name) else material_name
+                )
+            elif material_type == "TITLE":
+                backend_name = ""
+                if material_name and material_name not in publish_titles:
+                    publish_titles.insert(0, material_name)
+                display_name = ""
+            elif material_type == "UNATTRIBUTED_DELETED":
+                backend_name = ""
+                display_name = UNATTRIBUTED_MATERIAL_DISPLAY_NAME
+            else:
+                backend_name = self._first_text(
+                    existing_backend_name,
+                    raw_meta.get("backend_material_name"),
+                    "" if self._looks_like_publish_caption(material_name) else material_name,
+                )
+                display_name = backend_name or (
+                    "" if self._looks_like_publish_caption(material_name) else material_name
+                )
+            return {
+                "backend_material_name": backend_name,
+                "publish_title": self._join_publish_titles(publish_titles),
+                "title_material_ids_json": self._json_text(list(dict.fromkeys(title_material_ids))),
+                "creative_source": (
+                    "creative_detail"
+                    if video_context or creative_context
+                    else "qianchuan_video_get"
+                    if backend_name and (
+                        library_name_by_video.get((advertiser_id, video_id))
+                        or library_name_by_material.get((advertiser_id, numeric_material_id))
+                    )
+                    else "material_raw"
+                    if raw_meta.get("backend_material_name") or raw_meta.get("publish_titles")
+                    else ""
+                ),
+                "material_name": display_name,
+            }
+
+        for row in relation_rows:
+            key = (
+                int(row.get("advertiser_id", 0) or 0),
+                int(row.get("ad_id", 0) or 0),
+                str(row.get("material_type") or "").strip().upper(),
+                str(row.get("material_key") or "").strip(),
+            )
+            snapshot_row = snapshot_by_relation_key.get(key, {})
+            alignment = resolved_row_alignment(row, snapshot_row.get("raw_json") or "")
+            if alignment["backend_material_name"]:
+                backend_name_row_count += 1
+            if alignment["publish_title"]:
+                publish_title_row_count += 1
+            if str(row.get("material_name") or "").strip() != alignment["material_name"]:
+                material_name_changed += 1
+            relation_updates.append(
+                (
+                    alignment["backend_material_name"],
+                    alignment["publish_title"],
+                    alignment["title_material_ids_json"],
+                    alignment["creative_source"],
+                    alignment["material_name"],
+                    normalized_customer_center_id,
+                    normalized_day,
+                    int(row.get("advertiser_id", 0) or 0),
+                    int(row.get("ad_id", 0) or 0),
+                    str(row.get("material_type") or "").strip(),
+                    str(row.get("material_key") or "").strip(),
+                )
+            )
+            material_key = str(row.get("material_key") or "").strip()
+            if material_key:
+                bucket = material_meta.setdefault(
+                    material_key,
+                    {
+                        "material_type": str(row.get("material_type") or "").strip().upper(),
+                        "backend_costs": {},
+                        "publish_titles": [],
+                        "title_material_ids": [],
+                        "fallback_material_name": str(row.get("material_name") or "").strip(),
+                    },
+                )
+                if alignment["backend_material_name"]:
+                    backend_costs = bucket["backend_costs"]
+                    backend_costs[alignment["backend_material_name"]] = round(
+                        float(backend_costs.get(alignment["backend_material_name"], 0.0) or 0.0)
+                        + float(row.get("stat_cost", 0.0) or 0.0),
+                        2,
+                    )
+                for title in self._json_text_list(json.dumps(alignment["publish_title"].split(" / "), ensure_ascii=False)):
+                    if title and title not in bucket["publish_titles"]:
+                        bucket["publish_titles"].append(title)
+                for title_id in self._json_text_list(alignment["title_material_ids_json"]):
+                    if title_id and title_id not in bucket["title_material_ids"]:
+                        bucket["title_material_ids"].append(title_id)
+
+        for row in snapshot_rows:
+            alignment = resolved_row_alignment(row, row.get("raw_json") or "")
+            snapshot_updates.append(
+                (
+                    alignment["backend_material_name"],
+                    alignment["publish_title"],
+                    alignment["title_material_ids_json"],
+                    alignment["creative_source"],
+                    alignment["material_name"],
+                    normalized_customer_center_id,
+                    normalized_day,
+                    int(row.get("advertiser_id", 0) or 0),
+                    int(row.get("ad_id", 0) or 0),
+                    str(row.get("material_type") or "").strip(),
+                    str(row.get("material_key") or "").strip(),
+                )
+            )
+
+        rollup_updates: list[tuple[Any, ...]] = []
+        for material_key, bucket in material_meta.items():
+            backend_costs = dict(bucket.get("backend_costs") or {})
+            backend_name = ""
+            if backend_costs:
+                backend_name = sorted(backend_costs.items(), key=lambda item: (-float(item[1] or 0.0), item[0]))[0][0]
+            fallback_name = str(bucket.get("fallback_material_name") or "").strip()
+            material_type = str(bucket.get("material_type") or "").strip().upper()
+            display_name = backend_name or (
+                "" if self._looks_like_publish_caption(fallback_name) else fallback_name
+            )
+            if material_type == "UNATTRIBUTED_DELETED":
+                display_name = UNATTRIBUTED_MATERIAL_DISPLAY_NAME
+            elif not display_name and material_type != "TITLE" and not self._looks_like_publish_caption(fallback_name):
+                display_name = fallback_name
+            publish_title = self._join_publish_titles(list(bucket.get("publish_titles") or []))
+            title_ids_json = self._json_text(list(dict.fromkeys(bucket.get("title_material_ids") or [])))
+            creative_source = "creative_detail" if publish_title or title_ids_json != "[]" else ("qianchuan_video_get" if backend_name else "")
+            rollup_updates.append(
+                (
+                    backend_name,
+                    publish_title,
+                    title_ids_json,
+                    creative_source,
+                    display_name,
+                    normalized_customer_center_id,
+                    normalized_day,
+                    material_key,
+                )
+            )
+
+        if dry_run:
+            return {
+                "ok": not errors,
+                "updated": False,
+                "dry_run": True,
+                "customer_center_id": normalized_customer_center_id,
+                "day": normalized_day,
+                "relation_row_count": len(relation_rows),
+                "snapshot_row_count": len(snapshot_rows),
+                "creative_plan_count": len(creative_by_plan),
+                "video_library_name_count": len(set(library_name_by_video.values()) | set(library_name_by_material.values())),
+                "backend_name_row_count": backend_name_row_count,
+                "publish_title_row_count": publish_title_row_count,
+                "material_name_changed": material_name_changed,
+                "material_key_update_count": len(rollup_updates),
+                "error_count": len(errors),
+                "errors": errors[:20],
+            }
+
+        def dedupe_alignment_updates(updates: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+            deduped: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+            for update in updates:
+                deduped[tuple(update[5:])] = update
+            return list(deduped.values())
+
+        relation_updates = dedupe_alignment_updates(relation_updates)
+        snapshot_updates = dedupe_alignment_updates(snapshot_updates)
+
+        with self.db() as conn:
+            if relation_updates:
+                conn.execute("DROP TABLE IF EXISTS tmp_material_relation_alignment_updates")
+                conn.execute(
+                    """
+                    CREATE TEMP TABLE tmp_material_relation_alignment_updates (
+                        backend_material_name TEXT,
+                        publish_title TEXT,
+                        creative_title_material_ids_json TEXT,
+                        creative_source TEXT,
+                        material_name TEXT,
+                        customer_center_id TEXT,
+                        biz_date TEXT,
+                        advertiser_id BIGINT,
+                        ad_id BIGINT,
+                        material_type TEXT,
+                        material_key TEXT
+                    ) ON COMMIT DROP
+                    """
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO tmp_material_relation_alignment_updates (
+                        backend_material_name, publish_title, creative_title_material_ids_json,
+                        creative_source, material_name, customer_center_id, biz_date,
+                        advertiser_id, ad_id, material_type, material_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    relation_updates,
+                )
+                conn.execute(
+                    """
+                    UPDATE material_relation_daily AS relation
+                    SET backend_material_name = updates.backend_material_name,
+                        publish_title = updates.publish_title,
+                        creative_title_material_ids_json = updates.creative_title_material_ids_json,
+                        creative_source = updates.creative_source,
+                        material_name = updates.material_name
+                    FROM tmp_material_relation_alignment_updates AS updates
+                    WHERE relation.customer_center_id = updates.customer_center_id
+                      AND relation.biz_date = updates.biz_date
+                      AND relation.advertiser_id = updates.advertiser_id
+                      AND relation.ad_id = updates.ad_id
+                      AND relation.material_type = updates.material_type
+                      AND relation.material_key = updates.material_key
+                    """
+                )
+            if snapshot_updates:
+                conn.execute("DROP TABLE IF EXISTS tmp_material_snapshot_alignment_updates")
+                conn.execute(
+                    """
+                    CREATE TEMP TABLE tmp_material_snapshot_alignment_updates (
+                        backend_material_name TEXT,
+                        publish_title TEXT,
+                        creative_title_material_ids_json TEXT,
+                        creative_source TEXT,
+                        material_name TEXT,
+                        customer_center_id TEXT,
+                        biz_date TEXT,
+                        advertiser_id BIGINT,
+                        ad_id BIGINT,
+                        material_type TEXT,
+                        material_key TEXT
+                    ) ON COMMIT DROP
+                    """
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO tmp_material_snapshot_alignment_updates (
+                        backend_material_name, publish_title, creative_title_material_ids_json,
+                        creative_source, material_name, customer_center_id, biz_date,
+                        advertiser_id, ad_id, material_type, material_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    snapshot_updates,
+                )
+                conn.execute(
+                    """
+                    UPDATE material_snapshots AS snapshot
+                    SET backend_material_name = updates.backend_material_name,
+                        publish_title = updates.publish_title,
+                        creative_title_material_ids_json = updates.creative_title_material_ids_json,
+                        creative_source = updates.creative_source,
+                        material_name = updates.material_name
+                    FROM tmp_material_snapshot_alignment_updates AS updates
+                    WHERE snapshot.customer_center_id = updates.customer_center_id
+                      AND snapshot.snapshot_time >= updates.biz_date || ' 00:00:00'
+                      AND snapshot.snapshot_time <= updates.biz_date || ' 23:59:59'
+                      AND snapshot.advertiser_id = updates.advertiser_id
+                      AND snapshot.ad_id = updates.ad_id
+                      AND snapshot.material_type = updates.material_type
+                      AND snapshot.material_key = updates.material_key
+                    """
+                )
+            if rollup_updates:
+                conn.executemany(
+                    """
+                    UPDATE material_daily
+                    SET backend_material_name = ?,
+                        publish_title = ?,
+                        creative_title_material_ids_json = ?,
+                        creative_source = ?,
+                        material_name = ?
+                    WHERE customer_center_id = ?
+                      AND biz_date = ?
+                      AND material_key = ?
+                    """,
+                    rollup_updates,
+                )
+                conn.executemany(
+                    """
+                    UPDATE material_rollups
+                    SET backend_material_name = ?,
+                        publish_title = ?,
+                        creative_title_material_ids_json = ?,
+                        creative_source = ?,
+                        material_name = ?
+                    WHERE customer_center_id = ?
+                      AND substr(snapshot_time, 1, 10) = ?
+                      AND material_key = ?
+                    """,
+                    rollup_updates,
+                )
+                profile_updates: list[tuple[Any, ...]] = []
+                for update in rollup_updates:
+                    backend_name, publish_title, title_ids_json, creative_source, display_name, cc_id, _day, material_key = update
+                    existing = profile_rows_by_key.get(str(material_key or "").strip(), {})
+                    existing_name = str(existing.get("material_name") or "").strip()
+                    profile_display_name = str(display_name or "").strip()
+                    if not profile_display_name and self._looks_like_publish_caption(existing_name):
+                        profile_display_name = ""
+                    elif not profile_display_name:
+                        profile_display_name = existing_name
+                    profile_updates.append(
+                        (
+                            backend_name,
+                            publish_title,
+                            title_ids_json,
+                            creative_source,
+                            profile_display_name,
+                            cc_id,
+                            material_key,
+                        )
+                    )
+                conn.executemany(
+                    """
+                    UPDATE material_profile
+                    SET backend_material_name = CASE
+                            WHEN COALESCE(?, '') <> '' THEN ?
+                            ELSE backend_material_name
+                        END,
+                        publish_title = CASE
+                            WHEN COALESCE(?, '') <> '' THEN ?
+                            ELSE publish_title
+                        END,
+                        creative_title_material_ids_json = CASE
+                            WHEN COALESCE(?, '') <> '' AND ? <> '[]' THEN ?
+                            ELSE creative_title_material_ids_json
+                        END,
+                        creative_source = CASE
+                            WHEN COALESCE(?, '') <> '' THEN ?
+                            ELSE creative_source
+                        END,
+                        material_name = ?
+                    WHERE customer_center_id = ?
+                      AND material_key = ?
+                    """,
+                    [
+                        (
+                            backend_name,
+                            backend_name,
+                            publish_title,
+                            publish_title,
+                            title_ids_json,
+                            title_ids_json,
+                            title_ids_json,
+                            creative_source,
+                            creative_source,
+                            profile_display_name,
+                            cc_id,
+                            material_key,
+                        )
+                        for (
+                            backend_name,
+                            publish_title,
+                            title_ids_json,
+                            creative_source,
+                            profile_display_name,
+                            cc_id,
+                            material_key,
+                        ) in profile_updates
+                    ],
+                )
+                self._invalidate_material_ranking_indexes_for_day(
+                    conn,
+                    normalized_day,
+                    normalized_customer_center_id,
+                )
+        if rollup_updates or relation_updates:
+            self.clear_material_runtime_caches(scope=MATERIAL_CACHE_SCOPE_HISTORY)
+        return {
+            "ok": not errors,
+            "updated": True,
+            "dry_run": False,
+            "customer_center_id": normalized_customer_center_id,
+            "day": normalized_day,
+            "relation_row_count": len(relation_rows),
+            "snapshot_row_count": len(snapshot_rows),
+            "updated_relation_rows": len(relation_updates),
+            "updated_snapshot_rows": len(snapshot_updates),
+            "updated_material_keys": len(rollup_updates),
+            "creative_plan_count": len(creative_by_plan),
+            "video_library_name_count": len(set(library_name_by_video.values()) | set(library_name_by_material.values())),
+            "backend_name_row_count": backend_name_row_count,
+            "publish_title_row_count": publish_title_row_count,
+            "material_name_changed": material_name_changed,
+            "error_count": len(errors),
+            "errors": errors[:20],
+        }
+
     def _material_relation_context_map(
         self,
         conn: Any,
@@ -13790,6 +17343,125 @@ class DashboardService:
             return True
         return False
 
+    def _material_current_insert_values(self, customer_center_id: str, row: tuple[Any, ...] | list[Any]) -> tuple[Any, ...]:
+        alignment = self._material_rollup_alignment_from_tuple(row)
+        return (
+            customer_center_id,
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            alignment["backend_material_name"],
+            alignment["publish_title"],
+            alignment["creative_title_material_ids_json"],
+            alignment["creative_source"],
+            *row[6:37],
+        )
+
+    def _material_daily_insert_values(
+        self,
+        customer_center_id: str,
+        biz_date: str,
+        row: tuple[Any, ...] | list[Any],
+    ) -> tuple[Any, ...]:
+        alignment = self._material_rollup_alignment_from_tuple(row)
+        return (
+            customer_center_id,
+            biz_date,
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            alignment["backend_material_name"],
+            alignment["publish_title"],
+            alignment["creative_title_material_ids_json"],
+            alignment["creative_source"],
+            *row[6:37],
+        )
+
+    def _material_rollup_insert_values(
+        self,
+        customer_center_id: str,
+        row: tuple[Any, ...] | list[Any],
+    ) -> tuple[Any, ...]:
+        alignment = self._material_rollup_alignment_from_tuple(row)
+        return (
+            row[0],
+            customer_center_id,
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            alignment["backend_material_name"],
+            alignment["publish_title"],
+            alignment["creative_title_material_ids_json"],
+            alignment["creative_source"],
+            *row[6:37],
+        )
+
+    def _material_relation_insert_values(
+        self,
+        customer_center_id: str,
+        row: tuple[Any, ...] | list[Any],
+        *,
+        biz_date: str = "",
+    ) -> tuple[Any, ...]:
+        alignment = self._material_relation_alignment_from_tuple(row)
+        prefix: tuple[Any, ...] = (
+            customer_center_id,
+            biz_date,
+        ) if biz_date else (customer_center_id,)
+        return (
+            *prefix,
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+            row[9],
+            row[10],
+            alignment["backend_material_name"],
+            alignment["publish_title"],
+            alignment["creative_title_material_ids_json"],
+            alignment["creative_source"],
+            *row[11:27],
+        )
+
+    def _material_snapshot_insert_values(
+        self,
+        customer_center_id: str,
+        row: tuple[Any, ...] | list[Any],
+    ) -> tuple[Any, ...]:
+        alignment = self._material_alignment_fields_from_snapshot_tuple(row)
+        return (
+            row[0],
+            customer_center_id,
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+            row[9],
+            alignment["material_name"] or row[10],
+            alignment["backend_material_name"],
+            alignment["publish_title"],
+            alignment["creative_title_material_ids_json"],
+            alignment["creative_source"],
+            *row[11:26],
+        )
+
     def _replace_material_current_rows(
         self,
         conn: Any,
@@ -13803,15 +17475,16 @@ class DashboardService:
             """
             INSERT INTO material_current (
                 customer_center_id, snapshot_time, window_start, window_end, material_key, material_id,
-                material_name, create_time, material_type, video_id, cover_url, aweme_item_id, video_url,
+                material_name, backend_material_name, publish_title, creative_title_material_ids_json,
+                creative_source, create_time, material_type, video_id, cover_url, aweme_item_id, video_url,
                 stat_cost, pay_amount, total_pay_amount, settled_pay_amount, order_count, settled_order_count,
                 plan_count, advertiser_count, plan_ids_json, advertiser_ids_json, is_original, top_plan_name,
                 top_account_name, top_anchor_name, product_info_text, product_names_json, overall_show_count,
                 overall_click_count, overall_ctr, roi, settled_roi, pay_order_cost, settled_amount_rate,
                 refund_amount_1h, refund_rate_1h
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [(customer_center_id, *row) for row in material_rollup_rows],
+            [self._material_current_insert_values(customer_center_id, row) for row in material_rollup_rows],
         )
 
     def _replace_material_daily_rows(
@@ -13831,14 +17504,15 @@ class DashboardService:
             """
             INSERT INTO material_daily (
                 customer_center_id, biz_date, snapshot_time, window_start, window_end, material_key, material_id,
-                material_name, create_time, material_type, video_id, cover_url, aweme_item_id, video_url, stat_cost,
+                material_name, backend_material_name, publish_title, creative_title_material_ids_json,
+                creative_source, create_time, material_type, video_id, cover_url, aweme_item_id, video_url, stat_cost,
                 pay_amount, total_pay_amount, settled_pay_amount, order_count, settled_order_count, plan_count,
                 advertiser_count, plan_ids_json, advertiser_ids_json, is_original, top_plan_name, top_account_name,
                 top_anchor_name, product_info_text, product_names_json, overall_show_count, overall_click_count,
                 overall_ctr, roi, settled_roi, pay_order_cost, settled_amount_rate, refund_amount_1h, refund_rate_1h
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [(customer_center_id, biz_date, *row) for row in material_rollup_rows],
+            [self._material_daily_insert_values(customer_center_id, biz_date, row) for row in material_rollup_rows],
         )
 
     def _replace_material_relation_current_rows(
@@ -13854,13 +17528,14 @@ class DashboardService:
             """
             INSERT INTO material_relation_current (
                 customer_center_id, snapshot_time, window_start, window_end, advertiser_id, advertiser_name,
-                ad_id, ad_name, material_type, material_key, material_id, material_name, create_time,
+                ad_id, ad_name, material_type, material_key, material_id, material_name, backend_material_name,
+                publish_title, creative_title_material_ids_json, creative_source, create_time,
                 video_id, cover_url, aweme_item_id, video_url, stat_cost, pay_amount, total_pay_amount,
                 settled_pay_amount, order_count, settled_order_count, overall_show_count, overall_click_count,
                 top_anchor_name, product_info_text, is_original
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [(customer_center_id, *row) for row in material_relation_rows],
+            [self._material_relation_insert_values(customer_center_id, row) for row in material_relation_rows],
         )
 
     def _replace_material_relation_daily_rows(
@@ -13880,13 +17555,14 @@ class DashboardService:
             """
             INSERT INTO material_relation_daily (
                 customer_center_id, biz_date, snapshot_time, window_start, window_end, advertiser_id, advertiser_name,
-                ad_id, ad_name, material_type, material_key, material_id, material_name, create_time,
+                ad_id, ad_name, material_type, material_key, material_id, material_name, backend_material_name,
+                publish_title, creative_title_material_ids_json, creative_source, create_time,
                 video_id, cover_url, aweme_item_id, video_url, stat_cost, pay_amount, total_pay_amount,
                 settled_pay_amount, order_count, settled_order_count, overall_show_count, overall_click_count,
                 top_anchor_name, product_info_text, is_original
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [(customer_center_id, biz_date, *row) for row in material_relation_rows],
+            [self._material_relation_insert_values(customer_center_id, row, biz_date=biz_date) for row in material_relation_rows],
         )
 
     def _upsert_material_relation_daily_rows(
@@ -13902,11 +17578,12 @@ class DashboardService:
             """
             INSERT INTO material_relation_daily (
                 customer_center_id, biz_date, snapshot_time, window_start, window_end, advertiser_id, advertiser_name,
-                ad_id, ad_name, material_type, material_key, material_id, material_name, create_time,
+                ad_id, ad_name, material_type, material_key, material_id, material_name, backend_material_name,
+                publish_title, creative_title_material_ids_json, creative_source, create_time,
                 video_id, cover_url, aweme_item_id, video_url, stat_cost, pay_amount, total_pay_amount,
                 settled_pay_amount, order_count, settled_order_count, overall_show_count, overall_click_count,
                 top_anchor_name, product_info_text, is_original
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (customer_center_id, biz_date, advertiser_id, ad_id, material_type, material_key) DO UPDATE SET
                 snapshot_time = excluded.snapshot_time,
                 window_start = excluded.window_start,
@@ -13915,6 +17592,10 @@ class DashboardService:
                 ad_name = excluded.ad_name,
                 material_id = excluded.material_id,
                 material_name = excluded.material_name,
+                backend_material_name = excluded.backend_material_name,
+                publish_title = excluded.publish_title,
+                creative_title_material_ids_json = excluded.creative_title_material_ids_json,
+                creative_source = excluded.creative_source,
                 create_time = excluded.create_time,
                 video_id = excluded.video_id,
                 cover_url = excluded.cover_url,
@@ -13932,7 +17613,7 @@ class DashboardService:
                 product_info_text = excluded.product_info_text,
                 is_original = excluded.is_original
             """,
-            [(customer_center_id, biz_date, *row) for row in material_relation_rows],
+            [self._material_relation_insert_values(customer_center_id, row, biz_date=biz_date) for row in material_relation_rows],
         )
 
     def _material_relation_current_exists(self, conn: Any, customer_center_id: str) -> bool:
@@ -14404,6 +18085,12 @@ class DashboardService:
                     "material_key": material_key,
                     "material_id": material_id,
                     "material_name": str(snapshot_row.get("material_name") or ""),
+                    "backend_material_name": str(snapshot_row.get("backend_material_name") or ""),
+                    "publish_title": str(snapshot_row.get("publish_title") or ""),
+                    "creative_title_material_ids_json": str(
+                        snapshot_row.get("creative_title_material_ids_json") or "[]"
+                    ),
+                    "creative_source": str(snapshot_row.get("creative_source") or ""),
                     "create_time": str(snapshot_row.get("create_time") or ""),
                     "video_id": str(snapshot_row.get("video_id") or ""),
                     "cover_url": str(snapshot_row.get("cover_url") or ""),
@@ -14506,13 +18193,14 @@ class DashboardService:
             """
             INSERT INTO material_snapshots (
                 snapshot_time, customer_center_id, window_start, window_end, advertiser_id, advertiser_name,
-                ad_id, ad_name, material_type, material_key, material_id, material_name, create_time,
+                ad_id, ad_name, material_type, material_key, material_id, material_name, backend_material_name,
+                publish_title, creative_title_material_ids_json, creative_source, create_time,
                 video_id, cover_url, aweme_item_id, video_url, product_show_count,
                 product_click_count, stat_cost, pay_amount, total_pay_amount, settled_pay_amount,
                 order_count, settled_order_count, roi, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [(row[0], customer_center_id, *row[1:]) for row in normalized_rows],
+            [self._material_snapshot_insert_values(customer_center_id, row) for row in normalized_rows],
         )
 
     def _replace_material_snapshot_plan_subset(
@@ -14549,13 +18237,14 @@ class DashboardService:
             """
             INSERT INTO material_snapshots (
                 snapshot_time, customer_center_id, window_start, window_end, advertiser_id, advertiser_name,
-                ad_id, ad_name, material_type, material_key, material_id, material_name, create_time,
+                ad_id, ad_name, material_type, material_key, material_id, material_name, backend_material_name,
+                publish_title, creative_title_material_ids_json, creative_source, create_time,
                 video_id, cover_url, aweme_item_id, video_url, product_show_count,
                 product_click_count, stat_cost, pay_amount, total_pay_amount, settled_pay_amount,
                 order_count, settled_order_count, roi, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [(row[0], normalized_customer_center_id, *row[1:]) for row in normalized_rows],
+            [self._material_snapshot_insert_values(normalized_customer_center_id, row) for row in normalized_rows],
         )
         return len(normalized_rows)
 
@@ -14681,6 +18370,12 @@ class DashboardService:
                     "material_key": material_key,
                     "material_id": material_id,
                     "material_name": str(snapshot_row.get("material_name") or ""),
+                    "backend_material_name": str(snapshot_row.get("backend_material_name") or ""),
+                    "publish_title": str(snapshot_row.get("publish_title") or ""),
+                    "creative_title_material_ids_json": str(
+                        snapshot_row.get("creative_title_material_ids_json") or "[]"
+                    ),
+                    "creative_source": str(snapshot_row.get("creative_source") or ""),
                     "create_time": str(snapshot_row.get("create_time") or ""),
                     "video_id": str(snapshot_row.get("video_id") or ""),
                     "cover_url": str(snapshot_row.get("cover_url") or ""),
@@ -14937,7 +18632,11 @@ class DashboardService:
         }
 
     @staticmethod
-    def _invalidate_material_ranking_indexes_for_day(conn: Any, biz_date: str) -> None:
+    def _invalidate_material_ranking_indexes_for_day(
+        conn: Any,
+        biz_date: str,
+        customer_center_id: str = "",
+    ) -> None:
         day_key = str(biz_date or "").strip()
         if not day_key:
             return
@@ -14949,6 +18648,22 @@ class DashboardService:
             "DELETE FROM material_ranking_summary WHERE start_date <= ? AND end_date >= ?",
             (day_key, day_key),
         )
+        scope_keys = [
+            str(customer_center_id or "").strip(),
+            material_ranking_index.SCOPE_ALL,
+        ]
+        normalized_scope_keys = [key for key in dict.fromkeys(scope_keys) if key]
+        if normalized_scope_keys:
+            placeholders = ",".join("?" for _ in normalized_scope_keys)
+            conn.execute(
+                f"DELETE FROM material_ranking_day_prefix WHERE day_key >= ? AND scope_key IN ({placeholders})",
+                [day_key, *normalized_scope_keys],
+            )
+        else:
+            conn.execute(
+                "DELETE FROM material_ranking_day_prefix WHERE day_key >= ?",
+                (day_key,),
+            )
 
     def _refresh_material_history_for_changed_plans(
         self,
@@ -14962,6 +18677,10 @@ class DashboardService:
         scoped_config: dict[str, Any],
         changed_plan_ids: set[int] | list[int] | tuple[int, ...],
         changed_plan_rows: list[PlanSummary] | list[dict[str, Any]],
+        workers_override: int | None = None,
+        plan_material_requests_per_minute_override: int | None = None,
+        plan_material_batch_size_override: int | None = None,
+        plan_material_batch_sleep_seconds_override: float | None = None,
     ) -> dict[str, Any]:
         normalized_plan_ids = sorted({int(item or 0) for item in changed_plan_ids if int(item or 0) > 0})
         if not normalized_plan_ids:
@@ -14999,14 +18718,25 @@ class DashboardService:
         material_types = self._detail_material_types(scoped_config)
         if "VIDEO" in material_types and "TITLE" not in material_types:
             material_types = [*material_types, "TITLE"]
-        workers = self._material_sync_workers(scoped_config)
+        workers = (
+            max(int(workers_override or 0), 1)
+            if int(workers_override or 0) > 0
+            else self._material_sync_workers(scoped_config)
+        )
         request_timeout_seconds = self._material_sync_request_timeout_seconds()
         request_attempts = self._material_sync_request_attempts()
-        plan_material_requests_per_minute = self._nightly_plan_material_requests_per_minute_default()
+        plan_material_requests_per_minute = max(int(plan_material_requests_per_minute_override or 0), 0)
+        if plan_material_requests_per_minute <= 0:
+            plan_material_requests_per_minute = self._nightly_plan_material_requests_per_minute_default()
         if plan_material_requests_per_minute > 0:
             client.configure_plan_material_rate_limit(plan_material_requests_per_minute)
-        plan_material_batch_size = self._nightly_plan_material_batch_size_default()
-        plan_material_batch_sleep_seconds = self._nightly_plan_material_batch_sleep_seconds_default()
+        plan_material_batch_size = max(int(plan_material_batch_size_override or 0), 0)
+        if plan_material_batch_size <= 0:
+            plan_material_batch_size = self._nightly_plan_material_batch_size_default()
+        if plan_material_batch_sleep_seconds_override is None:
+            plan_material_batch_sleep_seconds = self._nightly_plan_material_batch_sleep_seconds_default()
+        else:
+            plan_material_batch_sleep_seconds = max(float(plan_material_batch_sleep_seconds_override or 0.0), 0.0)
         start_date = str(window_start or target_date)[:10]
         end_date = str(window_end or target_date)[:10]
         if material_candidate_rows:
@@ -15162,7 +18892,7 @@ class DashboardService:
                 customer_center_id,
                 target_date,
             )
-            self._invalidate_material_ranking_indexes_for_day(conn, target_date)
+            self._invalidate_material_ranking_indexes_for_day(conn, target_date, customer_center_id)
             self._persist_plan_refresh_states(conn, customer_center_id, plan_sync_results)
         return {
             "changed_plan_count": len(normalized_plan_ids),
@@ -15257,6 +18987,93 @@ class DashboardService:
             "plan_stat_cost": round(float((plan_cost_row or {}).get("plan_cost") or 0.0), 2),
         }
 
+    def _material_current_day_row_counts(
+        self,
+        conn: Any,
+        customer_center_id: str,
+        biz_date: str,
+    ) -> dict[str, Any]:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        day_key = str(biz_date or "").strip()[:10]
+        if not normalized_customer_center_id or not day_key:
+            return {
+                "material_current_row_count": 0,
+                "material_relation_current_row_count": 0,
+                "material_snapshot_row_count": 0,
+                "material_current_stat_cost": 0.0,
+                "material_relation_non_title_stat_cost": 0.0,
+                "plan_stat_cost": 0.0,
+            }
+        material_current_row = conn.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM material_current
+            WHERE customer_center_id = ?
+              AND substr(snapshot_time, 1, 10) = ?
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchone()
+        material_relation_row = conn.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM material_relation_current
+            WHERE customer_center_id = ?
+              AND substr(snapshot_time, 1, 10) = ?
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchone()
+        material_snapshot_row = conn.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM material_snapshots
+            WHERE customer_center_id = ?
+              AND substr(snapshot_time, 1, 10) = ?
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchone()
+        material_current_cost_row = conn.execute(
+            """
+            SELECT ROUND(COALESCE(SUM(stat_cost), 0)::numeric, 2) AS material_current_cost
+            FROM material_current
+            WHERE customer_center_id = ?
+              AND substr(snapshot_time, 1, 10) = ?
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchone()
+        relation_cost_row = conn.execute(
+            """
+            SELECT
+                ROUND(COALESCE(SUM(CASE WHEN UPPER(COALESCE(material_type, '')) <> 'TITLE' THEN stat_cost ELSE 0 END), 0)::numeric, 2) AS relation_non_title_cost
+            FROM material_relation_current
+            WHERE customer_center_id = ?
+              AND substr(snapshot_time, 1, 10) = ?
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchone()
+        plan_cost_row = conn.execute(
+            """
+            SELECT ROUND(COALESCE(SUM(stat_cost), 0)::numeric, 2) AS plan_cost
+            FROM plan_current
+            WHERE customer_center_id = ?
+              AND substr(snapshot_time, 1, 10) = ?
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchone()
+        return {
+            "material_current_row_count": int((material_current_row or {}).get("row_count") or 0),
+            "material_relation_current_row_count": int((material_relation_row or {}).get("row_count") or 0),
+            "material_snapshot_row_count": int((material_snapshot_row or {}).get("row_count") or 0),
+            "material_current_stat_cost": round(
+                float((material_current_cost_row or {}).get("material_current_cost") or 0.0),
+                2,
+            ),
+            "material_relation_non_title_stat_cost": round(
+                float((relation_cost_row or {}).get("relation_non_title_cost") or 0.0),
+                2,
+            ),
+            "plan_stat_cost": round(float((plan_cost_row or {}).get("plan_cost") or 0.0), 2),
+        }
+
     def _should_replace_material_history_day(
         self,
         existing_counts: dict[str, int],
@@ -15315,6 +19132,65 @@ class DashboardService:
         if improves or not existing_has_rows:
             return True, "retryable_partial_refresh_improved"
         return False, "retryable_partial_refresh_not_improved"
+
+    def _should_replace_material_current_day(
+        self,
+        existing_counts: dict[str, Any],
+        new_counts: dict[str, Any],
+        error_items: list[dict[str, Any]] | None = None,
+    ) -> tuple[bool, str]:
+        existing_current = max(int(existing_counts.get("material_current_row_count", 0) or 0), 0)
+        existing_relation = max(int(existing_counts.get("material_relation_current_row_count", 0) or 0), 0)
+        existing_snapshot = max(int(existing_counts.get("material_snapshot_row_count", 0) or 0), 0)
+        new_current = max(int(new_counts.get("material_current_row_count", 0) or 0), 0)
+        new_relation = max(int(new_counts.get("material_relation_current_row_count", 0) or 0), 0)
+        new_snapshot = max(int(new_counts.get("material_snapshot_row_count", 0) or 0), 0)
+        existing_non_title_cost = round(float(existing_counts.get("material_relation_non_title_stat_cost", 0.0) or 0.0), 2)
+        new_non_title_cost = round(float(new_counts.get("material_relation_non_title_stat_cost", 0.0) or 0.0), 2)
+        plan_cost = round(float(existing_counts.get("plan_stat_cost", 0.0) or new_counts.get("plan_stat_cost", 0.0) or 0.0), 2)
+        existing_has_rows = any((existing_current, existing_relation, existing_snapshot))
+        new_has_rows = any((new_current, new_relation, new_snapshot))
+        existing_plan_gap = abs(plan_cost - existing_non_title_cost) if plan_cost > 0 else 0.0
+        new_plan_gap = abs(plan_cost - new_non_title_cost) if plan_cost > 0 else 0.0
+        improves_cost_alignment = (
+            plan_cost > 0
+            and new_non_title_cost > 0
+            and new_plan_gap + 1.0 < existing_plan_gap
+        )
+        regresses = (
+            new_current < existing_current
+            or new_relation < existing_relation
+            or new_snapshot < existing_snapshot
+        )
+        improves = (
+            new_current > existing_current
+            or new_relation > existing_relation
+            or new_snapshot > existing_snapshot
+            or improves_cost_alignment
+        )
+        errors = [dict(item) for item in (error_items or []) if isinstance(item, dict)]
+        blocking_errors = [
+            item
+            for item in errors
+            if not str(item.get("stage") or "").strip().startswith("material_library_")
+        ]
+        if existing_has_rows and not new_has_rows:
+            return False, "empty_current_replacement_blocked"
+        if regresses and not improves_cost_alignment:
+            return False, "smaller_current_replacement_blocked"
+        if existing_non_title_cost > 0 and new_non_title_cost + 1.0 < existing_non_title_cost and not improves_cost_alignment:
+            return False, "current_cost_regression_blocked"
+        if plan_cost > 0 and new_non_title_cost > 0 and new_non_title_cost + 1.0 < plan_cost and not improves_cost_alignment:
+            return False, "current_plan_cost_mismatch_blocked"
+        if improves_cost_alignment and not blocking_errors:
+            return True, "current_cost_alignment_improved"
+        if not blocking_errors:
+            return True, "current_complete_refresh"
+        if any(not bool(item.get("retryable")) for item in blocking_errors):
+            return False, "current_nonretryable_error_blocked"
+        if improves or not existing_has_rows:
+            return True, "current_retryable_partial_refresh_improved"
+        return False, "current_retryable_partial_refresh_not_improved"
 
     def _dedupe_material_snapshot_rows_for_insert(
         self,
@@ -16400,6 +20276,15 @@ class DashboardService:
             enriched_items.append(enriched)
         return enriched_items
 
+    @staticmethod
+    def _material_display_name_value(material_type: Any, material_name: Any, fallback: str = "未命名素材") -> str:
+        name = str(material_name or "").strip()
+        if name:
+            return name
+        if str(material_type or "").strip().upper() == UNATTRIBUTED_MATERIAL_TYPE:
+            return UNATTRIBUTED_MATERIAL_DISPLAY_NAME
+        return str(fallback or "")
+
     def _aggregate_material_rollups(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -16425,6 +20310,10 @@ class DashboardService:
                 group["product_info_text"] = str(row.get("product_info_text") or "")
                 group["plan_ids"] = set()
                 group["advertiser_ids"] = set()
+                group["backend_material_name_costs"] = {}
+                group["publish_titles"] = self._split_publish_titles(row.get("publish_title"))
+                group["creative_title_material_ids"] = self._json_text_list(row.get("creative_title_material_ids_json"))
+                group["creative_source"] = str(row.get("creative_source") or "").strip()
                 group["_top_plan_orders"] = -1
                 group["_top_plan_pay_amount"] = -1.0
                 group["top_anchor_name"] = str(group.get("top_anchor_name") or row.get("top_anchor_name") or row.get("anchor_name") or "")
@@ -16450,6 +20339,21 @@ class DashboardService:
             group["overall_click_count"] = int(group["overall_click_count"] or 0) + overall_click_count
             group["plan_ids"].update(plan_ids)
             group["advertiser_ids"].update(advertiser_ids)
+            backend_name = str(row.get("backend_material_name") or "").strip()
+            if backend_name:
+                backend_costs = group.setdefault("backend_material_name_costs", {})
+                backend_costs[backend_name] = round(
+                    float(backend_costs.get(backend_name, 0.0) or 0.0) + stat_cost,
+                    2,
+                )
+            for title in self._split_publish_titles(row.get("publish_title")):
+                if title and title not in group.setdefault("publish_titles", []):
+                    group["publish_titles"].append(title)
+            for title_id in self._json_text_list(row.get("creative_title_material_ids_json")):
+                if title_id and title_id not in group.setdefault("creative_title_material_ids", []):
+                    group["creative_title_material_ids"].append(title_id)
+            if not str(group.get("creative_source") or "").strip() and str(row.get("creative_source") or "").strip():
+                group["creative_source"] = str(row.get("creative_source") or "").strip()
             group["is_original"] = bool(group.get("is_original")) or bool(row.get("is_original"))
             row_create_time = str(row.get("create_time") or "").strip()
             if row_create_time and (
@@ -16497,13 +20401,32 @@ class DashboardService:
             product_info_text = self._summarize_material_product_names(
                 sorted(str(name) for name in group.get("product_names", set()) if str(name or "").strip())
             ) or str(group.get("product_info_text") or "")
+            backend_name = str(group.get("backend_material_name") or "").strip()
+            backend_costs = dict(group.get("backend_material_name_costs") or {})
+            if backend_costs:
+                backend_name = sorted(
+                    backend_costs.items(),
+                    key=lambda item: (-float(item[1] or 0.0), item[0]),
+                )[0][0]
+            publish_title = self._join_publish_titles(list(group.get("publish_titles") or []))
+            title_ids_json = self._json_text(list(dict.fromkeys(group.get("creative_title_material_ids") or [])))
+            creative_source = str(group.get("creative_source") or "").strip()
+            if not creative_source and (backend_name or publish_title or title_ids_json != "[]"):
+                creative_source = "creative_detail" if publish_title or title_ids_json != "[]" else "material_raw"
             rankings.append(
                 {
                     "customer_center_id": str(group.get("customer_center_id") or ""),
                     "material_key": str(group.get("material_key") or ""),
                     "material_id": str(group.get("material_id") or ""),
                     "create_time": str(group.get("create_time") or ""),
-                    "material_name": str(group.get("material_name") or "") or "未命名素材",
+                    "material_name": self._material_display_name_value(
+                        group.get("material_type"),
+                        backend_name or group.get("material_name"),
+                    ),
+                    "backend_material_name": backend_name,
+                    "publish_title": publish_title,
+                    "creative_title_material_ids_json": title_ids_json,
+                    "creative_source": creative_source,
                     "material_type": str(group.get("material_type") or "") or "OTHER",
                     "video_id": str(group.get("video_id") or ""),
                     "cover_url": str(group.get("cover_url") or ""),
@@ -17388,6 +21311,161 @@ class DashboardService:
         }
 
     @staticmethod
+    def _comment_accounts_from_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        account_map: dict[int, dict[str, Any]] = {}
+        for row in items:
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            if not advertiser_id or advertiser_id in account_map:
+                continue
+            account_map[advertiser_id] = {
+                "advertiser_id": advertiser_id,
+                "advertiser_name": str(row.get("advertiser_name") or advertiser_id),
+            }
+        return sorted(
+            account_map.values(),
+            key=lambda item: (str(item["advertiser_name"]), int(item["advertiser_id"])),
+        )
+
+    def _comment_matches_query(self, item: dict[str, Any], query_text: str) -> bool:
+        normalized_query = self._query_text(query_text)
+        if not normalized_query:
+            return True
+        haystack = self._normalize_match_text(
+            item.get("text"),
+            item.get("comment_user_name"),
+            item.get("comment_user_id"),
+            item.get("item_title"),
+            item.get("promotion_display_name"),
+            item.get("promotion_name"),
+            item.get("material_display_name"),
+            item.get("advertiser_name"),
+            item.get("comment_anchor_name"),
+            item.get("top_anchor_name"),
+        )
+        return normalized_query in haystack
+
+    def _enrich_comment_items_with_context(
+        self,
+        conn: Any,
+        items: list[dict[str, Any]],
+        *,
+        start_dt: datetime,
+        end_dt: datetime,
+        comment_start_date: str,
+        comment_end_date: str,
+    ) -> list[dict[str, Any]]:
+        if not items:
+            return []
+        enriched_items = [dict(item or {}) for item in items]
+        advertiser_ids = {int(item["advertiser_id"]) for item in enriched_items if int(item.get("advertiser_id", 0) or 0)}
+        promotion_ids = {
+            int(str(item.get("promotion_id") or "").strip())
+            for item in enriched_items
+            if str(item.get("promotion_id") or "").strip().isdigit()
+        }
+        material_ids = {
+            str(item.get("material_id") or "").strip()
+            for item in enriched_items
+            if str(item.get("material_id") or "").strip()
+        }
+        item_ids = {
+            str(item.get("item_id") or "").strip()
+            for item in enriched_items
+            if str(item.get("item_id") or "").strip()
+        }
+        sibling_context_by_item, fallback_sibling_context_by_item = self._comment_sibling_context_maps(enriched_items)
+        plan_map, fallback_plan_map = self._comment_plan_context_maps(conn, advertiser_ids, promotion_ids)
+        material_map, fallback_material_map = self._comment_material_name_maps(conn, advertiser_ids, material_ids)
+        material_context_by_item: dict[tuple[int, str], dict[str, str]] = {}
+        material_context_by_material: dict[tuple[int, str], dict[str, str]] = {}
+        fallback_material_context_by_item: dict[str, dict[str, str]] = {}
+        fallback_material_context_by_material: dict[str, dict[str, str]] = {}
+        context_day_count = max((end_dt.date() - start_dt.date()).days + 1, 1)
+        if (
+            context_day_count <= COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS
+            and len(enriched_items) <= COMMENT_INLINE_MATERIAL_CONTEXT_MAX_ROWS
+        ):
+            (
+                material_context_by_item,
+                material_context_by_material,
+                fallback_material_context_by_item,
+                fallback_material_context_by_material,
+            ) = self._comment_material_context_maps(
+                conn,
+                advertiser_ids,
+                material_ids,
+                item_ids,
+                comment_start_date,
+                comment_end_date,
+            )
+
+        for item in enriched_items:
+            advertiser_id_value = int(item.get("advertiser_id", 0) or 0)
+            promotion_text = str(item.get("promotion_id") or "").strip()
+            material_text = str(item.get("material_id") or "").strip()
+            item_text = str(item.get("item_id") or "").strip()
+            sibling_context = {}
+            if item_text:
+                sibling_context = sibling_context_by_item.get(
+                    (advertiser_id_value, item_text),
+                    {},
+                ) or fallback_sibling_context_by_item.get(item_text, {})
+            if not promotion_text and str(sibling_context.get("promotion_id") or "").strip():
+                promotion_text = str(sibling_context.get("promotion_id") or "").strip()
+                item["promotion_id"] = promotion_text
+            if not material_text and str(sibling_context.get("material_id") or "").strip():
+                material_text = str(sibling_context.get("material_id") or "").strip()
+                item["material_id"] = material_text
+            plan_context: dict[str, str] = {}
+            if promotion_text.isdigit():
+                promotion_id_value = int(promotion_text)
+                plan_context = plan_map.get((advertiser_id_value, promotion_id_value), {}) or fallback_plan_map.get(
+                    promotion_id_value,
+                    {},
+                )
+            material_context: dict[str, str] = {}
+            if item_text:
+                material_context = material_context_by_item.get(
+                    (advertiser_id_value, item_text),
+                    {},
+                ) or fallback_material_context_by_item.get(item_text, {})
+            if not material_context and material_text:
+                material_context = material_context_by_material.get(
+                    (advertiser_id_value, material_text),
+                    {},
+                ) or fallback_material_context_by_material.get(material_text, {})
+            if not plan_context:
+                plan_context = dict(material_context)
+            elif material_context:
+                for key, value in material_context.items():
+                    if value and not plan_context.get(key):
+                        plan_context[key] = value
+            if sibling_context:
+                for key, value in sibling_context.items():
+                    if value and not plan_context.get(key):
+                        plan_context[key] = value
+            inferred_promotion_id = str(plan_context.get("promotion_id") or "").strip()
+            if not promotion_text and inferred_promotion_id:
+                promotion_text = inferred_promotion_id
+                item["promotion_id"] = promotion_text
+            promotion_name = str(plan_context.get("promotion_name") or "").strip()
+            material_name = material_map.get((advertiser_id_value, material_text), "") or fallback_material_map.get(
+                material_text,
+                "",
+            ) or str(plan_context.get("material_name") or sibling_context.get("material_name") or "").strip()
+            comment_anchor_name = str(plan_context.get("comment_anchor_name") or "").strip()
+            plan_source = str(plan_context.get("plan_source") or "").strip()
+            item["promotion_name"] = promotion_name
+            item["promotion_display_name"] = promotion_name or (f"计划 {promotion_text}" if promotion_text else "-")
+            item["plan_source"] = plan_source
+            item["material_name"] = material_name
+            item["material_display_name"] = material_name or (f"素材 {material_text}" if material_text else "-")
+            item["comment_anchor_name"] = comment_anchor_name
+            item["top_anchor_name"] = comment_anchor_name
+            item["video_owner_aweme_id"] = comment_anchor_name or str(item.get("video_owner_aweme_id") or "").strip()
+        return enriched_items
+
+    @staticmethod
     def _comment_requested_dates(start_dt: datetime, end_dt: datetime) -> list[str]:
         current = start_dt.date()
         end_day = end_dt.date()
@@ -17613,6 +21691,7 @@ class DashboardService:
                     attempted_at,
                 )
         self.clear_comment_runtime_caches()
+        self._prewarm_comment_range_caches()
         return {
             "sync_plan_count": len(sync_plans),
             "synced_plan_count": sum(1 for _plan, _items, error_payload in sync_results if error_payload is None),
@@ -18251,6 +22330,102 @@ class DashboardService:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def _stored_comment_record_count(
+        self,
+        conn: Any,
+        advertiser_ids: set[int],
+        start_date: str,
+        end_date: str,
+        window_start: str = "",
+        window_end: str = "",
+        tz_name: str = TIMEZONE,
+    ) -> int:
+        if not advertiser_ids:
+            return 0
+        advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
+        params: list[Any] = [
+            self._current_customer_center_id(),
+            str(start_date).strip(),
+            str(end_date).strip(),
+            *sorted(advertiser_ids),
+        ]
+        window_clause = ""
+        if str(window_start or "").strip():
+            window_clause += " AND create_time >= ?"
+            params.append(self._db_local_timestamp_value(window_start, tz_name))
+        if str(window_end or "").strip():
+            window_clause += " AND create_time <= ?"
+            params.append(self._db_local_timestamp_value(window_end, tz_name))
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS total_count
+            FROM comment_records
+            WHERE customer_center_id = ?
+              AND comment_date >= ?
+              AND comment_date <= ?
+              AND advertiser_id IN ({advertiser_placeholders})
+              {window_clause}
+            """,
+            params,
+        ).fetchone()
+        return int(row["total_count"] or 0) if row else 0
+
+    def _stored_comment_records_page(
+        self,
+        conn: Any,
+        advertiser_ids: set[int],
+        start_date: str,
+        end_date: str,
+        *,
+        page: int,
+        page_size: int,
+        window_start: str = "",
+        window_end: str = "",
+        tz_name: str = TIMEZONE,
+    ) -> list[dict[str, Any]]:
+        if not advertiser_ids:
+            return []
+        advertiser_placeholders = ",".join("?" for _ in advertiser_ids)
+        normalized_page = self._query_page_value(page)
+        normalized_page_size = self._query_page_size_value(
+            page_size,
+            COMMENT_QUERY_DEFAULT_PAGE_SIZE,
+            max_size=COMMENT_QUERY_MAX_PAGE_SIZE,
+        )
+        offset = max(normalized_page - 1, 0) * normalized_page_size
+        params: list[Any] = [
+            self._current_customer_center_id(),
+            str(start_date).strip(),
+            str(end_date).strip(),
+            *sorted(advertiser_ids),
+        ]
+        window_clause = ""
+        if str(window_start or "").strip():
+            window_clause += " AND create_time >= ?"
+            params.append(self._db_local_timestamp_value(window_start, tz_name))
+        if str(window_end or "").strip():
+            window_clause += " AND create_time <= ?"
+            params.append(self._db_local_timestamp_value(window_end, tz_name))
+        params.extend([normalized_page_size, offset])
+        rows = conn.execute(
+            f"""
+            SELECT
+                advertiser_id, advertiser_name, comment_id, comment_date, create_time, text, reply_count, hide_status,
+                level_type, comment_user_name, comment_user_id, like_count, item_title, comment_type, promotion_id,
+                material_id, item_id, raw_json, fetched_at, updated_at
+            FROM comment_records
+            WHERE customer_center_id = ?
+              AND comment_date >= ?
+              AND comment_date <= ?
+              AND advertiser_id IN ({advertiser_placeholders})
+              {window_clause}
+            ORDER BY create_time DESC, like_count DESC, reply_count DESC, comment_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     @staticmethod
     def _comment_sibling_context_maps(items: list[dict[str, Any]]) -> tuple[
         dict[tuple[int, str], dict[str, str]],
@@ -18350,6 +22525,12 @@ class DashboardService:
         advertiser_id: int | None = None,
         allowed_advertiser_ids: set[int] | None = None,
         force_refresh: bool = False,
+        page: int = 1,
+        page_size: int = COMMENT_QUERY_DEFAULT_PAGE_SIZE,
+        search: str = "",
+        sort_key: str = "create_time",
+        sort_dir: str = "desc",
+        scoped_operator_user_id: int | None = None,
     ) -> dict[str, Any]:
         normalized = str(range_key or "day").strip().lower()
         if normalized not in PERFORMANCE_RANGES:
@@ -18360,6 +22541,19 @@ class DashboardService:
         else:
             start_dt, end_dt, range_label = build_performance_window(normalized, config["timezone"])
         selected_advertiser_id = int(advertiser_id or 0)
+        normalized_page = self._query_page_value(page)
+        normalized_page_size = self._query_page_size_value(
+            page_size,
+            COMMENT_QUERY_DEFAULT_PAGE_SIZE,
+            max_size=COMMENT_QUERY_MAX_PAGE_SIZE,
+        )
+        query_text = self._query_text(search)
+        normalized_sort_dir = self._query_sort_dir(sort_dir)
+        normalized_sort_key = str(sort_key or "").strip() or "create_time"
+        allowed_sort_keys = COMMENT_SORTABLE_NUMERIC_KEYS | COMMENT_SORTABLE_TEXT_KEYS
+        if normalized_sort_key not in allowed_sort_keys:
+            normalized_sort_key = "create_time"
+        scoped_operator_id = max(int(scoped_operator_user_id or 0), 0)
         cache_key = build_comment_cache_key(
             normalized,
             start_date,
@@ -18367,6 +22561,12 @@ class DashboardService:
             selected_advertiser_id,
             allowed_advertiser_ids,
             self._current_customer_center_id(),
+            search_text=query_text,
+            sort_key=normalized_sort_key,
+            sort_dir=normalized_sort_dir,
+            page=normalized_page,
+            page_size=normalized_page_size,
+            scope_user_id=scoped_operator_id,
         )
         cache_version = self._shared_cache_version("comment")
         versioned_cache_key = self._versioned_cache_key(cache_version, cache_key)
@@ -18408,6 +22608,17 @@ class DashboardService:
         if selected_advertiser_id:
             accounts = [item for item in accounts if int(item["advertiser_id"]) == selected_advertiser_id]
         if not accounts:
+            empty_pagination = {
+                "page": 1,
+                "page_size": normalized_page_size,
+                "total_count": 0,
+                "total_pages": 1,
+                "start_index": 0,
+                "end_index": 0,
+                "sort_key": normalized_sort_key,
+                "sort_dir": normalized_sort_dir,
+                "search": str(search or "").strip(),
+            }
             payload = {
                 "items": [],
                 "accounts": all_accounts,
@@ -18427,7 +22638,11 @@ class DashboardService:
                 "comment_sync_pending": False,
                 "comment_sync_queued": False,
                 "fetched_at": now_text(config["timezone"]),
+                "pagination": empty_pagination,
             }
+            if scoped_operator_id > 0:
+                payload["accounts"] = []
+                payload["meta"]["visible_count"] = 0
             payload = self._attach_freshness(
                 payload,
                 data_time="",
@@ -18473,145 +22688,124 @@ class DashboardService:
                 )
 
         items: list[dict[str, Any]] = []
-        advertiser_ids: set[int] = set()
-        promotion_ids: set[int] = set()
-        material_ids: set[str] = set()
-        item_ids: set[str] = set()
-        material_context_by_item: dict[tuple[int, str], dict[str, str]] = {}
-        material_context_by_material: dict[tuple[int, str], dict[str, str]] = {}
-        fallback_material_context_by_item: dict[str, dict[str, str]] = {}
-        fallback_material_context_by_material: dict[str, dict[str, str]] = {}
-        sibling_context_by_item: dict[tuple[int, str], dict[str, str]] = {}
-        fallback_sibling_context_by_item: dict[str, dict[str, str]] = {}
+        accounts_payload = list(all_accounts)
+        total_comment_count = 0
+        pagination: dict[str, Any] = {
+            "page": normalized_page,
+            "page_size": normalized_page_size,
+            "total_count": 0,
+            "total_pages": 1,
+            "start_index": 0,
+            "end_index": 0,
+            "sort_key": normalized_sort_key,
+            "sort_dir": normalized_sort_dir,
+            "search": str(search or "").strip(),
+        }
+        fast_page_path = (
+            scoped_operator_id <= 0
+            and not query_text
+            and normalized_sort_key == "create_time"
+            and normalized_sort_dir == "desc"
+        )
         with self.db() as conn:
-            stored_rows = self._stored_comment_records(
-                conn,
-                account_ids,
-                comment_start_date,
-                comment_end_date,
-                window_start,
-                window_end,
-                config["timezone"],
-            )
-            items = [self._comment_item_from_record(row) for row in stored_rows]
-            sibling_context_by_item, fallback_sibling_context_by_item = self._comment_sibling_context_maps(items)
-            advertiser_ids = {int(item["advertiser_id"]) for item in items if int(item.get("advertiser_id", 0) or 0)}
-            promotion_ids = {
-                int(str(item.get("promotion_id") or "").strip())
-                for item in items
-                if str(item.get("promotion_id") or "").strip().isdigit()
-            }
-            material_ids = {
-                str(item.get("material_id") or "").strip()
-                for item in items
-                if str(item.get("material_id") or "").strip()
-            }
-            item_ids = {
-                str(item.get("item_id") or "").strip()
-                for item in items
-                if str(item.get("item_id") or "").strip()
-            }
-            plan_map, fallback_plan_map = self._comment_plan_context_maps(conn, advertiser_ids, promotion_ids)
-            material_map, fallback_material_map = self._comment_material_name_maps(conn, advertiser_ids, material_ids)
-            context_day_count = max((end_dt.date() - start_dt.date()).days + 1, 1)
-            if (
-                context_day_count <= COMMENT_INLINE_MATERIAL_CONTEXT_MAX_DAYS
-                and len(items) <= COMMENT_INLINE_MATERIAL_CONTEXT_MAX_ROWS
-            ):
-                (
-                    material_context_by_item,
-                    material_context_by_material,
-                    fallback_material_context_by_item,
-                    fallback_material_context_by_material,
-                ) = self._comment_material_context_maps(
+            if fast_page_path:
+                total_comment_count = self._stored_comment_record_count(
                     conn,
-                    advertiser_ids,
-                    material_ids,
-                    item_ids,
+                    account_ids,
                     comment_start_date,
                     comment_end_date,
+                    window_start,
+                    window_end,
+                    config["timezone"],
+                )
+                stored_rows = self._stored_comment_records_page(
+                    conn,
+                    account_ids,
+                    comment_start_date,
+                    comment_end_date,
+                    page=normalized_page,
+                    page_size=normalized_page_size,
+                    window_start=window_start,
+                    window_end=window_end,
+                    tz_name=config["timezone"],
+                )
+                items = [self._comment_item_from_record(row) for row in stored_rows]
+                items = self._enrich_comment_items_with_context(
+                    conn,
+                    items,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    comment_start_date=comment_start_date,
+                    comment_end_date=comment_end_date,
+                )
+                total_pages = max(1, (total_comment_count + normalized_page_size - 1) // normalized_page_size)
+                current_page = min(max(1, normalized_page), total_pages)
+                start_index = (current_page - 1) * normalized_page_size
+                pagination = {
+                    "page": current_page,
+                    "page_size": normalized_page_size,
+                    "total_count": total_comment_count,
+                    "total_pages": total_pages,
+                    "start_index": start_index + 1 if total_comment_count > 0 else 0,
+                    "end_index": start_index + len(items),
+                    "sort_key": normalized_sort_key,
+                    "sort_dir": normalized_sort_dir,
+                    "search": str(search or "").strip(),
+                }
+            else:
+                stored_rows = self._stored_comment_records(
+                    conn,
+                    account_ids,
+                    comment_start_date,
+                    comment_end_date,
+                    window_start,
+                    window_end,
+                    config["timezone"],
+                )
+                working_items = [self._comment_item_from_record(row) for row in stored_rows]
+                working_items = self._enrich_comment_items_with_context(
+                    conn,
+                    working_items,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    comment_start_date=comment_start_date,
+                    comment_end_date=comment_end_date,
+                )
+                if scoped_operator_id > 0:
+                    scoped_items = self._filter_material_items_for_operator(working_items, scoped_operator_id)
+                    accounts_payload = self._comment_accounts_from_items(scoped_items)
+                    working_items = scoped_items
+                if query_text:
+                    working_items = [item for item in working_items if self._comment_matches_query(item, query_text)]
+                sorted_rows, normalized_sort_key, normalized_sort_dir = self._sort_rows_for_query(
+                    working_items,
+                    sort_key=normalized_sort_key,
+                    sort_dir=normalized_sort_dir,
+                    default_key="create_time",
+                    numeric_keys=COMMENT_SORTABLE_NUMERIC_KEYS,
+                    text_keys=COMMENT_SORTABLE_TEXT_KEYS,
+                    tie_breaker="comment_id",
+                )
+                total_comment_count = len(sorted_rows)
+                items, pagination = self._paginate_query_rows(
+                    sorted_rows,
+                    page=normalized_page,
+                    page_size=normalized_page_size,
+                )
+                pagination.update(
+                    {
+                        "sort_key": normalized_sort_key,
+                        "sort_dir": normalized_sort_dir,
+                        "search": str(search or "").strip(),
+                    }
                 )
 
-        for item in items:
-            advertiser_id_value = int(item.get("advertiser_id", 0) or 0)
-            promotion_text = str(item.get("promotion_id") or "").strip()
-            material_text = str(item.get("material_id") or "").strip()
-            item_text = str(item.get("item_id") or "").strip()
-            sibling_context = {}
-            if item_text:
-                sibling_context = sibling_context_by_item.get(
-                    (advertiser_id_value, item_text),
-                    {},
-                ) or fallback_sibling_context_by_item.get(item_text, {})
-            if not promotion_text and str(sibling_context.get("promotion_id") or "").strip():
-                promotion_text = str(sibling_context.get("promotion_id") or "").strip()
-                item["promotion_id"] = promotion_text
-            if not material_text and str(sibling_context.get("material_id") or "").strip():
-                material_text = str(sibling_context.get("material_id") or "").strip()
-                item["material_id"] = material_text
-            plan_context: dict[str, str] = {}
-            if promotion_text.isdigit():
-                promotion_id_value = int(promotion_text)
-                plan_context = plan_map.get((advertiser_id_value, promotion_id_value), {}) or fallback_plan_map.get(
-                    promotion_id_value,
-                    {},
-                )
-            material_context: dict[str, str] = {}
-            if item_text:
-                material_context = material_context_by_item.get(
-                    (advertiser_id_value, item_text),
-                    {},
-                ) or fallback_material_context_by_item.get(item_text, {})
-            if not material_context and material_text:
-                material_context = material_context_by_material.get(
-                    (advertiser_id_value, material_text),
-                    {},
-                ) or fallback_material_context_by_material.get(material_text, {})
-            if not plan_context:
-                plan_context = dict(material_context)
-            elif material_context:
-                for key, value in material_context.items():
-                    if value and not plan_context.get(key):
-                        plan_context[key] = value
-            if sibling_context:
-                for key, value in sibling_context.items():
-                    if value and not plan_context.get(key):
-                        plan_context[key] = value
-            inferred_promotion_id = str(plan_context.get("promotion_id") or "").strip()
-            if not promotion_text and inferred_promotion_id:
-                promotion_text = inferred_promotion_id
-                item["promotion_id"] = promotion_text
-            promotion_name = str(plan_context.get("promotion_name") or "").strip()
-            material_name = material_map.get((advertiser_id_value, material_text), "") or fallback_material_map.get(
-                material_text,
-                "",
-            ) or str(plan_context.get("material_name") or sibling_context.get("material_name") or "").strip()
-            comment_anchor_name = str(plan_context.get("comment_anchor_name") or "").strip()
-            plan_source = str(plan_context.get("plan_source") or "").strip()
-            item["promotion_name"] = promotion_name
-            item["promotion_display_name"] = promotion_name or (f"计划 {promotion_text}" if promotion_text else "-")
-            item["plan_source"] = plan_source
-            item["material_name"] = material_name
-            item["material_display_name"] = material_name or (f"素材 {material_text}" if material_text else "-")
-            item["comment_anchor_name"] = comment_anchor_name
-            item["top_anchor_name"] = comment_anchor_name
-            item["video_owner_aweme_id"] = comment_anchor_name or str(item.get("video_owner_aweme_id") or "").strip()
-
-        items.sort(
-            key=lambda item: (
-                str(item.get("create_time") or ""),
-                int(item.get("like_count", 0) or 0),
-                int(item.get("reply_count", 0) or 0),
-                str(item.get("comment_id") or ""),
-            ),
-            reverse=True,
-        )
         payload = {
             "items": items,
-            "accounts": all_accounts,
+            "accounts": accounts_payload,
             "meta": {
-                "comment_count": len(items),
-                "account_count": len(accounts),
+                "comment_count": total_comment_count,
+                "account_count": len(accounts_payload) if scoped_operator_id > 0 else len(accounts),
                 "error_count": len(errors),
                 "errors": errors,
             },
@@ -18625,7 +22819,10 @@ class DashboardService:
             "comment_sync_pending": comment_sync_pending,
             "comment_sync_queued": comment_sync_queued,
             "fetched_at": now_text(config["timezone"]),
+            "pagination": pagination,
         }
+        if scoped_operator_id > 0:
+            payload["meta"]["visible_count"] = total_comment_count
         payload = self._attach_freshness(
             payload,
             data_time=self._latest_item_datetime(items, "create_time"),
@@ -18763,6 +22960,1955 @@ class DashboardService:
             "customer_center_count": int(payload.get("customer_center_count") or 0),
         }
 
+    def _material_upload_load_job_rows(
+        self,
+        job_id: int,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        with self.db() as conn:
+            job = conn.execute("SELECT * FROM material_upload_jobs WHERE id = ? LIMIT 1", (int(job_id),)).fetchone()
+            if not job:
+                raise RuntimeError(f"upload job not found: {job_id}")
+            file_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM material_upload_job_files
+                    WHERE job_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (int(job_id),),
+                ).fetchall()
+            ]
+            target_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM material_upload_job_targets
+                    WHERE job_id = ?
+                    ORDER BY advertiser_id ASC, ad_id ASC
+                    """,
+                    (int(job_id),),
+                ).fetchall()
+            ]
+            target_asset_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT target_id, file_id, status
+                    FROM material_upload_job_target_assets
+                    WHERE job_id = ?
+                      AND status IN ('queued', 'running')
+                    ORDER BY target_id ASC, file_id ASC
+                    """,
+                    (int(job_id),),
+                ).fetchall()
+            ]
+        return dict(job), file_rows, target_rows, target_asset_rows
+
+    @staticmethod
+    def _material_upload_scope_maps(
+        file_rows: list[dict[str, Any]],
+        target_rows: list[dict[str, Any]],
+        target_asset_rows: list[dict[str, Any]],
+    ) -> tuple[dict[int, list[dict[str, Any]]], dict[int, set[int]], dict[int, set[int]], bool]:
+        advertiser_plan_map: dict[int, list[dict[str, Any]]] = {}
+        target_lookup = {int(item["id"]): item for item in target_rows}
+        for target in target_rows:
+            advertiser_plan_map.setdefault(int(target["advertiser_id"]), []).append(target)
+
+        target_file_id_map: dict[int, set[int]] = {}
+        file_advertiser_id_map: dict[int, set[int]] = {}
+        scoped_target_asset_rows = bool(target_asset_rows)
+        if target_asset_rows:
+            for row in target_asset_rows:
+                target_id = int(row.get("target_id", 0) or 0)
+                file_id = int(row.get("file_id", 0) or 0)
+                if not target_id or not file_id:
+                    continue
+                target_file_id_map.setdefault(target_id, set()).add(file_id)
+                target = target_lookup.get(target_id)
+                if target:
+                    file_advertiser_id_map.setdefault(file_id, set()).add(int(target["advertiser_id"]))
+        else:
+            all_advertiser_ids = {int(item["advertiser_id"]) for item in target_rows}
+            for file_row in file_rows:
+                file_advertiser_id_map[int(file_row["id"])] = set(all_advertiser_ids)
+        return advertiser_plan_map, target_file_id_map, file_advertiser_id_map, scoped_target_asset_rows
+
+    def _material_upload_file_asset_records(self, job_id: int) -> dict[tuple[int, int], dict[str, Any]]:
+        with self.db() as conn:
+            rows = conn.execute(
+                """
+                SELECT file_id, advertiser_id, advertiser_name, status, material_id, video_id, video_url, message
+                FROM material_upload_job_file_assets
+                WHERE job_id = ?
+                ORDER BY id ASC
+                """,
+                (int(job_id),),
+            ).fetchall()
+        records: dict[tuple[int, int], dict[str, Any]] = {}
+        for row in rows:
+            key = (int(row["file_id"] or 0), int(row["advertiser_id"] or 0))
+            if key[0] <= 0 or key[1] <= 0:
+                continue
+            records[key] = dict(row)
+        return records
+
+    def _skip_orphan_material_upload_file_assets_locked(self, conn: Any, job_id: int) -> int:
+        rows = conn.execute(
+            """
+            SELECT fa.id
+            FROM material_upload_job_file_assets fa
+            WHERE fa.job_id = ?
+              AND fa.status IN ('queued', 'running')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM material_upload_job_target_assets ta
+                  JOIN material_upload_job_targets t
+                    ON t.job_id = ta.job_id
+                   AND t.id = ta.target_id
+                  WHERE ta.job_id = fa.job_id
+                    AND ta.file_id = fa.file_id
+                    AND t.advertiser_id = fa.advertiser_id
+                    AND ta.status IN ('queued', 'running')
+              )
+            """,
+            (int(job_id),),
+        ).fetchall()
+        row_ids = [int(row["id"] or 0) for row in rows if int(row["id"] or 0) > 0]
+        if not row_ids:
+            return 0
+        now_value = now_text()
+        message = "关联计划已结束，无需继续上传到账户素材库。"
+        for row_id in row_ids:
+            conn.execute(
+                """
+                UPDATE material_upload_job_file_assets
+                SET status = 'skipped', message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (message, now_value, row_id),
+            )
+        return len(row_ids)
+
+    def _requeue_stale_material_upload_running_assets_locked(
+        self,
+        conn: Any,
+        job_id: int,
+        *,
+        stage: str,
+    ) -> dict[str, int]:
+        timeout_seconds = self._material_upload_running_timeout_seconds()
+        cutoff = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(seconds=timeout_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+        now_value = now_text()
+        counts = {"file_assets": 0, "target_assets": 0}
+        normalized_stage = str(stage or "").strip().lower()
+        if normalized_stage in {"library", "all"}:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM material_upload_job_file_assets
+                WHERE job_id = ?
+                  AND status = 'running'
+                  AND updated_at < ?
+                """,
+                (int(job_id), cutoff),
+            ).fetchall()
+            counts["file_assets"] = len(rows)
+            if rows:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_file_assets
+                    SET status = 'queued', message = ?, updated_at = ?
+                    WHERE job_id = ?
+                      AND status = 'running'
+                      AND updated_at < ?
+                    """,
+                    ("上次上传执行超时中断，已恢复排队继续。", now_value, int(job_id), cutoff),
+                )
+        if normalized_stage in {"bind", "all"}:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM material_upload_job_target_assets
+                WHERE job_id = ?
+                  AND status = 'running'
+                  AND updated_at < ?
+                """,
+                (int(job_id), cutoff),
+            ).fetchall()
+            counts["target_assets"] = len(rows)
+            if rows:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_target_assets
+                    SET status = 'queued', message = ?, updated_at = ?
+                    WHERE job_id = ?
+                      AND status = 'running'
+                      AND updated_at < ?
+                    """,
+                    ("上次绑定执行超时中断，已恢复排队继续。", now_value, int(job_id), cutoff),
+                )
+        return counts
+
+    def _material_upload_file_asset_summary_locked(
+        self,
+        conn: Any,
+        job_id: int,
+        file_id: int,
+    ) -> dict[str, Any]:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT status, material_id, video_id, video_url, message
+                FROM material_upload_job_file_assets
+                WHERE job_id = ? AND file_id = ?
+                ORDER BY id ASC
+                """,
+                (int(job_id), int(file_id)),
+            ).fetchall()
+        ]
+        success_rows = [row for row in rows if str(row.get("status") or "") == "success"]
+        failed_rows = [row for row in rows if str(row.get("status") or "") == "failed"]
+        pending_rows = [row for row in rows if str(row.get("status") or "") in {"queued", "running"}]
+        first_asset = next(
+            (
+                {
+                    "material_id": str(row.get("material_id") or ""),
+                    "video_id": str(row.get("video_id") or ""),
+                    "video_url": str(row.get("video_url") or ""),
+                }
+                for row in success_rows
+                if str(row.get("video_id") or "").strip()
+            ),
+            {},
+        )
+        file_errors = [
+            str(row.get("message") or "").strip()
+            for row in failed_rows
+            if str(row.get("message") or "").strip()
+        ]
+        return {
+            "success_advertisers": len(success_rows),
+            "failed_advertisers": len(failed_rows),
+            "pending_advertisers": len(pending_rows),
+            "first_asset": first_asset,
+            "file_errors": file_errors,
+        }
+
+    def _refresh_material_upload_file_summaries_locked(self, conn: Any, job_id: int) -> int:
+        file_rows = conn.execute(
+            """
+            SELECT id
+            FROM material_upload_job_files
+            WHERE job_id = ?
+            ORDER BY id ASC
+            """,
+            (int(job_id),),
+        ).fetchall()
+        updated = 0
+        for file_row in file_rows:
+            file_id = int(file_row["id"] or 0)
+            if file_id <= 0:
+                continue
+            asset_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT status, material_id, video_id, video_url, message
+                    FROM material_upload_job_file_assets
+                    WHERE job_id = ? AND file_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (int(job_id), file_id),
+                ).fetchall()
+            ]
+            if not asset_rows:
+                continue
+            success_rows = [row for row in asset_rows if str(row.get("status") or "") == "success"]
+            failed_rows = [row for row in asset_rows if str(row.get("status") or "") == "failed"]
+            skipped_rows = [row for row in asset_rows if str(row.get("status") or "") == "skipped"]
+            pending_rows = [row for row in asset_rows if str(row.get("status") or "") in {"queued", "running"}]
+            success_count = len(success_rows)
+            failed_count = len(failed_rows)
+            skipped_count = len(skipped_rows)
+            pending_count = len(pending_rows)
+            first_asset = next(
+                (
+                    {
+                        "material_id": str(row.get("material_id") or ""),
+                        "video_id": str(row.get("video_id") or ""),
+                        "video_url": str(row.get("video_url") or ""),
+                    }
+                    for row in success_rows
+                    if str(row.get("video_id") or "").strip()
+                ),
+                {},
+            )
+            file_errors = [
+                str(row.get("message") or "").strip()
+                for row in failed_rows
+                if str(row.get("message") or "").strip()
+            ]
+            if pending_count > 0:
+                file_status = "running"
+                message = f"账户素材库上传中：成功 {success_count} / 失败 {failed_count} / 待处理 {pending_count}。"
+            elif failed_count > 0 and success_count > 0:
+                file_status = "partial"
+                message = "；".join(file_errors[:3]) or "部分账户上传失败。"
+            elif failed_count > 0:
+                file_status = "failed"
+                message = "；".join(file_errors[:3]) or "上传失败。"
+            else:
+                file_status = "success"
+                if skipped_count > 0 and success_count <= 0:
+                    message = "关联计划已结束，无需继续上传到账户素材库。"
+                elif skipped_count > 0:
+                    message = f"上传成功；{skipped_count} 个账户无待绑定计划，已跳过素材库上传。"
+                else:
+                    message = "上传成功。"
+            conn.execute(
+                """
+                UPDATE material_upload_job_files
+                SET status = ?, message = ?, material_id = ?, video_id = ?, video_url = ?,
+                    processed_advertisers = ?, success_advertisers = ?, failed_advertisers = ?, updated_at = ?
+                WHERE job_id = ? AND id = ?
+                """,
+                (
+                    file_status,
+                    message,
+                    str(first_asset.get("material_id") or ""),
+                    str(first_asset.get("video_id") or ""),
+                    str(first_asset.get("video_url") or ""),
+                    success_count + failed_count,
+                    success_count,
+                    failed_count,
+                    now_text(),
+                    int(job_id),
+                    file_id,
+                ),
+            )
+            updated += 1
+        return updated
+
+    def _process_material_upload_ebp_library_job(
+        self,
+        *,
+        job_id: int,
+        client: OceanEngineClient,
+        job: dict[str, Any],
+        file_rows: list[dict[str, Any]],
+        target_rows: list[dict[str, Any]],
+        target_asset_rows: list[dict[str, Any]],
+        total_files: int,
+    ) -> dict[str, Any]:
+        running_note = "正在上传素材到 EBP 共享素材库。"
+        missing_file_message = "文件不存在，无法执行上传。"
+        reuse_message = "复用 EBP 共享素材。"
+        upload_success_message = "上传到 EBP 共享素材库成功。"
+        waiting_bind_note = "EBP 共享素材上传已完成，等待绑定计划。"
+        ebp_account_id = self._material_upload_ebp_account_id()
+        if ebp_account_id <= 0:
+            raise RuntimeError("MATERIAL_UPLOAD_EBP_ACCOUNT_ID is required")
+
+        advertiser_plan_map, _, file_advertiser_id_map, scoped_target_asset_rows = self._material_upload_scope_maps(
+            file_rows,
+            target_rows,
+            target_asset_rows,
+        )
+        advertiser_name_map: dict[int, str] = {}
+        for target in target_rows:
+            advertiser_id = int(target.get("advertiser_id", 0) or 0)
+            if advertiser_id > 0 and advertiser_id not in advertiser_name_map:
+                advertiser_name_map[advertiser_id] = str(target.get("advertiser_name") or "")
+
+        with self.db() as conn:
+            for file_row in file_rows:
+                file_id = int(file_row.get("id", 0) or 0)
+                if scoped_target_asset_rows and file_id not in file_advertiser_id_map:
+                    continue
+                advertiser_ids = sorted(file_advertiser_id_map.get(file_id) or advertiser_plan_map.keys())
+                for advertiser_id in advertiser_ids:
+                    existing = conn.execute(
+                        """
+                        SELECT id
+                        FROM material_upload_job_file_assets
+                        WHERE job_id = ? AND file_id = ? AND advertiser_id = ?
+                        LIMIT 1
+                        """,
+                        (int(job_id), file_id, int(advertiser_id)),
+                    ).fetchone()
+                    if existing:
+                        continue
+                    self._upsert_material_upload_file_asset_locked(
+                        conn,
+                        int(job_id),
+                        file_id,
+                        int(advertiser_id),
+                        advertiser_name_map.get(int(advertiser_id), ""),
+                        "queued",
+                        message="等待上传到 EBP 共享素材库。",
+                    )
+
+        upload_concurrency = self._material_upload_library_concurrency()
+        upload_batch_size = self._material_upload_library_batch_size(upload_concurrency)
+        with self.db() as conn:
+            self._update_material_upload_job(
+                conn,
+                int(job_id),
+                note=(
+                    f"{running_note} EBP {ebp_account_id}，"
+                    f"按视频文件单次上传，文件并发 {upload_concurrency} / 单批 {upload_batch_size}。"
+                ),
+                updated_at=now_text(),
+            )
+
+        file_asset_records = self._material_upload_file_asset_records(int(job_id))
+        upload_work_items: list[dict[str, Any]] = []
+        retryable_upload_seen = False
+        selected_sha256: set[str] = set()
+
+        def advertiser_ids_for_file(file_id: int) -> list[int]:
+            ids = sorted(file_advertiser_id_map.get(int(file_id)) or advertiser_plan_map.keys())
+            return [int(item) for item in ids if int(item or 0) > 0]
+
+        def mark_file_assets(
+            file_id: int,
+            advertiser_ids: list[int],
+            status_text: str,
+            message: str,
+            asset: dict[str, str] | None = None,
+        ) -> None:
+            normalized_asset = dict(asset or {})
+            with self.db() as conn:
+                for advertiser_id in advertiser_ids:
+                    self._upsert_material_upload_file_asset_locked(
+                        conn,
+                        int(job_id),
+                        int(file_id),
+                        int(advertiser_id),
+                        advertiser_name_map.get(int(advertiser_id), ""),
+                        status_text,
+                        material_id=str(normalized_asset.get("material_id") or ""),
+                        video_id=str(normalized_asset.get("video_id") or ""),
+                        video_url=str(normalized_asset.get("video_url") or ""),
+                        message=message,
+                    )
+
+        def fail_file_for_upload_format(file_id: int, message: str) -> None:
+            normalized_file_id = int(file_id or 0)
+            if normalized_file_id <= 0:
+                return
+            now_value = now_text()
+            with self.db() as conn:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_files
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ? AND id = ?
+                    """,
+                    (message, now_value, int(job_id), normalized_file_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_file_assets
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ? AND file_id = ?
+                      AND status IN ('queued', 'running', 'failed')
+                    """,
+                    (message, now_value, int(job_id), normalized_file_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_target_assets
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ? AND file_id = ?
+                      AND status IN ('queued', 'running', 'failed')
+                    """,
+                    (message, now_value, int(job_id), normalized_file_id),
+                )
+                self._recompute_material_upload_job_locked(conn, int(job_id))
+
+        def existing_success_asset(file_id: int, advertiser_ids: list[int]) -> dict[str, str]:
+            for advertiser_id in advertiser_ids:
+                record = dict(file_asset_records.get((int(file_id), int(advertiser_id))) or {})
+                if str(record.get("status") or "").strip().lower() != "success":
+                    continue
+                video_id = str(record.get("video_id") or "").strip()
+                if not video_id:
+                    continue
+                return {
+                    "material_id": str(record.get("material_id") or ""),
+                    "video_id": video_id,
+                    "video_url": str(record.get("video_url") or ""),
+                }
+            return {}
+
+        def upload_ebp_file(item: dict[str, Any]) -> dict[str, Any]:
+            nonlocal retryable_upload_seen
+            file_row = dict(item.get("file_row") or {})
+            file_id = int(item.get("file_id", 0) or 0)
+            file_path = Path(str(item.get("file_path") or ""))
+            advertiser_ids = [int(value) for value in item.get("advertiser_ids") or []]
+            probe_summary = str(item.get("probe_summary") or "")
+            started_monotonic = time.monotonic()
+            try:
+                upload_response = client.upload_ebp_video(
+                    account_id=ebp_account_id,
+                    file_path=file_path,
+                    video_signature=str(file_row.get("file_md5") or ""),
+                    mime_type=str(file_row.get("mime_type") or "video/mp4"),
+                    before_request=self._rate_limit_material_video_upload_api,
+                    attempts=1,
+                )
+                data = upload_response.get("data") or {}
+                asset = {
+                    "material_id": str(data.get("material_id") or ""),
+                    "video_id": str(data.get("video_id") or ""),
+                    "video_url": str(data.get("video_url") or ""),
+                }
+                if not asset["video_id"]:
+                    raise RuntimeError(f"upload ebp video response missing video_id: {upload_response}")
+                elapsed_seconds = max(time.monotonic() - started_monotonic, 0.0)
+                message = f"{upload_success_message} 用时 {elapsed_seconds:.1f} 秒。"
+                with self.db() as conn:
+                    self._upsert_advertiser_material_asset_locked(
+                        conn,
+                        ebp_account_id,
+                        str(file_row.get("file_sha256") or ""),
+                        asset["material_id"],
+                        asset["video_id"],
+                        asset["video_url"],
+                        f"EBP_SHARED:{str(file_row.get('original_name') or '')}",
+                    )
+                mark_file_assets(file_id, advertiser_ids, "success", message, asset)
+                LOGGER.info(
+                    "material ebp upload success: job_id=%s file_id=%s ebp_account_id=%s elapsed=%.1fs size=%s",
+                    int(job_id),
+                    file_id,
+                    ebp_account_id,
+                    elapsed_seconds,
+                    int(file_row.get("file_size", 0) or 0),
+                )
+                return {"status": "success", "file_id": file_id, **asset, "message": message}
+            except Exception as exc:  # noqa: BLE001
+                elapsed_seconds = max(time.monotonic() - started_monotonic, 0.0)
+                message = self._append_upload_probe_summary(str(exc), probe_summary)
+                if self._is_material_upload_official_payload_too_large_error(message):
+                    message = self._append_upload_probe_summary(
+                        f"官方上传网关拒绝该文件大小（HTTP 413）；请压缩视频后重新上传：{exc}",
+                        probe_summary,
+                    )
+                    fail_file_for_upload_format(file_id, message)
+                    status_text = "failed"
+                elif self._is_material_upload_official_video_format_error(message):
+                    message = self._append_upload_probe_summary(
+                        f"视频格式校验失败，已停止该素材上传：{exc}",
+                        probe_summary,
+                    )
+                    fail_file_for_upload_format(file_id, message)
+                    status_text = "failed"
+                elif self._is_material_upload_retryable_official_error(message):
+                    retryable_upload_seen = True
+                    if not self._is_material_upload_system_limit_error(message):
+                        self._cooldown_material_video_upload_api()
+                    message = self._append_upload_probe_summary(
+                        f"官方 EBP 上传接口可重试错误，已回队重试：{exc}",
+                        probe_summary,
+                    )
+                    mark_file_assets(file_id, advertiser_ids, "queued", message)
+                    status_text = "retry"
+                else:
+                    mark_file_assets(file_id, advertiser_ids, "failed", message)
+                    status_text = "failed"
+                LOGGER.warning(
+                    "material ebp upload failed: job_id=%s file_id=%s ebp_account_id=%s elapsed=%.1fs status=%s error=%s",
+                    int(job_id),
+                    file_id,
+                    ebp_account_id,
+                    elapsed_seconds,
+                    status_text,
+                    message,
+                )
+                return {"status": status_text, "file_id": file_id, "message": message}
+
+        for file_row in file_rows:
+            if len(upload_work_items) >= upload_batch_size:
+                break
+            file_id = int(file_row.get("id", 0) or 0)
+            if scoped_target_asset_rows and file_id not in file_advertiser_id_map:
+                continue
+            advertiser_ids = advertiser_ids_for_file(file_id)
+            if not advertiser_ids:
+                continue
+            file_records = [dict(file_asset_records.get((file_id, advertiser_id)) or {}) for advertiser_id in advertiser_ids]
+            if any(str(row.get("status") or "").strip().lower() == "running" for row in file_records):
+                continue
+            if file_records and all(
+                str(row.get("status") or "").strip().lower() == "success" and str(row.get("video_id") or "").strip()
+                for row in file_records
+            ):
+                continue
+            if file_records and all(str(row.get("status") or "").strip().lower() == "failed" for row in file_records):
+                continue
+
+            file_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
+            if not file_path.exists():
+                mark_file_assets(file_id, advertiser_ids, "failed", missing_file_message)
+                continue
+
+            probe_summary, preflight_failure_message = self._probe_upload_video(file_row, file_path)
+            if preflight_failure_message:
+                fail_file_for_upload_format(file_id, preflight_failure_message)
+                continue
+
+            sha256 = str(file_row.get("file_sha256") or "").strip()
+            cached: dict[str, Any] | None = None
+            if sha256:
+                with self.db() as conn:
+                    cached = self._find_advertiser_material_asset_locked(conn, ebp_account_id, sha256)
+            if cached and str(cached.get("video_id") or "").strip():
+                asset = {
+                    "material_id": str(cached.get("material_id") or ""),
+                    "video_id": str(cached.get("video_id") or ""),
+                    "video_url": str(cached.get("video_url") or ""),
+                }
+                mark_file_assets(file_id, advertiser_ids, "success", reuse_message, asset)
+                continue
+
+            existing_asset = existing_success_asset(file_id, advertiser_ids)
+            if existing_asset:
+                mark_file_assets(file_id, advertiser_ids, "success", reuse_message, existing_asset)
+                continue
+
+            if sha256 and sha256 in selected_sha256:
+                continue
+            if sha256:
+                selected_sha256.add(sha256)
+            mark_file_assets(file_id, advertiser_ids, "running", "正在上传到 EBP 共享素材库。")
+            upload_work_items.append(
+                {
+                    "file_row": file_row,
+                    "file_id": file_id,
+                    "advertiser_ids": advertiser_ids,
+                    "file_path": str(file_path),
+                    "probe_summary": probe_summary,
+                }
+            )
+
+        if upload_work_items:
+            worker_count = min(upload_concurrency, len(upload_work_items))
+            if worker_count > 1:
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    future_map = {pool.submit(upload_ebp_file, item): item for item in upload_work_items}
+                    for future in as_completed(future_map):
+                        future.result()
+            else:
+                for item in upload_work_items:
+                    upload_ebp_file(item)
+
+        with self.db() as conn:
+            self._refresh_material_upload_file_summaries_locked(conn, int(job_id))
+            counts = self._recompute_material_upload_job_locked(conn, int(job_id))
+            job_row = conn.execute("SELECT total_files FROM material_upload_jobs WHERE id = ? LIMIT 1", (int(job_id),)).fetchone()
+            total_files = int((job_row or {}).get("total_files", 0) or 0)
+            received_files = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                    (int(job_id),),
+                ).fetchone()["count"]
+            )
+            pending_file_assets = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM material_upload_job_file_assets
+                    WHERE job_id = ?
+                      AND status IN ('queued', 'running')
+                    """,
+                    (int(job_id),),
+                ).fetchone()["count"]
+            )
+            should_enqueue_bind = received_files > 0 and bool(target_rows)
+            if retryable_upload_seen:
+                next_status = "running"
+                next_note = "官方 EBP 上传接口返回可重试错误，已回队重试。"
+            elif received_files < total_files:
+                next_status = "receiving"
+                next_note = f"已接收 {received_files}/{total_files} 个视频，后台会继续上传到 EBP 共享素材库。"
+            elif pending_file_assets > 0:
+                next_status = "running"
+                next_note = "视频已全部上传到服务器，后台正在上传到 EBP 共享素材库。"
+            elif should_enqueue_bind:
+                next_status = "queued"
+                next_note = waiting_bind_note
+            else:
+                next_status = "failed"
+                next_note = "上传任务已结束，但没有可绑定的计划。"
+            self._update_material_upload_job(
+                conn,
+                int(job_id),
+                status=next_status,
+                note=next_note,
+                completed_at="",
+                updated_at=now_text(),
+            )
+        return {
+            "job_id": int(job_id),
+            "status": next_status,
+            "received_files": received_files,
+            "total_files": total_files,
+            "pending_file_assets": pending_file_assets,
+            "should_enqueue_bind": received_files > 0 and bool(target_rows),
+            "retryable_upload_seen": retryable_upload_seen,
+            "ebp_account_id": ebp_account_id,
+            **counts,
+        }
+
+    def process_material_upload_library_job(self, job_id: int) -> dict[str, Any]:
+        running_note = "正在上传素材到账户素材库。"
+        missing_file_message = "文件不存在，无法执行上传。"
+        reuse_message = "复用账户已有素材。"
+        upload_success_message = "上传成功。"
+        waiting_bind_note = "账户素材库上传已完成，等待绑定计划。"
+
+        config = self.read_config()
+        client = self.build_client(config)
+        job, file_rows, target_rows, target_asset_rows = self._material_upload_load_job_rows(int(job_id))
+        job_status = str(job.get("status") or "").strip().lower()
+        if job_status in self._material_upload_terminal_statuses():
+            return {"job_id": int(job_id), "status": job_status or "failed", "skipped": True}
+        if self.material_uploads_paused():
+            return {"job_id": int(job_id), "status": job_status or "queued", "skipped": True, "paused": True}
+        with self.db() as conn:
+            recovered_running = self._requeue_stale_material_upload_running_assets_locked(
+                conn,
+                int(job_id),
+                stage="library",
+            )
+        if int(recovered_running.get("file_assets", 0) or 0) > 0:
+            job, file_rows, target_rows, target_asset_rows = self._material_upload_load_job_rows(int(job_id))
+        total_files = max(1, int(job.get("total_files", 0) or 0))
+        received_files = len(file_rows)
+        if received_files < total_files:
+            with self.db() as conn:
+                self._update_material_upload_job(
+                    conn,
+                    int(job_id),
+                    status="receiving",
+                    note=f"正在上传视频到服务器：{received_files}/{total_files}，全部上传完成后才会开始后台处理。",
+                    completed_at="",
+                    updated_at=now_text(),
+                )
+            return {
+                "job_id": int(job_id),
+                "status": "receiving",
+                "received_files": received_files,
+                "total_files": total_files,
+                "pending_file_assets": 0,
+                "should_enqueue_bind": False,
+            }
+
+        try:
+            client.get_latest_access_token()
+        except Exception as exc:  # noqa: BLE001
+            with self.db() as conn:
+                self._update_material_upload_job(
+                    conn,
+                    int(job_id),
+                    status="failed",
+                    note=f"素材库上传前刷新 token 失败：{exc}",
+                    completed_at=now_text(),
+                    updated_at=now_text(),
+                )
+            return {
+                "job_id": int(job_id),
+                "status": "failed",
+                "error": f"refresh token before material library upload failed: {exc}",
+            }
+
+        now = now_text()
+        with self.db() as conn:
+            self._update_material_upload_job(
+                conn,
+                int(job_id),
+                status="running",
+                started_at=str(job.get("started_at") or now),
+                note=running_note,
+                completed_at="",
+                updated_at=now,
+            )
+
+        if self._material_upload_use_ebp_shared_video():
+            return self._process_material_upload_ebp_library_job(
+                job_id=int(job_id),
+                client=client,
+                job=dict(job),
+                file_rows=file_rows,
+                target_rows=target_rows,
+                target_asset_rows=target_asset_rows,
+                total_files=total_files,
+            )
+
+        advertiser_plan_map, _, file_advertiser_id_map, scoped_target_asset_rows = self._material_upload_scope_maps(
+            file_rows,
+            target_rows,
+            target_asset_rows,
+        )
+        with self.db() as conn:
+            self._skip_orphan_material_upload_file_assets_locked(conn, int(job_id))
+        file_asset_records = self._material_upload_file_asset_records(int(job_id))
+        upload_concurrency = self._material_upload_library_concurrency()
+        upload_per_advertiser_concurrency = self._material_upload_library_per_advertiser_concurrency()
+        upload_per_file_concurrency = self._material_upload_library_per_file_concurrency()
+        upload_batch_size = self._material_upload_library_batch_size(upload_concurrency)
+        if upload_concurrency > 1 or upload_per_advertiser_concurrency > 1 or upload_per_file_concurrency > 1:
+            with self.db() as conn:
+                self._update_material_upload_job(
+                    conn,
+                    int(job_id),
+                    note=(
+                        f"{running_note} 千川素材库上传全局并发 {upload_concurrency}"
+                        f" / 单账户并发 {upload_per_advertiser_concurrency}"
+                        f" / 同视频并发 {upload_per_file_concurrency}"
+                        f" / 单批 {upload_batch_size}。"
+                    ),
+                    updated_at=now_text(),
+                )
+
+        file_success_upload_counts: dict[int, int] = {}
+        file_running_upload_counts: dict[int, int] = {}
+        for (record_file_id, _), record in file_asset_records.items():
+            normalized_record_file_id = int(record_file_id or 0)
+            if normalized_record_file_id <= 0:
+                continue
+            record_status = str(record.get("status") or "").strip().lower()
+            if record_status == "success" and str(record.get("video_id") or "").strip():
+                file_success_upload_counts[normalized_record_file_id] = (
+                    int(file_success_upload_counts.get(normalized_record_file_id, 0) or 0) + 1
+                )
+            elif record_status == "running":
+                file_running_upload_counts[normalized_record_file_id] = (
+                    int(file_running_upload_counts.get(normalized_record_file_id, 0) or 0) + 1
+                )
+
+        file_upload_states: dict[int, dict[str, Any]] = {}
+        upload_work_items: list[dict[str, Any]] = []
+        advertiser_upload_locks = {
+            int(advertiser_id): threading.Semaphore(upload_per_advertiser_concurrency)
+            for advertiser_id in advertiser_plan_map.keys()
+        }
+        file_upload_locks: dict[int, threading.Semaphore] = {}
+        file_upload_format_failed_ids: set[int] = set()
+        file_upload_format_failed_guard = threading.Lock()
+        retryable_upload_seen = False
+        selected_upload_file_counts: dict[int, int] = {}
+        selected_upload_advertiser_ids: set[int] = set()
+
+        def file_canary_passed(file_id: int) -> bool:
+            return int(file_success_upload_counts.get(int(file_id or 0), 0) or 0) > 0
+
+        def mark_file_canary_success(file_id: int) -> None:
+            normalized_file_id = int(file_id or 0)
+            if normalized_file_id <= 0:
+                return
+            file_success_upload_counts[normalized_file_id] = int(
+                file_success_upload_counts.get(normalized_file_id, 0) or 0
+            ) + 1
+
+        def fail_file_for_upload_format(file_id: int, message: str) -> None:
+            normalized_file_id = int(file_id or 0)
+            if normalized_file_id <= 0:
+                return
+            with file_upload_format_failed_guard:
+                first_seen = normalized_file_id not in file_upload_format_failed_ids
+                file_upload_format_failed_ids.add(normalized_file_id)
+            if not first_seen:
+                return
+            now_value = now_text()
+            with self.db() as conn:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_files
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ? AND id = ?
+                    """,
+                    (message, now_value, int(job_id), normalized_file_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_file_assets
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ? AND file_id = ?
+                      AND status IN ('queued', 'running', 'failed')
+                    """,
+                    (message, now_value, int(job_id), normalized_file_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_target_assets
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ? AND file_id = ?
+                      AND status IN ('queued', 'running', 'failed')
+                    """,
+                    (message, now_value, int(job_id), normalized_file_id),
+                )
+                self._recompute_material_upload_job_locked(conn, int(job_id))
+
+        def apply_upload_result(result: dict[str, Any]) -> None:
+            file_id = int(result.get("file_id", 0) or 0)
+            state = file_upload_states.get(file_id)
+            if not state:
+                return
+            if str(result.get("status") or "") == "retry":
+                state["retry_advertisers"] = int(state.get("retry_advertisers", 0) or 0) + 1
+                return
+            state["processed_advertisers"] = int(state.get("processed_advertisers", 0) or 0) + 1
+            if str(result.get("status") or "") == "success":
+                asset = {
+                    "material_id": str(result.get("material_id") or ""),
+                    "video_id": str(result.get("video_id") or ""),
+                    "video_url": str(result.get("video_url") or ""),
+                }
+                if not state.get("first_asset"):
+                    state["first_asset"] = asset
+                state["success_advertisers"] = int(state.get("success_advertisers", 0) or 0) + 1
+                mark_file_canary_success(file_id)
+                return
+            state["failed_advertisers"] = int(state.get("failed_advertisers", 0) or 0) + 1
+            message = str(result.get("message") or "上传失败。")
+            advertiser_label = str(result.get("advertiser_name") or result.get("advertiser_id") or "")
+            state.setdefault("file_errors", []).append(f"{advertiser_label}: {message}")
+
+        def upload_library_asset(item: dict[str, Any]) -> dict[str, Any]:
+            file_row = dict(item.get("file_row") or {})
+            file_id = int(item.get("file_id", 0) or 0)
+            advertiser_id = int(item.get("advertiser_id", 0) or 0)
+            advertiser_name = str(item.get("advertiser_name") or "")
+            file_path = Path(str(item.get("file_path") or ""))
+            probe_summary = str(item.get("probe_summary") or "")
+            started_monotonic = time.monotonic()
+            file_lock = file_upload_locks.setdefault(file_id, threading.Semaphore(upload_per_file_concurrency))
+            file_lock.acquire()
+            try:
+                with file_upload_format_failed_guard:
+                    if file_id in file_upload_format_failed_ids:
+                        skipped_message = "该视频已判定为官方上传终态失败，已停止继续上传。"
+                        return {
+                            "status": "failed",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            "message": skipped_message,
+                            "elapsed_seconds": max(time.monotonic() - started_monotonic, 0.0),
+                        }
+                advertiser_lock = advertiser_upload_locks.setdefault(
+                    advertiser_id,
+                    threading.Semaphore(upload_per_advertiser_concurrency),
+                )
+                with advertiser_lock:
+                    upload_response = client.upload_local_video(
+                        advertiser_id=advertiser_id,
+                        material_name=str(file_row.get("original_name") or ""),
+                        file_path=file_path,
+                        video_signature=str(file_row.get("file_md5") or ""),
+                        mime_type=str(file_row.get("mime_type") or "video/mp4"),
+                        before_request=self._rate_limit_material_video_upload_api,
+                        attempts=1,
+                    )
+                data = upload_response.get("data") or {}
+                asset = {
+                    "material_id": str(data.get("material_id") or ""),
+                    "video_id": str(data.get("video_id") or ""),
+                    "video_url": str(data.get("video_url") or ""),
+                }
+                if not asset["video_id"]:
+                    raise RuntimeError(f"upload response missing video_id: {upload_response}")
+                with file_upload_format_failed_guard:
+                    if file_id in file_upload_format_failed_ids:
+                        skipped_message = "该视频已判定为官方上传终态失败，已停止继续上传。"
+                        return {
+                            "status": "failed",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            "message": skipped_message,
+                            "elapsed_seconds": max(time.monotonic() - started_monotonic, 0.0),
+                        }
+                elapsed_seconds = max(time.monotonic() - started_monotonic, 0.0)
+                message = f"{upload_success_message} 用时 {elapsed_seconds:.1f} 秒。"
+                with self.db() as conn:
+                    self._upsert_advertiser_material_asset_locked(
+                        conn,
+                        advertiser_id,
+                        str(file_row.get("file_sha256") or ""),
+                        asset["material_id"],
+                        asset["video_id"],
+                        asset["video_url"],
+                        str(file_row.get("original_name") or ""),
+                    )
+                    self._upsert_material_upload_file_asset_locked(
+                        conn,
+                        int(job_id),
+                        file_id,
+                        advertiser_id,
+                        advertiser_name,
+                        "success",
+                        material_id=asset["material_id"],
+                        video_id=asset["video_id"],
+                        video_url=asset["video_url"],
+                        message=message,
+                    )
+                LOGGER.info(
+                    "material library upload success: job_id=%s file_id=%s advertiser_id=%s elapsed=%.1fs size=%s",
+                    int(job_id),
+                    file_id,
+                    advertiser_id,
+                    elapsed_seconds,
+                    int(file_row.get("file_size", 0) or 0),
+                )
+                return {
+                    "status": "success",
+                    "file_id": file_id,
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": advertiser_name,
+                    **asset,
+                    "message": message,
+                    "elapsed_seconds": elapsed_seconds,
+                }
+            except Exception as exc:  # noqa: BLE001
+                nonlocal retryable_upload_seen
+                elapsed_seconds = max(time.monotonic() - started_monotonic, 0.0)
+                message = self._append_upload_probe_summary(str(exc), probe_summary)
+                if self._is_material_upload_official_payload_too_large_error(message):
+                    message = self._append_upload_probe_summary(
+                        f"官方上传网关拒绝该文件大小（HTTP 413）；请压缩视频后重新上传：{exc}",
+                        probe_summary,
+                    )
+                    fail_file_for_upload_format(file_id, message)
+                elif self._is_material_upload_official_video_format_error(message):
+                    message = self._append_upload_probe_summary(
+                        f"视频格式校验失败，已停止该素材对其他账户上传：{exc}",
+                        probe_summary,
+                    )
+                    fail_file_for_upload_format(file_id, message)
+                elif self._is_material_upload_retryable_official_error(message):
+                    retryable_upload_seen = True
+                    if not self._is_material_upload_system_limit_error(message):
+                        self._cooldown_material_video_upload_api()
+                    message = self._append_upload_probe_summary(
+                        f"官方上传接口可重试错误，已回队重试：{exc}",
+                        probe_summary,
+                    )
+                    with self.db() as conn:
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "queued",
+                            message=message,
+                        )
+                    LOGGER.warning(
+                        "material library upload retry queued: job_id=%s file_id=%s advertiser_id=%s elapsed=%.1fs error=%s",
+                        int(job_id),
+                        file_id,
+                        advertiser_id,
+                        elapsed_seconds,
+                        message,
+                    )
+                    return {
+                        "status": "retry",
+                        "file_id": file_id,
+                        "advertiser_id": advertiser_id,
+                        "advertiser_name": advertiser_name,
+                        "message": message,
+                        "elapsed_seconds": elapsed_seconds,
+                    }
+                else:
+                    with self.db() as conn:
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "failed",
+                            message=message,
+                        )
+                LOGGER.warning(
+                    "material library upload failed: job_id=%s file_id=%s advertiser_id=%s elapsed=%.1fs error=%s",
+                    int(job_id),
+                    file_id,
+                    advertiser_id,
+                    elapsed_seconds,
+                    message,
+                )
+                return {
+                    "status": "failed",
+                    "file_id": file_id,
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": advertiser_name,
+                    "message": message,
+                    "elapsed_seconds": elapsed_seconds,
+                }
+            finally:
+                try:
+                    file_lock.release()
+                except RuntimeError:
+                    pass
+
+        upload_item_limit_reached = False
+        for file_row in file_rows:
+            if upload_item_limit_reached:
+                break
+            file_id = int(file_row["id"])
+            if scoped_target_asset_rows and file_id not in file_advertiser_id_map:
+                continue
+            file_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
+            retry_advertiser_ids = sorted(file_advertiser_id_map.get(file_id) or advertiser_plan_map.keys())
+            state: dict[str, Any] = {
+                "file_row": file_row,
+                "retry_advertiser_ids": retry_advertiser_ids,
+                "probe_summary": "",
+                "success_advertisers": 0,
+                "failed_advertisers": 0,
+                "processed_advertisers": 0,
+                "first_asset": None,
+                "file_errors": [],
+            }
+            file_upload_states[file_id] = state
+            if not file_path.exists():
+                with self.db() as conn:
+                    for advertiser_id in retry_advertiser_ids:
+                        targets = advertiser_plan_map.get(advertiser_id) or []
+                        advertiser_name = str(targets[0].get("advertiser_name") or "") if targets else ""
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "failed",
+                            message=missing_file_message,
+                        )
+                for advertiser_id in retry_advertiser_ids:
+                    targets = advertiser_plan_map.get(advertiser_id) or []
+                    apply_upload_result(
+                        {
+                            "status": "failed",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": str(targets[0].get("advertiser_name") or "") if targets else "",
+                            "message": missing_file_message,
+                        }
+                    )
+                continue
+
+            probe_summary, preflight_failure_message = self._probe_upload_video(file_row, file_path)
+            state["probe_summary"] = probe_summary
+            for advertiser_id in retry_advertiser_ids:
+                targets = advertiser_plan_map.get(advertiser_id) or []
+                if not targets:
+                    continue
+                advertiser_name = str(targets[0].get("advertiser_name") or "")
+                existing_file_asset = dict(file_asset_records.get((file_id, advertiser_id)) or {})
+                existing_file_asset_status = str(existing_file_asset.get("status") or "").strip().lower()
+                if existing_file_asset_status == "success" and str(existing_file_asset.get("video_id") or "").strip():
+                    apply_upload_result(
+                        {
+                            "status": "success",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            "material_id": str(existing_file_asset.get("material_id") or ""),
+                            "video_id": str(existing_file_asset.get("video_id") or ""),
+                            "video_url": str(existing_file_asset.get("video_url") or ""),
+                            "message": str(existing_file_asset.get("message") or reuse_message),
+                        }
+                    )
+                    continue
+                if existing_file_asset_status == "failed":
+                    apply_upload_result(
+                        {
+                            "status": "failed",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            "message": str(existing_file_asset.get("message") or "上传失败。"),
+                        }
+                    )
+                    continue
+                if existing_file_asset_status == "running":
+                    continue
+                with self.db() as conn:
+                    cached = self._find_advertiser_material_asset_locked(
+                        conn,
+                        advertiser_id,
+                        str(file_row.get("file_sha256") or ""),
+                    )
+                if cached and str(cached.get("video_id") or ""):
+                    asset = {
+                        "material_id": str(cached.get("material_id") or ""),
+                        "video_id": str(cached.get("video_id") or ""),
+                        "video_url": str(cached.get("video_url") or ""),
+                    }
+                    with self.db() as conn:
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "success",
+                            material_id=asset["material_id"],
+                            video_id=asset["video_id"],
+                            video_url=asset["video_url"],
+                            message=reuse_message,
+                        )
+                    apply_upload_result(
+                        {
+                            "status": "success",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            **asset,
+                            "message": reuse_message,
+                        }
+                    )
+                    continue
+                if preflight_failure_message:
+                    fail_file_for_upload_format(file_id, preflight_failure_message)
+                    apply_upload_result(
+                        {
+                            "status": "failed",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            "message": preflight_failure_message,
+                        }
+                    )
+                    break
+                file_upload_limit = upload_per_file_concurrency if file_canary_passed(file_id) else 1
+                current_file_running_count = int(file_running_upload_counts.get(file_id, 0) or 0)
+                selected_file_upload_count = int(selected_upload_file_counts.get(file_id, 0) or 0)
+                if (
+                    current_file_running_count + selected_file_upload_count >= file_upload_limit
+                    or advertiser_id in selected_upload_advertiser_ids
+                ):
+                    continue
+                with self.db() as conn:
+                    self._upsert_material_upload_file_asset_locked(
+                        conn,
+                        int(job_id),
+                        file_id,
+                        advertiser_id,
+                        advertiser_name,
+                        "running",
+                        message="正在上传素材。",
+                    )
+                upload_work_items.append(
+                    {
+                        "file_row": file_row,
+                        "file_id": file_id,
+                        "advertiser_id": advertiser_id,
+                        "advertiser_name": advertiser_name,
+                        "file_path": str(file_path),
+                        "probe_summary": probe_summary,
+                    }
+                )
+                selected_upload_file_counts[file_id] = selected_file_upload_count + 1
+                selected_upload_advertiser_ids.add(advertiser_id)
+                if len(upload_work_items) >= upload_batch_size:
+                    upload_item_limit_reached = True
+                    break
+
+        if upload_work_items:
+            worker_count = min(upload_concurrency, len(upload_work_items))
+            if worker_count > 1:
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    future_map = {pool.submit(upload_library_asset, item): item for item in upload_work_items}
+                    for future in as_completed(future_map):
+                        item = future_map[future]
+                        try:
+                            result = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            result = {
+                                "status": "failed",
+                                "file_id": int(item.get("file_id", 0) or 0),
+                                "advertiser_id": int(item.get("advertiser_id", 0) or 0),
+                                "advertiser_name": str(item.get("advertiser_name") or ""),
+                                "message": str(exc),
+                            }
+                        apply_upload_result(result)
+            else:
+                for item in upload_work_items:
+                    apply_upload_result(upload_library_asset(item))
+
+        for file_id in sorted(file_upload_states):
+            state = file_upload_states[file_id]
+            file_row = dict(state.get("file_row") or {})
+            probe_summary = str(state.get("probe_summary") or "")
+            with self.db() as conn:
+                file_summary = self._material_upload_file_asset_summary_locked(conn, int(job_id), file_id)
+            success_advertisers = int(file_summary.get("success_advertisers", 0) or 0)
+            failed_advertisers = int(file_summary.get("failed_advertisers", 0) or 0)
+            pending_file_asset_count = int(file_summary.get("pending_advertisers", 0) or 0)
+            first_asset = dict(file_summary.get("first_asset") or {})
+            file_errors = list(file_summary.get("file_errors") or [])
+            if pending_file_asset_count > 0:
+                file_status = "running"
+                file_message = (
+                    f"账户素材库上传中：成功 {success_advertisers} / 失败 {failed_advertisers} / 待处理 {pending_file_asset_count}。"
+                )
+            else:
+                file_status = "success" if failed_advertisers == 0 and success_advertisers > 0 else "failed"
+                if success_advertisers > 0 and failed_advertisers > 0:
+                    file_status = "partial"
+                file_message = upload_success_message if file_status == "success" else "；".join(file_errors[:3]) or "上传失败。"
+            if probe_summary and (
+                file_status != "success"
+                or not probe_summary.startswith("视频元数据探测失败")
+            ):
+                file_message = self._append_upload_probe_summary(file_message, probe_summary)
+            with self.db() as conn:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_files
+                    SET status = ?, message = ?, material_id = ?, video_id = ?, video_url = ?,
+                        processed_advertisers = ?, success_advertisers = ?, failed_advertisers = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        file_status,
+                        file_message,
+                        str((first_asset or {}).get("material_id") or ""),
+                        str((first_asset or {}).get("video_id") or ""),
+                        str((first_asset or {}).get("video_url") or ""),
+                        success_advertisers + failed_advertisers,
+                        success_advertisers,
+                        failed_advertisers,
+                        now_text(),
+                        int(file_row.get("id", file_id) or file_id),
+                    ),
+                )
+                self._recompute_material_upload_job_locked(conn, int(job_id))
+
+        with self.db() as conn:
+            self._refresh_material_upload_file_summaries_locked(conn, int(job_id))
+            counts = self._recompute_material_upload_job_locked(conn, int(job_id))
+            job_row = conn.execute("SELECT total_files FROM material_upload_jobs WHERE id = ? LIMIT 1", (int(job_id),)).fetchone()
+            total_files = int((job_row or {}).get("total_files", 0) or 0)
+            received_files = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+                    (int(job_id),),
+                ).fetchone()["count"]
+            )
+            pending_file_assets = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM material_upload_job_file_assets
+                    WHERE job_id = ?
+                      AND status IN ('queued', 'running')
+                    """,
+                    (int(job_id),),
+                ).fetchone()["count"]
+            )
+            should_enqueue_bind = received_files > 0 and bool(target_rows)
+            if retryable_upload_seen:
+                next_status = "running"
+                next_note = "官方上传接口返回可重试错误，已回队重试。"
+            elif received_files < total_files:
+                next_status = "receiving"
+                next_note = f"已接收 {received_files}/{total_files} 个视频，后台会继续上传到账户素材库。"
+            elif pending_file_assets > 0:
+                next_status = "running"
+                next_note = "视频已全部上传到服务器，后台正在上传到账户素材库。"
+            elif should_enqueue_bind:
+                next_status = "queued"
+                next_note = waiting_bind_note
+            else:
+                next_status = "failed"
+                next_note = "上传任务已结束，但没有可绑定的计划。"
+            self._update_material_upload_job(
+                conn,
+                int(job_id),
+                status=next_status,
+                note=next_note,
+                completed_at="",
+                updated_at=now_text(),
+            )
+        return {
+            "job_id": int(job_id),
+            "status": next_status,
+            "received_files": received_files,
+            "total_files": total_files,
+            "pending_file_assets": pending_file_assets,
+            "should_enqueue_bind": received_files > 0 and bool(target_rows),
+            "retryable_upload_seen": retryable_upload_seen,
+            **counts,
+        }
+
+    def process_material_upload_bind_job(self, job_id: int) -> dict[str, Any]:
+        running_note = "正在绑定计划素材。"
+        no_target_material_message = "计划没有匹配到待处理素材。"
+        missing_context_message = "计划上下文不存在，无法绑定素材。"
+        if self._material_upload_use_ebp_shared_video():
+            missing_asset_message = "未生成可绑定的 EBP 共享素材。"
+            waiting_upload_message = "等待 EBP 共享素材上传完成。"
+        else:
+            missing_asset_message = "未上传到账户素材库。"
+            waiting_upload_message = "等待账户素材库上传完成。"
+        bind_success_message = "绑定成功。"
+        final_success_note = "素材上传完成。"
+        final_failure_note = "素材上传已结束，存在失败项。"
+
+        config = self.read_config()
+        client = self.build_client(config)
+        raw_bind_rate = str(os.environ.get("MATERIAL_UPLOAD_BIND_PLAN_MATERIAL_REQUESTS_PER_MINUTE") or "").strip()
+        try:
+            plan_material_requests_per_minute = int(raw_bind_rate) if raw_bind_rate else 0
+        except Exception:  # noqa: BLE001
+            plan_material_requests_per_minute = 0
+        if plan_material_requests_per_minute > 0:
+            client.configure_plan_material_rate_limit(plan_material_requests_per_minute)
+
+        job, file_rows, target_rows, target_asset_rows = self._material_upload_load_job_rows(int(job_id))
+        if str(job.get("status") or "").strip().lower() == "success":
+            return {"job_id": int(job_id), "status": "success", "skipped": True}
+        if self.material_uploads_paused():
+            return {"job_id": int(job_id), "status": str(job.get("status") or "queued"), "skipped": True, "paused": True}
+        with self.db() as conn:
+            recovered_running = self._requeue_stale_material_upload_running_assets_locked(
+                conn,
+                int(job_id),
+                stage="bind",
+            )
+        if int(recovered_running.get("target_assets", 0) or 0) > 0:
+            job, file_rows, target_rows, target_asset_rows = self._material_upload_load_job_rows(int(job_id))
+        total_files = max(1, int(job.get("total_files", 0) or 0))
+        if len(file_rows) < total_files:
+            with self.db() as conn:
+                return self._material_upload_finish_or_wait_locked(
+                    conn,
+                    job_id=int(job_id),
+                    total_files=total_files,
+                    final_success_note=final_success_note,
+                    final_failure_note=final_failure_note,
+                )
+        if not target_asset_rows:
+            with self.db() as conn:
+                return self._material_upload_finish_or_wait_locked(
+                    conn,
+                    job_id=int(job_id),
+                    total_files=total_files,
+                    final_success_note=final_success_note,
+                    final_failure_note=final_failure_note,
+                )
+
+        try:
+            client.get_latest_access_token()
+        except Exception as exc:  # noqa: BLE001
+            with self.db() as conn:
+                self._update_material_upload_job(
+                    conn,
+                    int(job_id),
+                    status="failed",
+                    note=f"计划绑定前刷新 token 失败：{exc}",
+                    completed_at=now_text(),
+                    updated_at=now_text(),
+                )
+            return {
+                "job_id": int(job_id),
+                "status": "failed",
+                "error": f"refresh token before material bind failed: {exc}",
+            }
+
+        now = now_text()
+        with self.db() as conn:
+            self._update_material_upload_job(
+                conn,
+                int(job_id),
+                status="running",
+                started_at=str(job.get("started_at") or now),
+                note=running_note,
+                completed_at="",
+                updated_at=now,
+            )
+
+        advertiser_plan_map, target_file_id_map, _, scoped_target_asset_rows = self._material_upload_scope_maps(
+            file_rows,
+            target_rows,
+            target_asset_rows,
+        )
+        file_asset_records = self._material_upload_file_asset_records(int(job_id))
+        file_row_lookup = {int(item["id"]): dict(item) for item in file_rows}
+        cover_image_material_cache: dict[tuple[int, str, str], list[dict[str, Any]]] = {}
+        cover_image_material_locks: dict[tuple[int, str, str], threading.Lock] = {}
+        cover_image_material_locks_guard = threading.Lock()
+        bind_concurrency = self._material_upload_bind_concurrency()
+        bind_per_advertiser_concurrency = self._material_upload_bind_per_advertiser_concurrency()
+        bind_batch_size = self._material_upload_bind_batch_size(bind_concurrency)
+        bind_title_material = self._material_upload_bind_title_material()
+        upload_concurrency = self._material_upload_library_concurrency()
+        upload_per_advertiser_concurrency = self._material_upload_library_per_advertiser_concurrency()
+        all_files_received = len(file_rows) >= total_files
+        with self.db() as conn:
+            pending_file_assets = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM material_upload_job_file_assets
+                    WHERE job_id = ?
+                      AND status IN ('queued', 'running')
+                    """,
+                    (int(job_id),),
+                ).fetchone()["count"]
+            )
+        library_done = all_files_received and pending_file_assets <= 0
+        advertiser_bind_locks = {
+            int(advertiser_id): threading.Semaphore(bind_per_advertiser_concurrency)
+            for advertiser_id in advertiser_plan_map.keys()
+        }
+        target_bind_locks: dict[int, threading.Semaphore] = {}
+        if bind_concurrency > 1:
+            with self.db() as conn:
+                bind_note = (
+                    f"{running_note} 千川素材库上传全局并发 {upload_concurrency}"
+                    f" / 单账户并发 {upload_per_advertiser_concurrency}，"
+                    f"计划绑定全局并发 {bind_concurrency}"
+                    f" / 单账户并发 {bind_per_advertiser_concurrency}"
+                    f" / 单批 {bind_batch_size}"
+                )
+                if plan_material_requests_per_minute > 0:
+                    bind_note = f"{bind_note}，计划素材接口限速 {plan_material_requests_per_minute} rpm。"
+                else:
+                    bind_note = f"{bind_note}。"
+                self._update_material_upload_job(
+                    conn,
+                    int(job_id),
+                    note=bind_note,
+                    updated_at=now_text(),
+                )
+
+        def prepare_generated_cover_image_material(
+            advertiser_id: int,
+            file_path: Path,
+            context: dict[str, Any],
+            material_title: str,
+            video_material_defaults: dict[str, str],
+        ) -> list[dict[str, Any]]:
+            image_mode = str(video_material_defaults.get("image_mode") or "").strip().upper()
+            cache_key = (int(advertiser_id), str(file_path), image_mode)
+            with cover_image_material_locks_guard:
+                cache_lock = cover_image_material_locks.setdefault(cache_key, threading.Lock())
+            with cache_lock:
+                return self._build_cover_image_material(
+                    client,
+                    advertiser_id,
+                    file_path,
+                    context,
+                    material_title,
+                    cover_image_material_cache,
+                )
+
+        def mark_target_asset_status(target_id: int, file_id: int, status_text: str, message: str) -> None:
+            with self.db() as conn:
+                self._upsert_material_upload_target_asset_locked(
+                    conn,
+                    int(job_id),
+                    int(target_id),
+                    int(file_id),
+                    status_text,
+                    message,
+                )
+
+        def mark_target_asset_statuses(target_id: int, file_ids: list[int], status_text: str, message: str) -> None:
+            normalized_file_ids = [int(file_id) for file_id in file_ids if int(file_id or 0) > 0]
+            if not normalized_file_ids:
+                return
+            with self.db() as conn:
+                for file_id in normalized_file_ids:
+                    self._upsert_material_upload_target_asset_locked(
+                        conn,
+                        int(job_id),
+                        int(target_id),
+                        int(file_id),
+                        status_text,
+                        message,
+                    )
+
+        def mark_remaining_target_assets_for_limit(target_id: int, current_file_id: int, message: str) -> None:
+            skip_message = self._material_upload_target_limit_skip_message(message)
+            with self.db() as conn:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_target_assets
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ?
+                      AND target_id = ?
+                      AND file_id <> ?
+                      AND status IN ('queued', 'running')
+                    """,
+                    (skip_message, now_text(), int(job_id), int(target_id), int(current_file_id)),
+                )
+
+        def bind_target_assets(item: dict[str, Any]) -> dict[str, Any]:
+            target = dict(item.get("target") or {})
+            advertiser_id = int(target.get("advertiser_id", 0) or 0)
+            ad_id = int(target.get("ad_id", 0) or 0)
+            target_id = int(target.get("id", 0) or 0)
+            context = dict(item.get("context") or {})
+            marketing_goal = str(context.get("marketing_goal") or "").strip()
+            reused_image_material = [dict(entry) for entry in item.get("reused_image_material") or []]
+            video_material_defaults = dict(item.get("video_material_defaults") or {})
+            candidate_file_rows = [dict(row) for row in item.get("file_rows") or []]
+            stop_message = ""
+            stopped_due_to_limit = False
+            target_lock = target_bind_locks.setdefault(target_id, threading.Semaphore(1))
+            with target_lock:
+                if marketing_goal == "VIDEO_PROM_GOODS" and len(candidate_file_rows) > 1:
+                    batch_file_ids: list[int] = []
+                    batch_video_materials: list[dict[str, Any]] = []
+                    for file_row in candidate_file_rows:
+                        file_id = int(file_row.get("id", 0) or 0)
+                        file_asset = dict(file_asset_records.get((file_id, advertiser_id)) or {})
+                        file_asset_status = str(file_asset.get("status") or "").strip().lower()
+                        file_message = str(
+                            file_asset.get("message")
+                            or file_row.get("message")
+                            or waiting_upload_message
+                        ).strip()
+                        asset = {}
+                        if file_asset_status == "success" and str(file_asset.get("video_id") or "").strip():
+                            asset = {
+                                "material_id": str(file_asset.get("material_id") or ""),
+                                "video_id": str(file_asset.get("video_id") or ""),
+                                "video_url": str(file_asset.get("video_url") or ""),
+                            }
+                        if not asset:
+                            file_status = str(file_row.get("status") or "").strip().lower()
+                            if file_asset_status == "failed":
+                                mark_target_asset_status(target_id, file_id, "failed", file_message or missing_asset_message)
+                                continue
+                            if file_status == "failed":
+                                mark_target_asset_status(target_id, file_id, "failed", file_message or missing_asset_message)
+                                continue
+                            if file_status == "partial":
+                                mark_target_asset_status(target_id, file_id, "failed", missing_asset_message)
+                                continue
+                            if not library_done:
+                                mark_target_asset_status(target_id, file_id, "queued", waiting_upload_message)
+                                continue
+                            mark_target_asset_status(target_id, file_id, "failed", missing_asset_message)
+                            continue
+                        video_item: dict[str, Any] = {"video_id": str(asset.get("video_id") or "")}
+                        video_image_mode = str(video_material_defaults.get("image_mode") or "")
+                        if video_image_mode:
+                            video_item["image_mode"] = video_image_mode
+                        video_cover_id = str(video_material_defaults.get("video_cover_id") or "")
+                        if video_cover_id:
+                            video_item["video_cover_id"] = video_cover_id
+                        batch_file_ids.append(file_id)
+                        batch_video_materials.append(video_item)
+                    if batch_video_materials:
+                        mark_target_asset_statuses(target_id, batch_file_ids, "running", "正在批量绑定计划。")
+                        material_title = self._material_title_from_filename(
+                            str(candidate_file_rows[0].get("original_name") or "")
+                        )
+                        advertiser_lock = advertiser_bind_locks.setdefault(
+                            advertiser_id,
+                            threading.Semaphore(bind_per_advertiser_concurrency),
+                        )
+                        ok, failure_message, failure_category = self._add_plan_video_materials_with_single_retry(
+                            client=client,
+                            advertiser_lock=advertiser_lock,
+                            advertiser_id=advertiser_id,
+                            ad_id=ad_id,
+                            video_materials=batch_video_materials,
+                            marketing_goal=marketing_goal,
+                            product_id=str(context.get("product_id") or ""),
+                            image_material=[],
+                            material_title=material_title,
+                            bind_title_material=bind_title_material,
+                        )
+                        if ok:
+                            mark_target_asset_statuses(target_id, batch_file_ids, "success", bind_success_message)
+                            return {"target_id": target_id, "stopped_due_to_limit": False}
+                        if failure_category == "material_limit_exceeded":
+                            mark_target_asset_statuses(target_id, batch_file_ids, "failed", failure_message)
+                            return {"target_id": target_id, "stopped_due_to_limit": True}
+                        mark_target_asset_statuses(
+                            target_id,
+                            batch_file_ids,
+                            "queued",
+                            f"批量绑定失败，已回退为逐条绑定：{failure_message}",
+                        )
+
+                for row_index, file_row in enumerate(candidate_file_rows):
+                    file_id = int(file_row.get("id", 0) or 0)
+                    if stop_message:
+                        remaining_ids = [file_id]
+                        remaining_ids.extend(
+                            int(dict(remaining).get("id", 0) or 0)
+                            for remaining in candidate_file_rows[row_index + 1 :]
+                        )
+                        mark_target_asset_statuses(
+                            target_id,
+                            remaining_ids,
+                            "failed",
+                            self._material_upload_target_limit_skip_message(stop_message),
+                        )
+                        break
+                    file_asset = dict(file_asset_records.get((file_id, advertiser_id)) or {})
+                    file_asset_status = str(file_asset.get("status") or "").strip().lower()
+                    file_message = str(
+                        file_asset.get("message")
+                        or file_row.get("message")
+                        or waiting_upload_message
+                    ).strip()
+                    asset = {}
+                    if file_asset_status == "success" and str(file_asset.get("video_id") or "").strip():
+                        asset = {
+                            "material_id": str(file_asset.get("material_id") or ""),
+                            "video_id": str(file_asset.get("video_id") or ""),
+                            "video_url": str(file_asset.get("video_url") or ""),
+                        }
+                    if not asset:
+                        file_status = str(file_row.get("status") or "").strip().lower()
+                        if file_asset_status == "failed":
+                            mark_target_asset_status(target_id, file_id, "failed", file_message or missing_asset_message)
+                            continue
+                        if file_status == "failed":
+                            mark_target_asset_status(target_id, file_id, "failed", file_message or missing_asset_message)
+                            continue
+                        if file_status == "partial":
+                            mark_target_asset_status(target_id, file_id, "failed", missing_asset_message)
+                            continue
+                        if not library_done:
+                            mark_target_asset_status(target_id, file_id, "queued", waiting_upload_message)
+                            continue
+                        mark_target_asset_status(target_id, file_id, "failed", missing_asset_message)
+                        continue
+                    mark_target_asset_status(target_id, file_id, "running", "正在绑定计划。")
+                    try:
+                        material_title = self._material_title_from_filename(str(file_row.get("original_name") or ""))
+                        bind_image_material = (
+                            []
+                            if marketing_goal == "VIDEO_PROM_GOODS"
+                            else [dict(entry) for entry in reused_image_material]
+                        )
+                        file_path = UPLOAD_DIR / str(file_row.get("relative_path") or "")
+                        bind_video_cover_id = str(video_material_defaults.get("video_cover_id") or "")
+                        needs_generated_image_material = not bind_image_material and marketing_goal != "VIDEO_PROM_GOODS"
+                        if (not bind_video_cover_id or needs_generated_image_material) and file_path.exists():
+                            generated_cover_image_material = prepare_generated_cover_image_material(
+                                advertiser_id,
+                                file_path,
+                                context,
+                                material_title,
+                                video_material_defaults,
+                            )
+                            if not bind_video_cover_id:
+                                bind_video_cover_id = self._first_image_id_from_image_material(generated_cover_image_material)
+                            if needs_generated_image_material:
+                                bind_image_material = [dict(entry) for entry in generated_cover_image_material]
+                        advertiser_lock = advertiser_bind_locks.setdefault(
+                            advertiser_id,
+                            threading.Semaphore(bind_per_advertiser_concurrency),
+                        )
+                        ok, failure_message, failure_category = self._add_plan_material_with_single_retry(
+                            client=client,
+                            advertiser_lock=advertiser_lock,
+                            advertiser_id=advertiser_id,
+                            ad_id=ad_id,
+                            material_title=material_title,
+                            video_id=str(asset.get("video_id") or ""),
+                            marketing_goal=marketing_goal,
+                            product_id=str(context.get("product_id") or ""),
+                            image_material=bind_image_material,
+                            video_image_mode=str(video_material_defaults.get("image_mode") or ""),
+                            video_cover_id=bind_video_cover_id,
+                            bind_title_material=bind_title_material,
+                        )
+                        if ok:
+                            mark_target_asset_status(target_id, file_id, "success", bind_success_message)
+                            continue
+                        mark_target_asset_status(target_id, file_id, "failed", failure_message)
+                        if failure_category == "material_limit_exceeded":
+                            stop_message = failure_message
+                            stopped_due_to_limit = True
+                            mark_remaining_target_assets_for_limit(target_id, file_id, failure_message)
+                    except Exception as exc:  # noqa: BLE001
+                        message = str(exc)
+                        mark_target_asset_status(target_id, file_id, "failed", message)
+            return {"target_id": target_id, "stopped_due_to_limit": stopped_due_to_limit}
+
+        bind_work_items: list[dict[str, Any]] = []
+        target_ids_to_aggregate: set[int] = set()
+        skip_aggregate_target_ids: set[int] = set()
+        bind_item_limit_reached = False
+        for target in target_rows:
+            if bind_item_limit_reached:
+                break
+            target_id = int(target["id"])
+            if scoped_target_asset_rows and target_id not in target_file_id_map:
+                continue
+            target_ids_to_aggregate.add(target_id)
+            advertiser_id = int(target["advertiser_id"])
+            ad_id = int(target["ad_id"])
+            allowed_file_ids = target_file_id_map.get(target_id)
+            candidate_file_rows = [
+                row for row in file_rows
+                if not allowed_file_ids or int(row.get("id", 0) or 0) in allowed_file_ids
+            ]
+            if not candidate_file_rows:
+                with self.db() as conn:
+                    conn.execute(
+                        """
+                        UPDATE material_upload_job_targets
+                        SET status = 'failed', message = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (no_target_material_message, now_text(), target_id),
+                    )
+                    self._recompute_material_upload_job_locked(conn, int(job_id))
+                skip_aggregate_target_ids.add(target_id)
+                continue
+
+            bind_candidate_file_rows: list[dict[str, Any]] = []
+            for file_row in candidate_file_rows:
+                file_id = int(file_row.get("id", 0) or 0)
+                file_asset = dict(file_asset_records.get((file_id, advertiser_id)) or {})
+                file_asset_status = str(file_asset.get("status") or "").strip().lower()
+                if file_asset_status in {"success", "failed"} or library_done:
+                    bind_candidate_file_rows.append(file_row)
+            if not bind_candidate_file_rows:
+                continue
+
+            bind_work_items.append(
+                {
+                    "target": target,
+                    "file_rows": bind_candidate_file_rows,
+                }
+            )
+            if len(bind_work_items) >= bind_batch_size:
+                bind_item_limit_reached = True
+
+        if bind_work_items:
+            selected_targets = [dict(item.get("target") or {}) for item in bind_work_items]
+            plan_context_map = self._latest_plan_context_map([int(item["ad_id"]) for item in selected_targets])
+            plan_context_map = self._hydrate_upload_plan_context_map(client, selected_targets, plan_context_map)
+            hydrated_bind_work_items: list[dict[str, Any]] = []
+            for item in bind_work_items:
+                target = dict(item.get("target") or {})
+                target_id = int(target.get("id", 0) or 0)
+                ad_id = int(target.get("ad_id", 0) or 0)
+                context = plan_context_map.get(ad_id) or {}
+                file_rows_for_item = [dict(row) for row in item.get("file_rows") or []]
+                if not context:
+                    mark_target_asset_statuses(
+                        target_id,
+                        [int(row.get("id", 0) or 0) for row in file_rows_for_item],
+                        "failed",
+                        missing_context_message,
+                    )
+                    continue
+                hydrated_item = dict(item)
+                hydrated_item["context"] = context
+                hydrated_item["reused_image_material"] = self._extract_plan_image_material(context)
+                hydrated_item["video_material_defaults"] = self._extract_plan_video_material_defaults(context)
+                hydrated_bind_work_items.append(hydrated_item)
+            bind_work_items = hydrated_bind_work_items
+
+        if bind_work_items:
+            worker_count = min(bind_concurrency, len(bind_work_items))
+            if worker_count > 1:
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    future_map = {pool.submit(bind_target_assets, item): item for item in bind_work_items}
+                    for future in as_completed(future_map):
+                        item = future_map[future]
+                        try:
+                            future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            target = dict(item.get("target") or {})
+                            target_id = int(target.get("id", 0) or 0)
+                            for file_row in item.get("file_rows") or []:
+                                file_id = int(dict(file_row).get("id", 0) or 0)
+                                mark_target_asset_status(target_id, file_id, "failed", str(exc))
+            else:
+                for item in bind_work_items:
+                    bind_target_assets(item)
+
+        for target in target_rows:
+            target_id = int(target["id"])
+            if target_id not in target_ids_to_aggregate or target_id in skip_aggregate_target_ids:
+                continue
+            with self.db() as conn:
+                aggregate_rows = conn.execute(
+                    """
+                    SELECT status, message
+                    FROM material_upload_job_target_assets
+                    WHERE job_id = ? AND target_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (int(job_id), target_id),
+                ).fetchall()
+                success_count = sum(1 for row in aggregate_rows if str(row["status"] or "") == "success")
+                failed_count = sum(1 for row in aggregate_rows if str(row["status"] or "") == "failed")
+                processed_count = success_count + failed_count
+                total_target_assets = len(aggregate_rows)
+                pending_count = sum(1 for row in aggregate_rows if str(row["status"] or "") in {"queued", "running"})
+                if total_target_assets <= 0:
+                    target_status = "failed" if all_files_received else "queued"
+                    summary = no_target_material_message if all_files_received else "等待更多视频。"
+                elif not all_files_received or pending_count > 0:
+                    target_status = "running" if processed_count > 0 else "queued"
+                    summary = (
+                        f"已处理 {processed_count}/{total_target_assets}，等待更多视频。"
+                        if not all_files_received
+                        else f"处理中：成功 {success_count} / 失败 {failed_count}"
+                    )
+                else:
+                    target_status = "success" if failed_count == 0 and success_count > 0 else "failed"
+                    if success_count > 0 and failed_count > 0:
+                        target_status = "partial"
+                    summary = f"成功 {success_count} / 失败 {failed_count}"
+                    first_error = self._material_upload_preferred_failure_message(
+                        [
+                            str(row["message"] or "").strip()
+                            for row in aggregate_rows
+                            if str(row["status"] or "") == "failed" and str(row["message"] or "").strip()
+                        ]
+                    )
+                    if first_error:
+                        summary = f"{summary}；{first_error}"
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_targets
+                    SET status = ?, message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (target_status, summary, now_text(), target_id),
+                )
+                self._recompute_material_upload_job_locked(conn, int(job_id))
+
+        with self.db() as conn:
+            return self._material_upload_finish_or_wait_locked(
+                conn,
+                job_id=int(job_id),
+                total_files=int(job.get("total_files", 0) or 0),
+                final_success_note=final_success_note,
+                final_failure_note=final_failure_note,
+                bind_wait_note="账户素材库上传已完成，后台正在绑定计划。",
+            )
+
     def process_material_upload_job(self, job_id: int) -> dict[str, Any]:
         running_note = "\u6b63\u5728\u4e0a\u4f20\u7d20\u6750\u5e76\u7ed1\u5b9a\u8ba1\u5212\u3002"
         missing_file_message = "\u6587\u4ef6\u4e0d\u5b58\u5728\uff0c\u65e0\u6cd5\u6267\u884c\u4e0a\u4f20\u3002"
@@ -18784,8 +24930,11 @@ class DashboardService:
             job = conn.execute("SELECT * FROM material_upload_jobs WHERE id = ? LIMIT 1", (int(job_id),)).fetchone()
             if not job:
                 raise RuntimeError(f"upload job not found: {job_id}")
-            if str(job["status"] or "") == "success":
-                return {"job_id": int(job_id), "status": "success", "skipped": True}
+            job_status = str(job["status"] or "").strip().lower()
+            if job_status in self._material_upload_terminal_statuses():
+                return {"job_id": int(job_id), "status": job_status or "failed", "skipped": True}
+            if self.material_uploads_paused():
+                return {"job_id": int(job_id), "status": job_status or "queued", "skipped": True, "paused": True}
             now = now_text()
             self._update_material_upload_job(
                 conn,
@@ -18832,6 +24981,25 @@ class DashboardService:
                     (int(job_id),),
                 ).fetchall()
             ]
+            total_files = max(1, int(job.get("total_files", 0) or 0))
+            if len(file_rows) < total_files:
+                return self._material_upload_finish_or_wait_locked(
+                    conn,
+                    job_id=int(job_id),
+                    total_files=total_files,
+                    final_success_note=final_success_note,
+                    final_failure_note=final_failure_note,
+                    bind_wait_note="视频仍在上传到服务器，全部上传完成后才会开始后台处理。",
+                )
+            if not target_asset_rows:
+                return self._material_upload_finish_or_wait_locked(
+                    conn,
+                    job_id=int(job_id),
+                    total_files=total_files,
+                    final_success_note=final_success_note,
+                    final_failure_note=final_failure_note,
+                    bind_wait_note="账户素材库上传已完成，后台正在绑定计划。",
+                )
 
         plan_context_map = self._latest_plan_context_map([int(item["ad_id"]) for item in target_rows])
         plan_context_map = self._hydrate_upload_plan_context_map(client, target_rows, plan_context_map)
@@ -18859,23 +25027,79 @@ class DashboardService:
                 file_advertiser_id_map[int(file_row["id"])] = set(all_advertiser_ids)
 
         upload_concurrency = self._material_upload_library_concurrency()
-        if upload_concurrency > 1:
+        upload_per_advertiser_concurrency = self._material_upload_library_per_advertiser_concurrency()
+        upload_batch_size = self._material_upload_library_batch_size(upload_concurrency)
+        if upload_concurrency > 1 or upload_per_advertiser_concurrency > 1:
             with self.db() as conn:
                 self._update_material_upload_job(
                     conn,
                     int(job_id),
-                    note=f"{running_note} 千川素材库上传并发 {upload_concurrency}。",
+                    note=(
+                        f"{running_note} 千川素材库上传全局并发 {upload_concurrency}"
+                        f" / 单账户并发 {upload_per_advertiser_concurrency}"
+                        f" / 单批 {upload_batch_size}。"
+                    ),
                     updated_at=now_text(),
                 )
         file_assets: dict[tuple[int, int], dict[str, str]] = {}
         file_upload_states: dict[int, dict[str, Any]] = {}
         upload_work_items: list[dict[str, Any]] = []
+        advertiser_upload_locks = {
+            int(advertiser_id): threading.Semaphore(upload_per_advertiser_concurrency)
+            for advertiser_id in advertiser_plan_map.keys()
+        }
+        file_upload_locks: dict[int, threading.Lock] = {}
+        file_upload_format_failed_ids: set[int] = set()
+        file_upload_format_failed_guard = threading.Lock()
+        retryable_upload_seen = False
+
+        def fail_file_for_upload_format(file_id: int, message: str) -> None:
+            normalized_file_id = int(file_id or 0)
+            if normalized_file_id <= 0:
+                return
+            with file_upload_format_failed_guard:
+                first_seen = normalized_file_id not in file_upload_format_failed_ids
+                file_upload_format_failed_ids.add(normalized_file_id)
+            if not first_seen:
+                return
+            now_value = now_text()
+            with self.db() as conn:
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_files
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ? AND id = ?
+                    """,
+                    (message, now_value, int(job_id), normalized_file_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_file_assets
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ? AND file_id = ?
+                      AND status IN ('queued', 'running', 'failed')
+                    """,
+                    (message, now_value, int(job_id), normalized_file_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE material_upload_job_target_assets
+                    SET status = 'failed', message = ?, updated_at = ?
+                    WHERE job_id = ? AND file_id = ?
+                      AND status IN ('queued', 'running', 'failed')
+                    """,
+                    (message, now_value, int(job_id), normalized_file_id),
+                )
+                self._recompute_material_upload_job_locked(conn, int(job_id))
 
         def apply_upload_result(result: dict[str, Any]) -> None:
             file_id = int(result.get("file_id", 0) or 0)
             advertiser_id = int(result.get("advertiser_id", 0) or 0)
             state = file_upload_states.get(file_id)
             if not state:
+                return
+            if str(result.get("status") or "") == "retry":
+                state["retry_advertisers"] = int(state.get("retry_advertisers", 0) or 0) + 1
                 return
             state["processed_advertisers"] = int(state.get("processed_advertisers", 0) or 0) + 1
             if str(result.get("status") or "") == "success":
@@ -18902,14 +25126,34 @@ class DashboardService:
             file_path = Path(str(item.get("file_path") or ""))
             probe_summary = str(item.get("probe_summary") or "")
             started_monotonic = time.monotonic()
+            file_lock = file_upload_locks.setdefault(file_id, threading.Lock())
+            file_lock.acquire()
             try:
-                upload_response = client.upload_local_video(
-                    advertiser_id=advertiser_id,
-                    material_name=str(file_row.get("original_name") or ""),
-                    file_path=file_path,
-                    video_signature=str(file_row.get("file_md5") or ""),
-                    mime_type=str(file_row.get("mime_type") or "video/mp4"),
+                with file_upload_format_failed_guard:
+                    if file_id in file_upload_format_failed_ids:
+                        skipped_message = "该视频已判定为官方上传终态失败，已停止继续上传。"
+                        return {
+                            "status": "failed",
+                            "file_id": file_id,
+                            "advertiser_id": advertiser_id,
+                            "advertiser_name": advertiser_name,
+                            "message": skipped_message,
+                            "elapsed_seconds": max(time.monotonic() - started_monotonic, 0.0),
+                        }
+                advertiser_lock = advertiser_upload_locks.setdefault(
+                    advertiser_id,
+                    threading.Semaphore(upload_per_advertiser_concurrency),
                 )
+                with advertiser_lock:
+                    upload_response = client.upload_local_video(
+                        advertiser_id=advertiser_id,
+                        material_name=str(file_row.get("original_name") or ""),
+                        file_path=file_path,
+                        video_signature=str(file_row.get("file_md5") or ""),
+                        mime_type=str(file_row.get("mime_type") or "video/mp4"),
+                        before_request=self._rate_limit_material_video_upload_api,
+                        attempts=1,
+                    )
                 data = upload_response.get("data") or {}
                 asset = {
                     "material_id": str(data.get("material_id") or ""),
@@ -18960,18 +25204,66 @@ class DashboardService:
                     "elapsed_seconds": elapsed_seconds,
                 }
             except Exception as exc:  # noqa: BLE001
+                nonlocal retryable_upload_seen
                 elapsed_seconds = max(time.monotonic() - started_monotonic, 0.0)
                 message = self._append_upload_probe_summary(str(exc), probe_summary)
-                with self.db() as conn:
-                    self._upsert_material_upload_file_asset_locked(
-                        conn,
+                if self._is_material_upload_official_payload_too_large_error(message):
+                    message = self._append_upload_probe_summary(
+                        f"官方上传网关拒绝该文件大小（HTTP 413）；请压缩视频后重新上传：{exc}",
+                        probe_summary,
+                    )
+                    fail_file_for_upload_format(file_id, message)
+                elif self._is_material_upload_official_video_format_error(message):
+                    message = self._append_upload_probe_summary(
+                        f"视频格式校验失败，已停止该素材对其他账户上传：{exc}",
+                        probe_summary,
+                    )
+                    fail_file_for_upload_format(file_id, message)
+                elif self._is_material_upload_retryable_official_error(message):
+                    retryable_upload_seen = True
+                    if not self._is_material_upload_system_limit_error(message):
+                        self._cooldown_material_video_upload_api()
+                    message = self._append_upload_probe_summary(
+                        f"官方上传接口可重试错误，已回队重试：{exc}",
+                        probe_summary,
+                    )
+                    with self.db() as conn:
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "queued",
+                            message=message,
+                        )
+                    LOGGER.warning(
+                        "material library upload retry queued: job_id=%s file_id=%s advertiser_id=%s elapsed=%.1fs error=%s",
                         int(job_id),
                         file_id,
                         advertiser_id,
-                        advertiser_name,
-                        "failed",
-                        message=message,
+                        elapsed_seconds,
+                        message,
                     )
+                    return {
+                        "status": "retry",
+                        "file_id": file_id,
+                        "advertiser_id": advertiser_id,
+                        "advertiser_name": advertiser_name,
+                        "message": message,
+                        "elapsed_seconds": elapsed_seconds,
+                    }
+                else:
+                    with self.db() as conn:
+                        self._upsert_material_upload_file_asset_locked(
+                            conn,
+                            int(job_id),
+                            file_id,
+                            advertiser_id,
+                            advertiser_name,
+                            "failed",
+                            message=message,
+                        )
                 LOGGER.warning(
                     "material library upload failed: job_id=%s file_id=%s advertiser_id=%s elapsed=%.1fs error=%s",
                     int(job_id),
@@ -18988,6 +25280,11 @@ class DashboardService:
                     "message": message,
                     "elapsed_seconds": elapsed_seconds,
                 }
+            finally:
+                try:
+                    file_lock.release()
+                except RuntimeError:
+                    pass
 
         for file_row in file_rows:
             file_id = int(file_row["id"])
@@ -19148,10 +25445,28 @@ class DashboardService:
             first_asset = state.get("first_asset") or {}
             probe_summary = str(state.get("probe_summary") or "")
             file_errors = list(state.get("file_errors") or [])
-            file_status = "success" if failed_advertisers == 0 and success_advertisers > 0 else "failed"
-            if success_advertisers > 0 and failed_advertisers > 0:
-                file_status = "partial"
-            file_message = upload_success_message if file_status == "success" else "；".join(file_errors[:3]) or "上传失败。"
+            with self.db() as conn:
+                pending_file_asset_count = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM material_upload_job_file_assets
+                        WHERE job_id = ? AND file_id = ?
+                          AND status IN ('queued', 'running')
+                        """,
+                        (int(job_id), file_id),
+                    ).fetchone()["count"]
+                )
+            if pending_file_asset_count > 0:
+                file_status = "running"
+                file_message = (
+                    f"账户素材库上传中：成功 {success_advertisers} / 失败 {failed_advertisers} / 待处理 {pending_file_asset_count}。"
+                )
+            else:
+                file_status = "success" if failed_advertisers == 0 and success_advertisers > 0 else "failed"
+                if success_advertisers > 0 and failed_advertisers > 0:
+                    file_status = "partial"
+                file_message = upload_success_message if file_status == "success" else "；".join(file_errors[:3]) or "上传失败。"
             if probe_summary and (
                 file_status != "success"
                 or not probe_summary.startswith("视频元数据探测失败")
@@ -19184,13 +25499,21 @@ class DashboardService:
         cover_image_material_locks: dict[tuple[int, str, str], threading.Lock] = {}
         cover_image_material_locks_guard = threading.Lock()
         bind_concurrency = self._material_upload_bind_concurrency()
-        all_files_received = len(file_rows) >= int(job.get("total_files", 0) or 0)
+        bind_per_advertiser_concurrency = self._material_upload_bind_per_advertiser_concurrency()
+        bind_title_material = self._material_upload_bind_title_material()
+        all_files_received = len(file_rows) >= total_files
         advertiser_bind_locks = {
-            int(advertiser_id): threading.Semaphore(1) for advertiser_id in advertiser_plan_map.keys()
+            int(advertiser_id): threading.Semaphore(bind_per_advertiser_concurrency)
+            for advertiser_id in advertiser_plan_map.keys()
         }
         if bind_concurrency > 1:
             with self.db() as conn:
-                bind_note = f"{running_note} 千川素材库上传并发 {upload_concurrency}，计划绑定并发 {bind_concurrency}"
+                bind_note = (
+                    f"{running_note} 千川素材库上传全局并发 {upload_concurrency}"
+                    f" / 单账户并发 {upload_per_advertiser_concurrency}，"
+                    f"计划绑定全局并发 {bind_concurrency}"
+                    f" / 单账户并发 {bind_per_advertiser_concurrency}"
+                )
                 if plan_material_requests_per_minute > 0:
                     bind_note = f"{bind_note}，计划素材接口限速 {plan_material_requests_per_minute} rpm。"
                 else:
@@ -19305,25 +25628,30 @@ class DashboardService:
                         if needs_generated_image_material:
                             bind_image_material = [dict(entry) for entry in generated_cover_image_material]
                     advertiser_lock = advertiser_bind_locks.setdefault(advertiser_id, threading.Semaphore(1))
-                    with advertiser_lock:
-                        client.add_plan_material(
-                            advertiser_id=advertiser_id,
-                            ad_id=ad_id,
-                            material_title=material_title,
-                            video_id=str(asset.get("video_id") or ""),
-                            marketing_goal=marketing_goal,
-                            product_id=str(context.get("product_id") or ""),
-                            image_material=bind_image_material,
-                            video_image_mode=str(video_material_defaults.get("image_mode") or ""),
-                            video_cover_id=bind_video_cover_id,
-                        )
-                    mark_target_asset_status(target_id, file_id, "success", bind_success_message)
+                    ok, failure_message, failure_category = self._add_plan_material_with_single_retry(
+                        client=client,
+                        advertiser_lock=advertiser_lock,
+                        advertiser_id=advertiser_id,
+                        ad_id=ad_id,
+                        material_title=material_title,
+                        video_id=str(asset.get("video_id") or ""),
+                        marketing_goal=marketing_goal,
+                        product_id=str(context.get("product_id") or ""),
+                        image_material=bind_image_material,
+                        video_image_mode=str(video_material_defaults.get("image_mode") or ""),
+                        video_cover_id=bind_video_cover_id,
+                        bind_title_material=bind_title_material,
+                    )
+                    if ok:
+                        mark_target_asset_status(target_id, file_id, "success", bind_success_message)
+                        continue
+                    mark_target_asset_status(target_id, file_id, "failed", failure_message)
+                    if failure_category == "material_limit_exceeded":
+                        stop_message = failure_message
+                        stopped_due_to_limit = True
                 except Exception as exc:  # noqa: BLE001
                     message = str(exc)
                     mark_target_asset_status(target_id, file_id, "failed", message)
-                    if self._is_material_upload_target_limit_error(message):
-                        stop_message = message
-                        stopped_due_to_limit = True
             return {"target_id": target_id, "stopped_due_to_limit": stopped_due_to_limit}
 
         bind_work_items: list[dict[str, Any]] = []
@@ -19447,13 +25775,12 @@ class DashboardService:
                     if success_count > 0 and failed_count > 0:
                         target_status = "partial"
                     summary = f"成功 {success_count} / 失败 {failed_count}"
-                    first_error = next(
-                        (
+                    first_error = self._material_upload_preferred_failure_message(
+                        [
                             str(row["message"] or "").strip()
                             for row in aggregate_rows
                             if str(row["status"] or "") == "failed" and str(row["message"] or "").strip()
-                        ),
-                        "",
+                        ]
                     )
                     if first_error:
                         summary = f"{summary}；{first_error}"
@@ -19468,73 +25795,13 @@ class DashboardService:
                 self._recompute_material_upload_job_locked(conn, int(job_id))
 
         with self.db() as conn:
-            counts = self._recompute_material_upload_job_locked(conn, int(job_id))
-            job_row = conn.execute(
-                "SELECT total_files FROM material_upload_jobs WHERE id = ? LIMIT 1",
-                (int(job_id),),
-            ).fetchone()
-            total_files = int((job_row or {}).get("total_files", 0) or 0)
-            received_files = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
-                    (int(job_id),),
-                ).fetchone()["count"]
-            )
-            pending_target_assets = int(
-                conn.execute(
-                    """
-                    SELECT COUNT(*) AS count
-                    FROM material_upload_job_target_assets
-                    WHERE job_id = ?
-                      AND status IN ('queued', 'running')
-                    """,
-                    (int(job_id),),
-                ).fetchone()["count"]
-            )
-            if received_files < total_files or pending_target_assets > 0:
-                interim_status = "receiving" if received_files < total_files else "running"
-                interim_note = (
-                    f"已接收 {received_files}/{total_files} 个视频，后台会优先处理已上传的视频。"
-                    if received_files < total_files
-                    else "视频已全部上传到服务器，后台正在处理绑定。"
-                )
-                self._update_material_upload_job(
-                    conn,
-                    int(job_id),
-                    status=interim_status,
-                    note=interim_note,
-                    completed_at="",
-                    updated_at=now_text(),
-                )
-                return {
-                    "job_id": int(job_id),
-                    "status": interim_status,
-                    "pending_target_assets": pending_target_assets,
-                    **counts,
-                }
-            target_status_rows = conn.execute(
-                "SELECT status FROM material_upload_job_targets WHERE job_id = ?",
-                (int(job_id),),
-            ).fetchall()
-            statuses = {str(row["status"] or "") for row in target_status_rows}
-            final_status = "success" if statuses == {"success"} else "failed"
-            if "partial" in statuses or ("success" in statuses and "failed" in statuses):
-                final_status = "partial"
-            if not statuses:
-                final_status = "failed"
-            self._update_material_upload_job(
+            return self._material_upload_finish_or_wait_locked(
                 conn,
-                int(job_id),
-                status=final_status,
-                note=final_success_note if final_status == "success" else final_failure_note,
-                completed_at=now_text(),
-                updated_at=now_text(),
+                job_id=int(job_id),
+                total_files=int(job.get("total_files", 0) or 0),
+                final_success_note=final_success_note,
+                final_failure_note=final_failure_note,
             )
-        return {
-            "job_id": int(job_id),
-            "status": final_status,
-            **counts,
-        }
 
     def prepare_material_upload_job(
         self,
@@ -19656,6 +25923,7 @@ class DashboardService:
                 "file_md5": md5.hexdigest(),
                 "move_source": True,
             }
+            self._validate_material_upload_video_before_accept(str(upload.filename or ""), temp_path)
             with self.db() as conn:
                 job = self._material_upload_job_row_for_user_locked(conn, user, int(job_id))
                 if not job:
@@ -19735,14 +26003,14 @@ class DashboardService:
                     ).fetchone()["count"]
                 )
                 ready_to_queue = received_count >= total_files
-                should_queue = created_file_id > 0
+                should_queue = created_file_id > 0 and ready_to_queue and status_text == "receiving"
                 next_status = status_text if status_text in {"queued", "running"} else "receiving"
                 if ready_to_queue and next_status == "receiving":
                     next_status = "queued"
                 next_note = (
                     "视频已全部上传到服务器，后台处理中。"
                     if ready_to_queue
-                    else f"正在上传视频到服务器：{received_count}/{total_files}，后台会优先处理已上传的视频。"
+                    else f"正在上传视频到服务器：{received_count}/{total_files}，全部上传完成后才会开始后台处理。"
                 )
                 self._update_material_upload_job(
                     conn,
@@ -19821,6 +26089,7 @@ class DashboardService:
                     except Exception:
                         pass
                     raise
+                self._validate_material_upload_video_before_accept(str(upload.filename or ""), temp_path)
                 file_sources.append(
                     {
                         "original_name": str(upload.filename or ""),
@@ -20276,10 +26545,7 @@ class DashboardService:
             day_start = datetime(target_day.year, target_day.month, target_day.day, 0, 0, 0, tzinfo=tz)
             day_end = datetime(target_day.year, target_day.month, target_day.day, 23, 59, 59, tzinfo=tz)
             payload = self._collect_window_snapshot(day_start, day_end, include_balances=False)
-            payload["snapshot_time"] = self._scoped_day_snapshot_time(
-                day_end,
-                str(payload.get("customer_center_id") or self._current_customer_center_id() or "").strip(),
-            )
+            payload["snapshot_time"] = self._closed_day_snapshot_time(day_end)
             payload["window_start"] = day_start.strftime("%Y-%m-%d %H:%M:%S")
             payload["window_end"] = day_end.strftime("%Y-%m-%d %H:%M:%S")
             payload["accountBalances"] = []
@@ -20382,9 +26648,15 @@ class DashboardService:
                         day_end,
                         include_balances=False,
                     )
-                    payload["snapshot_time"] = self._scoped_day_snapshot_time(day_end, customer_center_id)
+                    payload["snapshot_time"] = self._closed_day_snapshot_time(day_end)
                     payload["window_start"] = day_start.strftime("%Y-%m-%d %H:%M:%S")
                     payload["window_end"] = day_end.strftime("%Y-%m-%d %H:%M:%S")
+                    payload["official_account_authority"] = self._apply_closed_day_official_account_authority(
+                        payload,
+                        customer_center_id=customer_center_id,
+                        start_dt=day_start,
+                        end_dt=day_end,
+                    )
                     payload["accountBalances"] = []
                     payload["sharedWallets"] = []
                     payload["walletRelations"] = []
@@ -20441,6 +26713,30 @@ class DashboardService:
             "range_start": start_day.strftime("%Y-%m-%d"),
             "range_end": (today - timedelta(days=1)).strftime("%Y-%m-%d"),
         }
+
+    def _apply_closed_day_official_account_authority(
+        self,
+        payload: dict[str, Any],
+        *,
+        customer_center_id: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> dict[str, Any]:
+        try:
+            from tools.official_daily_align import apply_official_account_authority
+
+            return apply_official_account_authority(
+                payload,
+                customer_center_id=customer_center_id,
+                start_dt=start_dt,
+                end_dt=end_dt,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("failed to apply official account authority for %s", customer_center_id)
+            return {
+                "applied": False,
+                "error": str(exc),
+            }
 
     @staticmethod
     def _normalize_history_refresh_targets(targets: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -20869,26 +27165,6 @@ class DashboardService:
         if not advertiser_ids:
             return {"updated": False, "advertiser_count": 0, "plan_count": 0}
 
-        placeholders = ",".join("?" for _ in advertiser_ids)
-        conn.execute(
-            f"""
-            DELETE FROM account_daily
-            WHERE customer_center_id = ?
-              AND biz_date = ?
-              AND advertiser_id IN ({placeholders})
-            """,
-            [customer_center_id, target_date, *advertiser_ids],
-        )
-        conn.execute(
-            f"""
-            DELETE FROM plan_daily
-            WHERE customer_center_id = ?
-              AND biz_date = ?
-              AND advertiser_id IN ({placeholders})
-            """,
-            [customer_center_id, target_date, *advertiser_ids],
-        )
-
         if normalized_account_rows:
             conn.executemany(
                 """
@@ -20898,6 +27174,24 @@ class DashboardService:
                     settled_roi, settled_order_count, pay_order_cost, settled_amount_rate,
                     refund_rate_1h, refund_amount_1h, plan_count, ok, error
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (customer_center_id, biz_date, advertiser_id) DO UPDATE SET
+                    snapshot_time = excluded.snapshot_time,
+                    advertiser_name = excluded.advertiser_name,
+                    stat_cost = excluded.stat_cost,
+                    roi = excluded.roi,
+                    order_count = excluded.order_count,
+                    pay_amount = excluded.pay_amount,
+                    total_pay_amount = excluded.total_pay_amount,
+                    settled_pay_amount = excluded.settled_pay_amount,
+                    settled_roi = excluded.settled_roi,
+                    settled_order_count = excluded.settled_order_count,
+                    pay_order_cost = excluded.pay_order_cost,
+                    settled_amount_rate = excluded.settled_amount_rate,
+                    refund_rate_1h = excluded.refund_rate_1h,
+                    refund_amount_1h = excluded.refund_amount_1h,
+                    plan_count = excluded.plan_count,
+                    ok = excluded.ok,
+                    error = excluded.error
                 """,
                 [
                     (
@@ -20937,6 +27231,32 @@ class DashboardService:
                     settled_roi, settled_order_count, pay_order_cost, settled_amount_rate,
                     refund_rate_1h, refund_amount_1h
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (customer_center_id, biz_date, ad_id) DO UPDATE SET
+                    snapshot_time = excluded.snapshot_time,
+                    advertiser_id = excluded.advertiser_id,
+                    advertiser_name = excluded.advertiser_name,
+                    ad_name = excluded.ad_name,
+                    product_id = excluded.product_id,
+                    product_name = excluded.product_name,
+                    anchor_name = excluded.anchor_name,
+                    marketing_goal = excluded.marketing_goal,
+                    plan_source = excluded.plan_source,
+                    plan_delivery_type = excluded.plan_delivery_type,
+                    status = excluded.status,
+                    opt_status = excluded.opt_status,
+                    roi_goal = excluded.roi_goal,
+                    stat_cost = excluded.stat_cost,
+                    roi = excluded.roi,
+                    order_count = excluded.order_count,
+                    pay_amount = excluded.pay_amount,
+                    total_pay_amount = excluded.total_pay_amount,
+                    settled_pay_amount = excluded.settled_pay_amount,
+                    settled_roi = excluded.settled_roi,
+                    settled_order_count = excluded.settled_order_count,
+                    pay_order_cost = excluded.pay_order_cost,
+                    settled_amount_rate = excluded.settled_amount_rate,
+                    refund_rate_1h = excluded.refund_rate_1h,
+                    refund_amount_1h = excluded.refund_amount_1h
                 """,
                 [
                     (
@@ -21141,7 +27461,7 @@ class DashboardService:
 
             day_start = datetime(target_day.year, target_day.month, target_day.day, 0, 0, 0, tzinfo=tz)
             day_end = datetime(target_day.year, target_day.month, target_day.day, 23, 59, 59, tzinfo=tz)
-            snapshot_time = self._scoped_day_snapshot_time(day_end, customer_center_id)
+            snapshot_time = self._closed_day_snapshot_time(day_end)
             try:
                 accounts, account_summaries, account_errors, scoped_config, client = self._fetch_account_history_summaries(
                     customer_center_id,
@@ -21537,9 +27857,15 @@ class DashboardService:
                     day_end,
                     include_balances=False,
                 )
-                payload["snapshot_time"] = self._scoped_day_snapshot_time(day_end, customer_center_id)
+                payload["snapshot_time"] = self._closed_day_snapshot_time(day_end)
                 payload["window_start"] = day_start.strftime("%Y-%m-%d %H:%M:%S")
                 payload["window_end"] = day_end.strftime("%Y-%m-%d %H:%M:%S")
+                payload["official_account_authority"] = self._apply_closed_day_official_account_authority(
+                    payload,
+                    customer_center_id=customer_center_id,
+                    start_dt=day_start,
+                    end_dt=day_end,
+                )
                 payload["accountBalances"] = []
                 payload["sharedWallets"] = []
                 payload["walletRelations"] = []
@@ -21754,6 +28080,7 @@ class DashboardService:
         progress_callback: Any | None = None,
         *,
         material_collection_mode: str = "full_snapshot",
+        force_replace: bool = False,
         workers_override: int | None = None,
         plan_material_requests_per_minute_override: int | None = None,
         plan_material_batch_size_override: int | None = None,
@@ -21875,7 +28202,7 @@ class DashboardService:
                         row
                         for row in target_plans
                         if str(row.get("plan_source") or "").strip().upper()
-                        in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC}
+                        in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC, PLAN_SOURCE_UNI_REPORT}
                         and self._plan_row_has_material_activity(row)
                     ]
                 active_advertiser_ids = sorted(
@@ -21908,7 +28235,7 @@ class DashboardService:
                             material_row_count=0,
                             error_items=[],
                         )
-                        self._invalidate_material_ranking_indexes_for_day(conn, target_date)
+                        self._invalidate_material_ranking_indexes_for_day(conn, target_date, customer_center_id)
                     refreshed += 1
                     stats["refreshed_days"] += 1
                     target_result["status"] = "completed"
@@ -22181,11 +28508,23 @@ class DashboardService:
                             customer_center_id,
                             target_date,
                         )
-                        should_write_material_history, write_decision = self._should_replace_material_history_day(
-                            existing_material_counts,
-                            new_material_counts,
-                            aggregate_errors,
-                        )
+                        force_replace_blocking_errors = [
+                            item
+                            for item in aggregate_errors
+                            if not str(item.get("stage") or "").strip().startswith("material_library_")
+                        ]
+                        if force_replace and force_replace_blocking_errors:
+                            should_write_material_history = False
+                            write_decision = "force_replace_blocked_by_errors"
+                        elif force_replace:
+                            should_write_material_history = True
+                            write_decision = "force_replace"
+                        else:
+                            should_write_material_history, write_decision = self._should_replace_material_history_day(
+                                existing_material_counts,
+                                new_material_counts,
+                                aggregate_errors,
+                            )
                         target_result["existing_material_counts"] = existing_material_counts
                         target_result["write_decision"] = write_decision
                         if should_write_material_history:
@@ -22245,8 +28584,40 @@ class DashboardService:
                                 material_row_count=material_row_count,
                                 error_items=aggregate_errors,
                             )
-                            self._invalidate_material_ranking_indexes_for_day(conn, target_date)
+                            self._invalidate_material_ranking_indexes_for_day(conn, target_date, customer_center_id)
                             write_applied = True
+                    if write_applied:
+                        try:
+                            alignment_result = self.repair_material_title_video_alignment_day(
+                                customer_center_id,
+                                target_date,
+                                fetch_creative=True,
+                                dry_run=False,
+                            )
+                            target_result["title_video_alignment"] = alignment_result
+                            for alignment_error in alignment_result.get("errors") or []:
+                                aggregate_errors.append(
+                                    {
+                                        **dict(alignment_error),
+                                        "customer_center_id": customer_center_id,
+                                        "target_day": target_date,
+                                        "stage": str(alignment_error.get("stage") or "title_video_alignment"),
+                                    }
+                                )
+                            payload_errors = len(aggregate_errors)
+                            target_result["error_count"] = payload_errors
+                            target_result["error_samples"] = aggregate_errors[:5]
+                        except Exception as exc:  # noqa: BLE001
+                            alignment_error = {
+                                "stage": "title_video_alignment",
+                                "customer_center_id": customer_center_id,
+                                "target_day": target_date,
+                                "error": str(exc),
+                            }
+                            aggregate_errors.append(alignment_error)
+                            payload_errors = len(aggregate_errors)
+                            target_result["error_count"] = payload_errors
+                            target_result["error_samples"] = aggregate_errors[:5]
                 if write_applied:
                     refreshed += 1
                     stats["refreshed_days"] += 1
@@ -22395,6 +28766,96 @@ class DashboardService:
             ),
         }
 
+    def refresh_current_day_material_baseline(
+        self,
+        *,
+        progress_callback: Any | None = None,
+        workers_override: int | None = None,
+        plan_material_requests_per_minute_override: int | None = None,
+        plan_material_batch_size_override: int | None = None,
+        plan_material_batch_sleep_seconds_override: float | None = None,
+        prefer_library_media_enrichment: bool = False,
+        prefer_library_create_time_enrichment: bool = False,
+    ) -> dict[str, Any]:
+        tz = ZoneInfo(self.read_config()["timezone"])
+        today = datetime.now(tz).date()
+        resolved_plan_material_requests_per_minute = max(
+            int(plan_material_requests_per_minute_override or 0),
+            0,
+        )
+        if resolved_plan_material_requests_per_minute <= 0:
+            resolved_plan_material_requests_per_minute = self._nightly_plan_material_requests_per_minute_default()
+        payload = self.collect_material_and_store_all_customer_centers(
+            force_refresh=True,
+            full_plan_scan=True,
+            progress_callback=progress_callback,
+            workers_override=workers_override,
+            plan_material_requests_per_minute_override=resolved_plan_material_requests_per_minute,
+            plan_material_batch_size_override=plan_material_batch_size_override,
+            plan_material_batch_sleep_seconds_override=plan_material_batch_sleep_seconds_override,
+            prefer_library_media_enrichment=prefer_library_media_enrichment,
+            prefer_library_create_time_enrichment=prefer_library_create_time_enrichment,
+        )
+        customer_center_results = [
+            {
+                "customer_center_id": str(item.get("customer_center_id") or "").strip(),
+                "refreshed_days": 1,
+                "missing_summary_days": 0,
+                "error_count": int(item.get("error_count", 0) or 0),
+                "plan_count": int(item.get("plan_count", 0) or 0),
+                "eligible_plan_count": int(item.get("eligible_plan_count", 0) or 0),
+                "material_row_count": int(item.get("material_row_count", 0) or 0),
+                "full_plan_scan": True,
+            }
+            for item in payload.get("synced_customer_centers") or []
+            if str(item.get("customer_center_id") or "").strip()
+        ]
+        customer_center_results.extend(
+            {
+                "customer_center_id": str(item.get("customer_center_id") or "").strip(),
+                "refreshed_days": 0,
+                "missing_summary_days": 0,
+                "error_count": 0,
+                "reason": str(item.get("reason") or "").strip(),
+                "snapshot_time": str(item.get("snapshot_time") or "").strip(),
+                "full_plan_scan": True,
+            }
+            for item in payload.get("skipped_customer_centers") or []
+            if str(item.get("customer_center_id") or "").strip()
+        )
+        return {
+            "refresh_days": 1,
+            "refreshed_days": len(payload.get("synced_customer_centers") or []),
+            "skipped_current_day": 0,
+            "missing_summary_days": 0,
+            "error_count": int(payload.get("error_count", 0) or 0),
+            "customer_center_count": len(customer_center_results),
+            "customer_centers": customer_center_results,
+            "errors": list(payload.get("errors") or []),
+            "range_start": today.strftime("%Y-%m-%d"),
+            "range_end": today.strftime("%Y-%m-%d"),
+            "source_mode": "current_day_full_plan_baseline",
+            "snapshot_time": str(payload.get("snapshot_time") or "").strip(),
+            "synced_customer_center_count": int(payload.get("synced_customer_center_count", 0) or 0),
+            "skipped_customer_center_count": int(payload.get("skipped_customer_center_count", 0) or 0),
+            "current_plan_material_row_count": sum(
+                int(item.get("material_row_count", 0) or 0)
+                for item in payload.get("synced_customer_centers") or []
+            ),
+            "current_plan_count": sum(
+                int(item.get("plan_count", 0) or 0)
+                for item in payload.get("synced_customer_centers") or []
+            ),
+            "full_plan_scan": True,
+            "library_enrichment_mode": (
+                "media"
+                if prefer_library_media_enrichment
+                else "create_time"
+                if prefer_library_create_time_enrichment
+                else "disabled"
+            ),
+        }
+
     @staticmethod
     def _material_rollup_tuple_from_record(row: dict[str, Any]) -> tuple[Any, ...]:
         return (
@@ -22435,6 +28896,10 @@ class DashboardService:
             float(row.get("settled_amount_rate", 0.0) or 0.0),
             float(row.get("refund_amount_1h", 0.0) or 0.0),
             None if row.get("refund_rate_1h") is None else float(row.get("refund_rate_1h", 0.0) or 0.0),
+            str(row.get("backend_material_name") or ""),
+            str(row.get("publish_title") or ""),
+            str(row.get("creative_title_material_ids_json") or "[]"),
+            str(row.get("creative_source") or ""),
         )
 
     @staticmethod
@@ -22477,6 +28942,10 @@ class DashboardService:
             "settled_amount_rate": float(row[34] or 0.0),
             "refund_amount_1h": float(row[35] or 0.0),
             "refund_rate_1h": None if row[36] is None else float(row[36] or 0.0),
+            "backend_material_name": DashboardService._optional_tuple_text(row, 37),
+            "publish_title": DashboardService._optional_tuple_text(row, 38),
+            "creative_title_material_ids_json": DashboardService._optional_tuple_text(row, 39, "[]") or "[]",
+            "creative_source": DashboardService._optional_tuple_text(row, 40),
         }
 
     def _merge_material_profile_history_record(
@@ -23700,27 +30169,55 @@ class DashboardService:
         }
         if not normalized_targets:
             return empty_result, set(), {}
-        refresh_result = self.refresh_extended_history_targets(
+        official_result = self.refresh_extended_history_targets(
             normalized_targets,
             material_collection_mode="full_snapshot",
+            force_replace=True,
             workers_override=max(int(settings.nightly_history_workers or 0), 1),
             plan_material_requests_per_minute_override=self._nightly_plan_material_requests_per_minute_default(),
             plan_material_batch_size_override=self._nightly_plan_material_batch_size_default(),
             plan_material_batch_sleep_seconds_override=self._nightly_plan_material_batch_sleep_seconds_default(),
         )
         with self.db() as conn:
-            success_keys, snapshot_time_map = self._resolve_extended_history_target_success(
+            official_success_keys, official_snapshot_time_map = self._resolve_extended_history_target_success(
                 conn,
                 normalized_targets,
             )
+        range_dates = [
+            str(item.get("target_date") or "").strip()
+            for item in normalized_targets
+            if str(item.get("target_date") or "").strip()
+        ]
         return (
             {
                 **empty_result,
-                **dict(refresh_result),
+                **{k: v for k, v in dict(official_result).items() if k not in {"mode"}},
+                "refresh_days": len(normalized_targets),
+                "refreshed_days": int(official_result.get("refreshed_days", 0) or 0),
+                "error_count": int(official_result.get("error_count", 0) or 0),
+                "errors": [dict(item) for item in (official_result.get("errors") or []) if isinstance(item, dict)],
+                "customer_center_count": len({str(item.get("customer_center_id") or "").strip() for item in normalized_targets}),
+                "customer_centers": [
+                    dict(item) for item in (official_result.get("customer_centers") or []) if isinstance(item, dict)
+                ],
+                "range_start": min(range_dates) if range_dates else str(official_result.get("range_start") or ""),
+                "range_end": max(range_dates) if range_dates else str(official_result.get("range_end") or ""),
                 "mode": "official_closed_day_finalize",
+                "source_mode": "official_closed_day_full_snapshot",
+                "local_snapshot_refreshed_days": 0,
+                "local_snapshot_skipped_days": len(normalized_targets),
+                "local_snapshot_skips": [
+                    {
+                        "customer_center_id": str(item.get("customer_center_id") or "").strip(),
+                        "target_date": str(item.get("target_date") or "").strip(),
+                        "reason": "day_cut_uses_official_full_snapshot",
+                    }
+                    for item in normalized_targets[:20]
+                ],
+                "official_full_snapshot_refresh_days": len(normalized_targets),
             },
-            success_keys,
-            snapshot_time_map,
+            official_success_keys,
+            official_snapshot_time_map,
         )
 
     def finalize_yesterday_daily(
@@ -24393,10 +30890,13 @@ class DashboardService:
         }
         advertiser_id = int(plan_row["advertiser_id"])
         ad_id = int(plan_row["ad_id"])
+        plan_context = dict(plan_row or {})
 
         try:
             detail_response = client.get_plan_detail(advertiser_id, ad_id)
             detail_data = detail_response.get("data") or {}
+            if isinstance(detail_data, dict) and detail_data:
+                plan_context["raw_json"] = json.dumps(detail_data, ensure_ascii=False)
             result["detail_row"] = self._normalize_plan_detail_row(snapshot_time, plan_row, detail_data)
         except Exception as exc:  # noqa: BLE001
             result["errors"].append(
@@ -24486,6 +30986,56 @@ class DashboardService:
                         window_end=window_end,
                     )
                 )
+        if self._plan_material_rows_need_creative_video_fallback(material_rows):
+            plan_context = self._hydrate_reporting_plan_context_with_detail(client, plan_context)
+            if self._plan_context_has_title_video_creative_pool(plan_context):
+                video_filtering: dict[str, Any] = {
+                    "material_type": "VIDEO",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "material_status": MATERIAL_PLAN_MATERIAL_STATUS,
+                    "video_type": "ALL",
+                }
+                try:
+                    fallback_video_rows = [
+                        self._normalize_material_row(
+                            snapshot_time,
+                            window_start,
+                            window_end,
+                            plan_row,
+                            "VIDEO",
+                            row,
+                        )
+                        for row in client.list_plan_materials(
+                            advertiser_id=advertiser_id,
+                            ad_id=ad_id,
+                            filtering=video_filtering,
+                            fields=plan_material_fields_for_type("VIDEO"),
+                        )
+                    ]
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(
+                        self._api_error_payload(
+                            exc,
+                            stage="plan_materials_creative_video_fallback",
+                            advertiser_id=advertiser_id,
+                            ad_id=ad_id,
+                            material_type="VIDEO",
+                            start_date=start_date,
+                            end_date=end_date,
+                            window_start=window_start,
+                            window_end=window_end,
+                        )
+                    )
+                else:
+                    if fallback_video_rows:
+                        material_rows = self._merge_material_tuple_rows(material_rows, fallback_video_rows)
+                        for normalized in fallback_video_rows:
+                            material_id = str(normalized[9] or "").strip()
+                            if material_id:
+                                video_material_ids.append(material_id)
+        if material_rows:
+            material_rows = self._annotate_material_rows_with_creative_context(material_rows, plan_context)
         result["material_rows"] = material_rows
         result["video_material_ids"] = sorted(set(video_material_ids))
         return result
@@ -24513,6 +31063,7 @@ class DashboardService:
         }
         advertiser_id = int(plan_row["advertiser_id"])
         ad_id = int(plan_row["ad_id"])
+        plan_context = dict(plan_row or {})
         observe_timeout_seconds = self._material_sync_observe_timeout_seconds()
         plan_wall_timeout_seconds = self._material_sync_plan_wall_timeout_seconds()
         plan_deadline_monotonic = time.monotonic() + float(plan_wall_timeout_seconds)
@@ -24736,6 +31287,70 @@ class DashboardService:
                         window_end=window_end,
                     )
                 )
+        if self._plan_material_rows_need_creative_video_fallback(material_rows):
+            plan_context = self._hydrate_reporting_plan_context_with_detail(client, plan_context)
+            if self._plan_context_has_title_video_creative_pool(plan_context):
+                video_filtering: dict[str, Any] = {
+                    "material_type": "VIDEO",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "material_status": MATERIAL_PLAN_MATERIAL_STATUS,
+                    "video_type": "ALL",
+                }
+                try:
+                    fallback_video_materials = list_plan_materials_with_observation(
+                        material_type="VIDEO",
+                        filtering=video_filtering,
+                        fields=plan_material_fields_for_type("VIDEO"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(
+                        self._api_error_payload(
+                            exc,
+                            stage="plan_materials_creative_video_fallback",
+                            advertiser_id=advertiser_id,
+                            ad_id=ad_id,
+                            material_type="VIDEO",
+                            start_date=start_date,
+                            end_date=end_date,
+                            window_start=window_start,
+                            window_end=window_end,
+                        )
+                    )
+                else:
+                    fallback_video_rows = [
+                        self._normalize_material_row(
+                            snapshot_time,
+                            window_start,
+                            window_end,
+                            plan_row,
+                            "VIDEO",
+                            row,
+                        )
+                        for row in fallback_video_materials
+                    ]
+                    if fallback_video_rows:
+                        material_rows = self._merge_material_tuple_rows(material_rows, fallback_video_rows)
+                        result["errors"] = [
+                            item
+                            for item in result["errors"]
+                            if not (
+                                str(item.get("material_type") or "").strip().upper() == "VIDEO"
+                                and str(item.get("stage") or "").strip() == "plan_materials"
+                            )
+                        ]
+                        self._emit_material_sync_observation(
+                            "material_plan_material_creative_video_fallback_recovered",
+                            customer_center_id=customer_center_id,
+                            advertiser_id=advertiser_id,
+                            ad_id=ad_id,
+                            plan_batch_index=plan_batch_index,
+                            total_plan_batches=total_plan_batches,
+                            recovered_row_count=len(fallback_video_rows),
+                        )
+        if material_rows:
+            plan_context = self._hydrate_reporting_plan_context_with_detail(client, plan_context)
+            material_rows = self._annotate_material_rows_with_creative_context(material_rows, plan_context)
         result["material_rows"] = material_rows
         return result
 
@@ -24841,6 +31456,15 @@ class DashboardService:
                 current = self._normalize_media_url(mutable_rows[row_index][15])
                 if not self._is_public_preview_video_url(current):
                     mutable_rows[row_index][15] = normalized
+
+        def apply_backend_material_name(indexes: list[int], item: dict[str, Any]) -> None:
+            backend_name = self._backend_material_name_from_video_item(item)
+            if not backend_name:
+                return
+            for row_index in indexes:
+                current = str(mutable_rows[row_index][10] or "").strip()
+                if not current or self._looks_like_publish_caption(current):
+                    mutable_rows[row_index][10] = backend_name
 
         total_video_id_batches = sum((len(item) + 99) // 100 for item in video_ids_by_advertiser.values())
         total_video_material_id_batches = sum((len(item) + 99) // 100 for item in video_material_ids_by_advertiser.values())
@@ -25051,11 +31675,13 @@ class DashboardService:
                                 apply_cover_url(id_map.get(resolved_video_id, []), poster_url)
                                 apply_video_id(id_map.get(resolved_video_id, []), resolved_video_id)
                                 apply_video_url(id_map.get(resolved_video_id, []), video_url)
+                                apply_backend_material_name(id_map.get(resolved_video_id, []), item)
                             if resolved_material_id:
                                 apply_create_time(material_id_map.get(resolved_material_id, []), create_time)
                                 apply_cover_url(material_id_map.get(resolved_material_id, []), poster_url)
                                 apply_video_id(material_id_map.get(resolved_material_id, []), resolved_video_id)
                                 apply_video_url(material_id_map.get(resolved_material_id, []), video_url)
+                                apply_backend_material_name(material_id_map.get(resolved_material_id, []), item)
                     except Exception as exc:  # noqa: BLE001
                         errors.append(
                             self._api_error_payload(
@@ -25106,11 +31732,13 @@ class DashboardService:
                             apply_cover_url(id_map.get(resolved_video_id, []), poster_url)
                             apply_video_id(id_map.get(resolved_video_id, []), resolved_video_id)
                             apply_video_url(id_map.get(resolved_video_id, []), video_url)
+                            apply_backend_material_name(id_map.get(resolved_video_id, []), item)
                         if resolved_material_id:
                             apply_create_time(material_id_map.get(resolved_material_id, []), create_time)
                             apply_cover_url(material_id_map.get(resolved_material_id, []), poster_url)
                             apply_video_id(material_id_map.get(resolved_material_id, []), resolved_video_id)
                             apply_video_url(material_id_map.get(resolved_material_id, []), video_url)
+                            apply_backend_material_name(material_id_map.get(resolved_material_id, []), item)
                 except Exception as exc:  # noqa: BLE001
                     errors.append(
                         self._api_error_payload(
@@ -25569,7 +32197,8 @@ class DashboardService:
         plans = [
             row
             for row in plans
-            if str(row.get("plan_source") or "").strip().upper() in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC}
+            if str(row.get("plan_source") or "").strip().upper()
+            in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC, PLAN_SOURCE_UNI_REPORT}
         ]
 
         plan_limit = self._detail_sync_plan_limit(config)
@@ -25740,7 +32369,8 @@ class DashboardService:
             eligible_plans = [
                 row
                 for row in eligible_plans
-                if str(row.get("plan_source") or "").strip().upper() in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC}
+                if str(row.get("plan_source") or "").strip().upper()
+                in {PLAN_SOURCE_UNI_PROMOTION, PLAN_SOURCE_UNI_CUBIC, PLAN_SOURCE_UNI_REPORT}
             ]
             if str(meta.get("source") or "").strip().lower() == "current":
                 base_plan_selection = self._select_material_sync_plans(
@@ -26506,13 +33136,61 @@ class DashboardService:
             )
             if use_snapshot_subset_restore:
                 if plan_selection_mode == "current_full":
-                    self._replace_material_snapshot_rows(
+                    existing_current_counts = self._material_current_day_row_counts(
                         conn,
                         customer_center_id,
-                        normalized_material_rows,
-                        snapshot_time=snapshot_time,
-                        replace_same_day=True,
+                        day_key,
                     )
+                    new_current_counts = {
+                        "material_current_row_count": len(material_rollup_rows),
+                        "material_relation_current_row_count": len(material_relation_rows),
+                        "material_snapshot_row_count": len(normalized_material_rows),
+                        "material_current_stat_cost": round(
+                            sum(float(row[12] or 0.0) for row in material_rollup_rows),
+                            2,
+                        ),
+                        "material_relation_non_title_stat_cost": round(
+                            sum(
+                                float(row[16] or 0.0)
+                                for row in material_relation_rows
+                                if str(row[7] or "").strip().upper() != "TITLE"
+                            ),
+                            2,
+                        ),
+                        "plan_stat_cost": round(
+                            float(existing_current_counts.get("plan_stat_cost", 0.0) or 0.0),
+                            2,
+                        ),
+                    }
+                    should_replace_current, write_decision = self._should_replace_material_current_day(
+                        existing_current_counts,
+                        new_current_counts,
+                        list(payload.get("errors") or []),
+                    )
+                    payload["existing_current_counts"] = existing_current_counts
+                    payload["write_decision"] = write_decision
+                    payload["write_applied"] = bool(should_replace_current)
+                    if should_replace_current:
+                        self._replace_material_snapshot_rows(
+                            conn,
+                            customer_center_id,
+                            normalized_material_rows,
+                            snapshot_time=snapshot_time,
+                            replace_same_day=True,
+                        )
+                    else:
+                        payload["errors"] = [
+                            *list(payload.get("errors") or []),
+                            {
+                                "stage": "material_current_preserve_existing",
+                                "customer_center_id": customer_center_id,
+                                "target_day": day_key,
+                                "error": write_decision,
+                                "existing_counts": existing_current_counts,
+                                "new_counts": new_current_counts,
+                                "retryable": False,
+                            },
+                        ]
                 else:
                     self._replace_material_snapshot_plan_subset(
                         conn,
@@ -26521,11 +33199,12 @@ class DashboardService:
                         selected_plan_ids,
                         normalized_material_rows,
                     )
-                self._restore_material_current_from_all_same_day_snapshots(
-                    conn,
-                    customer_center_id,
-                    day_key,
-                )
+                if bool(payload.get("write_applied", True)):
+                    self._restore_material_current_from_all_same_day_snapshots(
+                        conn,
+                        customer_center_id,
+                        day_key,
+                    )
             else:
                 self._replace_material_current_rows(conn, customer_center_id, material_rollup_rows)
                 self._replace_material_relation_current_rows(conn, customer_center_id, material_relation_rows)
@@ -26906,27 +33585,29 @@ class DashboardService:
                     """
                     INSERT INTO material_snapshots (
                         snapshot_time, customer_center_id, window_start, window_end, advertiser_id, advertiser_name,
-                        ad_id, ad_name, material_type, material_key, material_id, material_name, create_time,
+                        ad_id, ad_name, material_type, material_key, material_id, material_name, backend_material_name,
+                        publish_title, creative_title_material_ids_json, creative_source, create_time,
                         video_id, cover_url, aweme_item_id, video_url, product_show_count,
                         product_click_count, stat_cost, pay_amount, total_pay_amount, settled_pay_amount,
                         order_count, settled_order_count, roi, raw_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    [(row[0], customer_center_id, *row[1:]) for row in payload["material_rows"]],
+                    [self._material_snapshot_insert_values(customer_center_id, row) for row in payload["material_rows"]],
                 )
             if material_rollup_rows:
                 conn.executemany(
                     """
                     INSERT INTO material_rollups (
                         snapshot_time, customer_center_id, window_start, window_end, material_key, material_id,
-                        material_name, create_time, material_type, video_id, cover_url, aweme_item_id, video_url, stat_cost, pay_amount,
+                        material_name, backend_material_name, publish_title, creative_title_material_ids_json,
+                        creative_source, create_time, material_type, video_id, cover_url, aweme_item_id, video_url, stat_cost, pay_amount,
                         total_pay_amount, settled_pay_amount, order_count, settled_order_count, plan_count, advertiser_count,
                         plan_ids_json, advertiser_ids_json, is_original, top_plan_name, top_account_name, top_anchor_name,
                         product_info_text, product_names_json, overall_show_count, overall_click_count, overall_ctr,
                         roi, settled_roi, pay_order_cost, settled_amount_rate, refund_amount_1h, refund_rate_1h
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    [(row[0], customer_center_id, *row[1:]) for row in material_rollup_rows],
+                    [self._material_rollup_insert_values(customer_center_id, row) for row in material_rollup_rows],
                 )
             if material_report_snapshot_rows:
                 conn.executemany(
@@ -27153,8 +33834,10 @@ class DashboardService:
         )
 
     def cleanup_history(self) -> None:
-        base_cutoff = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
-        base_cutoff_date = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
+        now_dt = datetime.now(ZoneInfo(TIMEZONE))
+        base_cutoff_dt = now_dt - timedelta(days=RETENTION_DAYS)
+        base_cutoff = base_cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+        base_cutoff_date = base_cutoff_dt.strftime("%Y-%m-%d")
         material_cutoff_date = MATERIAL_HISTORY_START_DATE
         extended_cutoff = f"{material_cutoff_date} 00:00:00"
         with self.db() as conn:
@@ -27178,6 +33861,7 @@ class DashboardService:
             conn.execute("DELETE FROM material_report_snapshots WHERE snapshot_time < ?", (extended_cutoff,))
             conn.execute("DELETE FROM video_origin_flags WHERE snapshot_time < ?", (extended_cutoff,))
             conn.execute("DELETE FROM extended_sync_runs WHERE snapshot_time < ?", (extended_cutoff,))
+        self._cleanup_material_upload_storage(now_dt - timedelta(days=MATERIAL_UPLOAD_RETENTION_DAYS))
 
     def evaluate_alerts(self, payload: dict[str, Any]) -> None:
         with self.db() as conn:
@@ -28722,6 +35406,10 @@ class DashboardService:
             "material_key": str(row.get("material_key") or "").strip(),
             "material_id": str(row.get("material_id") or "").strip(),
             "material_name": str(row.get("material_name") or "").strip(),
+            "backend_material_name": str(row.get("backend_material_name") or "").strip(),
+            "publish_title": str(row.get("publish_title") or "").strip(),
+            "creative_title_material_ids_json": str(row.get("creative_title_material_ids_json") or "[]").strip() or "[]",
+            "creative_source": str(row.get("creative_source") or "").strip(),
             "create_time": str(row.get("create_time") or "").strip(),
             "material_type": str(row.get("material_type") or "").strip(),
             "video_id": str(row.get("video_id") or "").strip(),
@@ -28973,7 +35661,9 @@ class DashboardService:
                     ' ',
                     COALESCE(material_key, ''),
                     COALESCE(material_id, ''),
+                    COALESCE(backend_material_name, ''),
                     COALESCE(material_name, ''),
+                    COALESCE(publish_title, ''),
                     COALESCE(video_id, ''),
                     COALESCE(product_info_text, ''),
                     COALESCE(top_anchor_name, ''),
@@ -29007,6 +35697,10 @@ class DashboardService:
                     mp.material_key,
                     mp.material_id,
                     mp.material_name,
+                    mp.backend_material_name,
+                    mp.publish_title,
+                    mp.creative_title_material_ids_json,
+                    mp.creative_source,
                     COALESCE(NULLIF(mp.create_time, ''), first_seen.first_seen_at, '') AS effective_create_time,
                     mp.create_time AS stored_create_time,
                     first_seen.first_seen_at,
@@ -29223,6 +35917,7 @@ class DashboardService:
                     mrc.material_key,
                     mrc.material_id,
                     mrc.material_name,
+                    mrc.backend_material_name,
                     mrc.create_time,
                     mrc.video_id,
                     mrc.cover_url,
@@ -29253,6 +35948,7 @@ class DashboardService:
                     mrd.material_key,
                     mrd.material_id,
                     mrd.material_name,
+                    mrd.backend_material_name,
                     mrd.create_time,
                     mrd.video_id,
                     mrd.cover_url,
@@ -29281,8 +35977,11 @@ class DashboardService:
                 COALESCE(NULLIF(mr.ad_name, ''), '') AS ad_name,
                 mr.material_type,
                 mr.material_key,
-                COALESCE(NULLIF(mp.material_id, ''), NULLIF(mr.material_id, ''), '') AS material_id,
-                COALESCE(NULLIF(mp.material_name, ''), NULLIF(mr.material_name, ''), '未命名素材') AS material_name,
+                COALESCE(NULLIF(mr.material_id, ''), NULLIF(mp.material_id, ''), '') AS material_id,
+                CASE
+                    WHEN mr.material_type = 'UNATTRIBUTED_DELETED' THEN '未归因关闭/暂停计划消耗'
+                    ELSE COALESCE(NULLIF(mr.backend_material_name, ''), NULLIF(mp.backend_material_name, ''), NULLIF(mr.material_name, ''), NULLIF(mp.material_name, ''), '未命名素材')
+                END AS material_name,
                 COALESCE(NULLIF(mp.create_time, ''), NULLIF(mr.create_time, ''), '') AS create_time,
                 COALESCE(NULLIF(mp.video_id, ''), NULLIF(mr.video_id, ''), '') AS video_id,
                 COALESCE(NULLIF(mp.cover_url, ''), NULLIF(mr.cover_url, ''), '') AS cover_url,
@@ -29330,8 +36029,11 @@ class DashboardService:
                 COALESCE(NULLIF(ms.ad_name, ''), '') AS ad_name,
                 ms.material_type,
                 ms.material_key,
-                COALESCE(NULLIF(mp.material_id, ''), NULLIF(ms.material_id, ''), '') AS material_id,
-                COALESCE(NULLIF(mp.material_name, ''), NULLIF(ms.material_name, ''), '未命名素材') AS material_name,
+                COALESCE(NULLIF(ms.material_id, ''), NULLIF(mp.material_id, ''), '') AS material_id,
+                CASE
+                    WHEN ms.material_type = 'UNATTRIBUTED_DELETED' THEN '未归因关闭/暂停计划消耗'
+                    ELSE COALESCE(NULLIF(ms.backend_material_name, ''), NULLIF(mp.backend_material_name, ''), NULLIF(ms.material_name, ''), NULLIF(mp.material_name, ''), '未命名素材')
+                END AS material_name,
                 COALESCE(NULLIF(mp.create_time, ''), NULLIF(ms.create_time, ''), '') AS create_time,
                 COALESCE(NULLIF(mp.video_id, ''), NULLIF(ms.video_id, ''), '') AS video_id,
                 COALESCE(NULLIF(mp.cover_url, ''), NULLIF(ms.cover_url, ''), '') AS cover_url,
@@ -29427,6 +36129,7 @@ class DashboardService:
                     mrd.material_key,
                     mrd.material_id,
                     mrd.material_name,
+                    mrd.backend_material_name,
                     mrd.create_time,
                     mrd.video_id,
                     mrd.cover_url,
@@ -29471,6 +36174,7 @@ class DashboardService:
                     mrc.material_key,
                     mrc.material_id,
                     mrc.material_name,
+                    mrc.backend_material_name,
                     mrc.create_time,
                     mrc.video_id,
                     mrc.cover_url,
@@ -29526,8 +36230,11 @@ class DashboardService:
                     COALESCE(NULLIF(latest_row.ad_name, ''), '') AS ad_name,
                     latest_row.material_type,
                     latest_row.material_key,
-                    COALESCE(NULLIF(mp.material_id, ''), NULLIF(latest_row.material_id, ''), '') AS material_id,
-                    COALESCE(NULLIF(mp.material_name, ''), NULLIF(latest_row.material_name, ''), '未命名素材') AS material_name,
+                    COALESCE(NULLIF(latest_row.material_id, ''), NULLIF(mp.material_id, ''), '') AS material_id,
+                    CASE
+                        WHEN latest_row.material_type = 'UNATTRIBUTED_DELETED' THEN '未归因关闭/暂停计划消耗'
+                        ELSE COALESCE(NULLIF(latest_row.backend_material_name, ''), NULLIF(mp.backend_material_name, ''), NULLIF(latest_row.material_name, ''), NULLIF(mp.material_name, ''), '未命名素材')
+                    END AS material_name,
                     COALESCE(NULLIF(mp.create_time, ''), NULLIF(latest_row.create_time, ''), '') AS create_time,
                     COALESCE(NULLIF(mp.video_id, ''), NULLIF(latest_row.video_id, ''), '') AS video_id,
                     COALESCE(NULLIF(mp.cover_url, ''), NULLIF(latest_row.cover_url, ''), '') AS cover_url,
@@ -29625,8 +36332,11 @@ class DashboardService:
                 COALESCE(NULLIF(latest_row.ad_name, ''), '') AS ad_name,
                 latest_row.material_type,
                 latest_row.material_key,
-                COALESCE(NULLIF(mp.material_id, ''), NULLIF(latest_row.material_id, ''), '') AS material_id,
-                COALESCE(NULLIF(mp.material_name, ''), NULLIF(latest_row.material_name, ''), '未命名素材') AS material_name,
+                COALESCE(NULLIF(latest_row.material_id, ''), NULLIF(mp.material_id, ''), '') AS material_id,
+                CASE
+                    WHEN latest_row.material_type = 'UNATTRIBUTED_DELETED' THEN '未归因关闭/暂停计划消耗'
+                        ELSE COALESCE(NULLIF(latest_row.backend_material_name, ''), NULLIF(mp.backend_material_name, ''), NULLIF(latest_row.material_name, ''), NULLIF(mp.material_name, ''), '未命名素材')
+                END AS material_name,
                 COALESCE(NULLIF(mp.create_time, ''), NULLIF(latest_row.create_time, ''), '') AS create_time,
                 COALESCE(NULLIF(mp.video_id, ''), NULLIF(latest_row.video_id, ''), '') AS video_id,
                 COALESCE(NULLIF(mp.cover_url, ''), NULLIF(latest_row.cover_url, ''), '') AS cover_url,
@@ -29705,7 +36415,7 @@ class DashboardService:
                 "material_row_key": f"{customer_center_id}:{advertiser_id}:{ad_id}:{str(row.get('material_type') or '').strip()}:{material_key}",
                 "material_key": material_key,
                 "material_id": str(row.get("material_id") or "").strip(),
-                "material_name": str(row.get("material_name") or "").strip() or "未命名素材",
+                "material_name": self._material_display_name_value(row.get("material_type"), row.get("material_name")),
                 "create_time": str(row.get("create_time") or "").strip(),
                 "material_type": str(row.get("material_type") or "").strip() or "OTHER",
                 "video_id": str(row.get("video_id") or "").strip(),
@@ -31128,6 +37838,7 @@ class DashboardService:
                         md.material_key,
                         md.material_id,
                         md.material_name,
+                        md.backend_material_name,
                         md.create_time,
                         md.material_type,
                         md.video_id,
@@ -31199,6 +37910,7 @@ class DashboardService:
                         mc.material_key,
                         mc.material_id,
                         mc.material_name,
+                        mc.backend_material_name,
                         mc.create_time,
                         mc.material_type,
                         mc.video_id,
@@ -31263,7 +37975,6 @@ class DashboardService:
                 and not material_name_patterns
                 and rank_zero_metrics_last
                 and normalized_sort_key in material_ranking_index.SORT_KEYS
-                and not search_text
             )
             can_use_current_live_index = (
                 window_includes_today
@@ -31273,7 +37984,6 @@ class DashboardService:
                 and not material_name_patterns
                 and rank_zero_metrics_last
                 and normalized_sort_key in material_ranking_index.SORT_KEYS
-                and not search_text
             )
             if can_use_current_live_index or can_use_live_overlay_index or can_use_ranking_index:
                 scope_key_value = material_ranking_index.scope_key(
@@ -31295,6 +38005,7 @@ class DashboardService:
                             sort_dir=normalized_sort_dir,
                             tz_name=tz_name,
                             all_customer_centers=all_customer_centers,
+                            search_text=search_text,
                         )
                     if indexed_payload is not None:
                         return indexed_payload
@@ -31316,6 +38027,7 @@ class DashboardService:
                             sort_key=normalized_sort_key,
                             sort_dir=normalized_sort_dir,
                             all_customer_centers=all_customer_centers,
+                            search_text=search_text,
                         )
                     if indexed_payload is not None:
                         return indexed_payload
@@ -31458,7 +38170,11 @@ class DashboardService:
             aggregated AS (
                 SELECT
                     source.material_key,
-                    COALESCE(MAX(NULLIF(source.material_name, '')), '') AS material_name,
+                    CASE
+                        WHEN MAX(CASE WHEN source.material_type = 'UNATTRIBUTED_DELETED' THEN 1 ELSE 0 END) = 1
+                        THEN '未归因关闭/暂停计划消耗'
+                        ELSE COALESCE(MAX(NULLIF(source.backend_material_name, '')), MAX(NULLIF(source.material_name, '')), '')
+                    END AS material_name,
                     COALESCE(MIN(NULLIF(source.create_time, '')), '') AS create_time,
                     COALESCE(MAX(NULLIF(source.top_account_name, '')), '') AS top_account_name,
                     COALESCE(MAX(NULLIF(source.top_plan_name, '')), '') AS top_plan_name,
@@ -31959,6 +38675,8 @@ class DashboardService:
                         mrd.material_key,
                         mrd.material_id,
                         mrd.material_name,
+                        mrd.backend_material_name,
+                        mrd.publish_title,
                         mrd.create_time,
                         mrd.video_id,
                         mrd.cover_url,
@@ -32003,6 +38721,8 @@ class DashboardService:
                         mrc.material_key,
                         mrc.material_id,
                         mrc.material_name,
+                        mrc.backend_material_name,
+                        mrc.publish_title,
                         mrc.create_time,
                         mrc.video_id,
                         mrc.cover_url,
@@ -32098,7 +38818,7 @@ class DashboardService:
             escaped_search = search_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             search_like = f"%{escaped_search}%"
             search_params = (
-                [search_like] * 11
+                [search_like] * 13
                 if search_text
                 else []
             )
@@ -32107,6 +38827,8 @@ class DashboardService:
                 search_clause = """
                 WHERE (
                     LOWER(COALESCE(material_name, '')) LIKE ? ESCAPE '\\'
+                    OR LOWER(COALESCE(backend_material_name, '')) LIKE ? ESCAPE '\\'
+                    OR LOWER(COALESCE(publish_title, '')) LIKE ? ESCAPE '\\'
                     OR LOWER(COALESCE(material_id, '')) LIKE ? ESCAPE '\\'
                     OR LOWER(COALESCE(video_id, '')) LIKE ? ESCAPE '\\'
                     OR LOWER(COALESCE(product_info_text, '')) LIKE ? ESCAPE '\\'
@@ -32154,8 +38876,13 @@ class DashboardService:
                     latest_row.material_type,
                     latest_row.material_key,
                     CONCAT_WS(':', metrics.customer_center_id, latest_row.advertiser_id::text, latest_row.ad_id::text, latest_row.material_type, latest_row.material_key) AS material_row_key,
-                    COALESCE(NULLIF(mp.material_id, ''), NULLIF(latest_row.material_id, ''), '') AS material_id,
-                    COALESCE(NULLIF(mp.material_name, ''), NULLIF(latest_row.material_name, ''), '未命名素材') AS material_name,
+                    COALESCE(NULLIF(latest_row.material_id, ''), NULLIF(mp.material_id, ''), '') AS material_id,
+                    CASE
+                        WHEN latest_row.material_type = 'UNATTRIBUTED_DELETED' THEN '未归因关闭/暂停计划消耗'
+                        ELSE COALESCE(NULLIF(latest_row.backend_material_name, ''), NULLIF(mp.backend_material_name, ''), NULLIF(latest_row.material_name, ''), NULLIF(mp.material_name, ''), '未命名素材')
+                    END AS material_name,
+                    COALESCE(NULLIF(latest_row.backend_material_name, ''), NULLIF(mp.backend_material_name, ''), '') AS backend_material_name,
+                    COALESCE(NULLIF(latest_row.publish_title, ''), NULLIF(mp.publish_title, ''), '') AS publish_title,
                     COALESCE(NULLIF(mp.create_time, ''), NULLIF(latest_row.create_time, ''), '') AS create_time,
                     COALESCE(NULLIF(mp.video_id, ''), NULLIF(latest_row.video_id, ''), '') AS video_id,
                     COALESCE(NULLIF(mp.cover_url, ''), NULLIF(latest_row.cover_url, ''), '') AS cover_url,
@@ -32796,7 +39523,9 @@ class DashboardService:
             LOWER(
                 COALESCE({prefix}material_key, '') || ' ' ||
                 COALESCE({prefix}material_id, '') || ' ' ||
+                COALESCE({prefix}backend_material_name, '') || ' ' ||
                 COALESCE({prefix}material_name, '') || ' ' ||
+                COALESCE({prefix}publish_title, '') || ' ' ||
                 COALESCE({prefix}video_id, '') || ' ' ||
                 COALESCE({prefix}product_info_text, '') || ' ' ||
                 COALESCE({prefix}top_anchor_name, '') || ' ' ||
@@ -32881,6 +39610,188 @@ class DashboardService:
         )
         return ready, prefix_start_day, day_count
 
+    def _operator_keyword_metrics_plan(
+        self,
+        conn: Any,
+        *,
+        scope_key_value: str,
+        start_day: str,
+        end_day: str,
+        all_customer_centers: bool,
+    ) -> dict[str, Any] | None:
+        tz_name = str(self.read_config().get("timezone") or TIMEZONE)
+        today_key = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+        window_includes_today = start_day <= today_key <= end_day
+        current_scope_sql = "COALESCE(mc.customer_center_id, '') <> ''" if all_customer_centers else "mc.customer_center_id = ?"
+        current_scope_params: list[Any] = [] if all_customer_centers else [self._current_customer_center_id()]
+        current_metrics_sql = f"""
+            current_metrics AS (
+                SELECT
+                    mc.material_key,
+                    MAX(mc.snapshot_time) AS snapshot_time,
+                    CAST(1 AS INTEGER) AS active_day_count,
+                    CAST(ROUND(COALESCE(SUM(mc.stat_cost), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
+                    CAST(ROUND(COALESCE(SUM(mc.pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
+                    CAST(ROUND(COALESCE(SUM(mc.total_pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
+                    CAST(ROUND(COALESCE(SUM(mc.settled_pay_amount), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
+                    CAST(COALESCE(SUM(mc.order_count), 0) AS INTEGER) AS order_count,
+                    CAST(COALESCE(SUM(mc.settled_order_count), 0) AS INTEGER) AS settled_order_count,
+                    CAST(COALESCE(SUM(mc.overall_show_count), 0) AS INTEGER) AS overall_show_count,
+                    CAST(COALESCE(SUM(mc.overall_click_count), 0) AS INTEGER) AS overall_click_count,
+                    CAST(ROUND(COALESCE(SUM(mc.refund_amount_1h), 0.0)::numeric, 2) AS DOUBLE PRECISION) AS refund_amount_1h,
+                    CAST(COALESCE(SUM(mc.plan_count), 0) AS INTEGER) AS plan_count,
+                    CAST(COALESCE(SUM(mc.advertiser_count), 0) AS INTEGER) AS advertiser_count
+                FROM material_current mc
+                WHERE {current_scope_sql}
+                GROUP BY mc.material_key
+            )
+        """
+        if window_includes_today and start_day == today_key and end_day == today_key:
+            return {
+                "cte_sql": f"""
+                    {current_metrics_sql},
+                    metrics AS (
+                        SELECT *
+                        FROM current_metrics
+                    )
+                """,
+                "params": [*current_scope_params],
+                "ranking_index_range_key": "current_live",
+                "ranking_source": "material_current_live",
+                "day_prefix_used": False,
+                "day_rollup_used": False,
+                "live_overlay_used": True,
+                "indexed_day_count": 1,
+            }
+
+        if window_includes_today and start_day < today_key:
+            history_end_day = min(
+                end_day,
+                (datetime.strptime(today_key, "%Y-%m-%d").date() - timedelta(days=1)).strftime("%Y-%m-%d"),
+            )
+            ready, prefix_start_day, indexed_day_count = self._material_prefix_window_ready(
+                conn,
+                scope_key_value=scope_key_value,
+                start_day=start_day,
+                end_day=history_end_day,
+            )
+            if not ready:
+                return None
+            return {
+                "cte_sql": f"""
+                    end_rows AS (
+                        SELECT *
+                        FROM material_ranking_day_prefix
+                        WHERE scope_key = ? AND day_key = ?
+                    ),
+                    start_rows AS (
+                        SELECT *
+                        FROM material_ranking_day_prefix
+                        WHERE scope_key = ? AND day_key = ?
+                    ),
+                    history_metrics AS (
+                        SELECT
+                            e.material_key,
+                            e.snapshot_time,
+                            CAST(e.active_day_count - COALESCE(s.active_day_count, 0) AS INTEGER) AS active_day_count,
+                            CAST(ROUND((e.stat_cost - COALESCE(s.stat_cost, 0))::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
+                            CAST(ROUND((e.pay_amount - COALESCE(s.pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
+                            CAST(ROUND((e.total_pay_amount - COALESCE(s.total_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
+                            CAST(ROUND((e.settled_pay_amount - COALESCE(s.settled_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
+                            CAST(e.order_count - COALESCE(s.order_count, 0) AS INTEGER) AS order_count,
+                            CAST(e.settled_order_count - COALESCE(s.settled_order_count, 0) AS INTEGER) AS settled_order_count,
+                            CAST(e.overall_show_count - COALESCE(s.overall_show_count, 0) AS INTEGER) AS overall_show_count,
+                            CAST(e.overall_click_count - COALESCE(s.overall_click_count, 0) AS INTEGER) AS overall_click_count,
+                            CAST(ROUND((e.refund_amount_1h - COALESCE(s.refund_amount_1h, 0))::numeric, 2) AS DOUBLE PRECISION) AS refund_amount_1h,
+                            CAST(e.plan_count - COALESCE(s.plan_count, 0) AS INTEGER) AS plan_count,
+                            CAST(e.advertiser_count - COALESCE(s.advertiser_count, 0) AS INTEGER) AS advertiser_count
+                        FROM end_rows e
+                        LEFT JOIN start_rows s
+                          ON s.scope_key = e.scope_key
+                         AND s.material_key = e.material_key
+                    ),
+                    {current_metrics_sql},
+                    metrics AS (
+                        SELECT
+                            COALESCE(c.material_key, h.material_key) AS material_key,
+                            COALESCE(NULLIF(c.snapshot_time, ''), NULLIF(h.snapshot_time, ''), '') AS snapshot_time,
+                            CAST(COALESCE(h.active_day_count, 0) + CASE WHEN c.material_key IS NULL THEN 0 ELSE 1 END AS INTEGER) AS active_day_count,
+                            CAST(ROUND((COALESCE(h.stat_cost, 0) + COALESCE(c.stat_cost, 0))::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
+                            CAST(ROUND((COALESCE(h.pay_amount, 0) + COALESCE(c.pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
+                            CAST(ROUND((COALESCE(h.total_pay_amount, 0) + COALESCE(c.total_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
+                            CAST(ROUND((COALESCE(h.settled_pay_amount, 0) + COALESCE(c.settled_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
+                            CAST(COALESCE(h.order_count, 0) + COALESCE(c.order_count, 0) AS INTEGER) AS order_count,
+                            CAST(COALESCE(h.settled_order_count, 0) + COALESCE(c.settled_order_count, 0) AS INTEGER) AS settled_order_count,
+                            CAST(COALESCE(h.overall_show_count, 0) + COALESCE(c.overall_show_count, 0) AS INTEGER) AS overall_show_count,
+                            CAST(COALESCE(h.overall_click_count, 0) + COALESCE(c.overall_click_count, 0) AS INTEGER) AS overall_click_count,
+                            CAST(ROUND((COALESCE(h.refund_amount_1h, 0) + COALESCE(c.refund_amount_1h, 0))::numeric, 2) AS DOUBLE PRECISION) AS refund_amount_1h,
+                            CAST(COALESCE(h.plan_count, 0) + COALESCE(c.plan_count, 0) AS INTEGER) AS plan_count,
+                            CAST(COALESCE(h.advertiser_count, 0) + COALESCE(c.advertiser_count, 0) AS INTEGER) AS advertiser_count
+                        FROM history_metrics h
+                        FULL OUTER JOIN current_metrics c
+                          ON c.material_key = h.material_key
+                    )
+                """,
+                "params": [scope_key_value, history_end_day, scope_key_value, prefix_start_day, *current_scope_params],
+                "ranking_index_range_key": "day_prefix_live",
+                "ranking_source": "material_ranking_day_prefix_live",
+                "day_prefix_used": True,
+                "day_rollup_used": True,
+                "live_overlay_used": True,
+                "indexed_day_count": indexed_day_count + 1,
+            }
+
+        ready, prefix_start_day, indexed_day_count = self._material_prefix_window_ready(
+            conn,
+            scope_key_value=scope_key_value,
+            start_day=start_day,
+            end_day=end_day,
+        )
+        if not ready:
+            return None
+        return {
+            "cte_sql": """
+                end_rows AS (
+                    SELECT *
+                    FROM material_ranking_day_prefix
+                    WHERE scope_key = ? AND day_key = ?
+                ),
+                start_rows AS (
+                    SELECT *
+                    FROM material_ranking_day_prefix
+                    WHERE scope_key = ? AND day_key = ?
+                ),
+                metrics AS (
+                    SELECT
+                        e.material_key,
+                        e.snapshot_time,
+                        CAST(e.active_day_count - COALESCE(s.active_day_count, 0) AS INTEGER) AS active_day_count,
+                        CAST(ROUND((e.stat_cost - COALESCE(s.stat_cost, 0))::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
+                        CAST(ROUND((e.pay_amount - COALESCE(s.pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
+                        CAST(ROUND((e.total_pay_amount - COALESCE(s.total_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
+                        CAST(ROUND((e.settled_pay_amount - COALESCE(s.settled_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
+                        CAST(e.order_count - COALESCE(s.order_count, 0) AS INTEGER) AS order_count,
+                        CAST(e.settled_order_count - COALESCE(s.settled_order_count, 0) AS INTEGER) AS settled_order_count,
+                        CAST(e.overall_show_count - COALESCE(s.overall_show_count, 0) AS INTEGER) AS overall_show_count,
+                        CAST(e.overall_click_count - COALESCE(s.overall_click_count, 0) AS INTEGER) AS overall_click_count,
+                        CAST(ROUND((e.refund_amount_1h - COALESCE(s.refund_amount_1h, 0))::numeric, 2) AS DOUBLE PRECISION) AS refund_amount_1h,
+                        CAST(e.plan_count - COALESCE(s.plan_count, 0) AS INTEGER) AS plan_count,
+                        CAST(e.advertiser_count - COALESCE(s.advertiser_count, 0) AS INTEGER) AS advertiser_count
+                    FROM end_rows e
+                    LEFT JOIN start_rows s
+                      ON s.scope_key = e.scope_key
+                     AND s.material_key = e.material_key
+                )
+            """,
+            "params": [scope_key_value, end_day, scope_key_value, prefix_start_day],
+            "ranking_index_range_key": "day_prefix",
+            "ranking_source": "material_ranking_day_prefix",
+            "day_prefix_used": True,
+            "day_rollup_used": True,
+            "live_overlay_used": False,
+            "indexed_day_count": indexed_day_count,
+        }
+
     def _operator_keyword_index_config(
         self,
         *,
@@ -32958,13 +39869,14 @@ class DashboardService:
         profile_scope_params: list[Any] = [] if all_customer_centers else [self._current_customer_center_id()]
         profile_expr = self._material_profile_search_expr("p")
         with self.db() as conn:
-            ready, prefix_start_day, _day_count = self._material_prefix_window_ready(
+            metrics_plan = self._operator_keyword_metrics_plan(
                 conn,
                 scope_key_value=scope_key_value,
                 start_day=context["start_day"],
                 end_day=context["end_day"],
+                all_customer_centers=all_customer_centers,
             )
-            if not ready:
+            if not metrics_plan:
                 return None
             rows = [
                 dict(row)
@@ -32976,34 +39888,7 @@ class DashboardService:
                     operator_keywords(user_id, keyword, pattern) AS (
                         VALUES {keyword_values_sql}
                     ),
-                    end_rows AS (
-                        SELECT *
-                        FROM material_ranking_day_prefix
-                        WHERE scope_key = ? AND day_key = ?
-                    ),
-                    start_rows AS (
-                        SELECT *
-                        FROM material_ranking_day_prefix
-                        WHERE scope_key = ? AND day_key = ?
-                    ),
-                    metrics AS (
-                        SELECT
-                            e.material_key,
-                            e.snapshot_time,
-                            CAST(e.active_day_count - COALESCE(s.active_day_count, 0) AS INTEGER) AS active_day_count,
-                            CAST(ROUND((e.stat_cost - COALESCE(s.stat_cost, 0))::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
-                            CAST(ROUND((e.pay_amount - COALESCE(s.pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
-                            CAST(ROUND((e.total_pay_amount - COALESCE(s.total_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
-                            CAST(ROUND((e.settled_pay_amount - COALESCE(s.settled_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
-                            CAST(e.order_count - COALESCE(s.order_count, 0) AS INTEGER) AS order_count,
-                            CAST(e.settled_order_count - COALESCE(s.settled_order_count, 0) AS INTEGER) AS settled_order_count,
-                            CAST(e.plan_count - COALESCE(s.plan_count, 0) AS INTEGER) AS plan_count,
-                            CAST(e.advertiser_count - COALESCE(s.advertiser_count, 0) AS INTEGER) AS advertiser_count
-                        FROM end_rows e
-                        LEFT JOIN start_rows s
-                          ON s.scope_key = e.scope_key
-                         AND s.material_key = e.material_key
-                    ),
+                    {metrics_plan["cte_sql"]},
                     matched_material_keywords AS (
                         SELECT DISTINCT ok.user_id, ok.keyword, p.material_key
                         FROM operator_keywords ok
@@ -33097,10 +39982,7 @@ class DashboardService:
                     [
                         *self._flatten_values(operator_rows),
                         *self._flatten_values(keyword_values),
-                        scope_key_value,
-                        context["end_day"],
-                        scope_key_value,
-                        prefix_start_day,
+                        *list(metrics_plan.get("params") or []),
                         *profile_scope_params,
                         *profile_scope_params,
                     ],
@@ -33127,7 +40009,7 @@ class DashboardService:
             row["refund_rate_1h_available"] = False
             row["order_count"] = order_count
             row["settled_order_count"] = settled_order_count
-            row["ranking_source"] = "material_ranking_day_prefix"
+            row["ranking_source"] = str(metrics_plan.get("ranking_source") or "material_ranking_day_prefix")
         return rows
 
     def _operator_material_index_page_payload(
@@ -33229,28 +40111,17 @@ class DashboardService:
                 search_sql = f"AND {profile_expr} LIKE ? ESCAPE '\\'"
                 search_params.append(self._sql_like_pattern(search_text))
             with self.db() as conn:
-                ready, prefix_start_day, indexed_day_count = self._material_prefix_window_ready(
+                metrics_plan = self._operator_keyword_metrics_plan(
                     conn,
                     scope_key_value=scope_key_value,
                     start_day=context["start_day"],
                     end_day=context["end_day"],
+                    all_customer_centers=True,
                 )
-                if not ready:
-                    empty = self._empty_material_performance_page_payload(
-                        range_key=context["range_key"],
-                        range_label=context["range_label"],
-                        start_dt=context["start_dt"],
-                        end_dt=context["end_dt"],
-                        page_size=normalized_page_size,
-                        sort_key=normalized_sort_key,
-                        sort_dir=normalized_sort_dir,
-                        search=search,
-                        tz_name=context["tz_name"],
-                        all_customer_centers=True,
-                        source="material_ranking_operator_keywords_missing_index",
-                    )
-                    empty["ranking_index_missing"] = True
-                    return empty
+                if not metrics_plan:
+                    return None
+                indexed_day_count = int(metrics_plan.get("indexed_day_count", 0) or 0)
+                ranking_index_range_key = str(metrics_plan.get("ranking_index_range_key") or "day_prefix")
                 page_start = (normalized_page - 1) * normalized_page_size
                 rows = [
                     dict(row)
@@ -33259,37 +40130,7 @@ class DashboardService:
                         WITH operator_keywords(user_id, keyword, pattern) AS (
                             VALUES {keyword_values_sql}
                         ),
-                        end_rows AS (
-                            SELECT *
-                            FROM material_ranking_day_prefix
-                            WHERE scope_key = ? AND day_key = ?
-                        ),
-                        start_rows AS (
-                            SELECT *
-                            FROM material_ranking_day_prefix
-                            WHERE scope_key = ? AND day_key = ?
-                        ),
-                        metrics AS (
-                            SELECT
-                                e.material_key,
-                                e.snapshot_time,
-                                CAST(e.active_day_count - COALESCE(s.active_day_count, 0) AS INTEGER) AS active_day_count,
-                                CAST(ROUND((e.stat_cost - COALESCE(s.stat_cost, 0))::numeric, 2) AS DOUBLE PRECISION) AS stat_cost,
-                                CAST(ROUND((e.pay_amount - COALESCE(s.pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS pay_amount,
-                                CAST(ROUND((e.total_pay_amount - COALESCE(s.total_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS total_pay_amount,
-                                CAST(ROUND((e.settled_pay_amount - COALESCE(s.settled_pay_amount, 0))::numeric, 2) AS DOUBLE PRECISION) AS settled_pay_amount,
-                                CAST(e.order_count - COALESCE(s.order_count, 0) AS INTEGER) AS order_count,
-                                CAST(e.settled_order_count - COALESCE(s.settled_order_count, 0) AS INTEGER) AS settled_order_count,
-                                CAST(e.overall_show_count - COALESCE(s.overall_show_count, 0) AS INTEGER) AS overall_show_count,
-                                CAST(e.overall_click_count - COALESCE(s.overall_click_count, 0) AS INTEGER) AS overall_click_count,
-                                CAST(ROUND((e.refund_amount_1h - COALESCE(s.refund_amount_1h, 0))::numeric, 2) AS DOUBLE PRECISION) AS refund_amount_1h,
-                                CAST(e.plan_count - COALESCE(s.plan_count, 0) AS INTEGER) AS plan_count,
-                                CAST(e.advertiser_count - COALESCE(s.advertiser_count, 0) AS INTEGER) AS advertiser_count
-                            FROM end_rows e
-                            LEFT JOIN start_rows s
-                              ON s.scope_key = e.scope_key
-                             AND s.material_key = e.material_key
-                        ),
+                        {metrics_plan["cte_sql"]},
                         matched_materials AS (
                             SELECT p.material_key, COUNT(DISTINCT ok.keyword) AS matched_keyword_count
                             FROM operator_keywords ok
@@ -33363,10 +40204,7 @@ class DashboardService:
                         """,
                         [
                             *self._flatten_values(keyword_values),
-                            scope_key_value,
-                            context["end_day"],
-                            scope_key_value,
-                            prefix_start_day,
+                            *list(metrics_plan.get("params") or []),
                             *search_params,
                             page_start,
                             page_start + normalized_page_size,
@@ -33391,7 +40229,7 @@ class DashboardService:
                         source="material_ranking_operator_keywords",
                     )
                     empty["ranking_index_used"] = True
-                    empty["ranking_index_range_key"] = "day_prefix"
+                    empty["ranking_index_range_key"] = ranking_index_range_key
                     empty["operator_keyword_count"] = len(keyword_values)
                     return empty
                 total_pages = max(1, (total_count + normalized_page_size - 1) // normalized_page_size)
@@ -33565,9 +40403,10 @@ class DashboardService:
                     "summary_text": f"total {total_count} materials",
                 }
                 payload["ranking_index_used"] = True
-                payload["ranking_index_range_key"] = "day_prefix"
-                payload["ranking_index_day_prefix_used"] = True
-                payload["ranking_index_day_rollup_used"] = True
+                payload["ranking_index_range_key"] = ranking_index_range_key
+                payload["ranking_index_day_prefix_used"] = bool(metrics_plan.get("day_prefix_used"))
+                payload["ranking_index_day_rollup_used"] = bool(metrics_plan.get("day_rollup_used"))
+                payload["ranking_index_live_overlay_used"] = bool(metrics_plan.get("live_overlay_used"))
                 payload["ranking_index_day_rollup_days"] = indexed_day_count
                 payload["operator_keyword_count"] = len(keyword_values)
                 payload["operator_keywords"] = sorted(next(iter(configured_keywords.values()), set()))

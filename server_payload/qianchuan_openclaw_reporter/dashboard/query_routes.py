@@ -507,6 +507,11 @@ def register_query_routes(
         start_date: str = "",
         end_date: str = "",
         advertiser_id: int = 0,
+        page: int = 1,
+        page_size: int = 50,
+        search: str = "",
+        sort_key: str = "create_time",
+        sort_dir: str = "desc",
         force: bool = False,
         user: dict[str, Any] = Depends(require_auth),
     ) -> JSONResponse:
@@ -520,8 +525,13 @@ def register_query_routes(
                 advertiser_id,
                 allowed,
                 force,
+                page,
+                page_size,
+                search,
+                sort_key,
+                sort_dir,
+                int(user.get("id") or 0) if str(user.get("role") or "") == role_operator else 0,
             )
-            payload = service._apply_comment_scope(payload, user)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:

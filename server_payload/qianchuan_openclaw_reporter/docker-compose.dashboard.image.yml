@@ -63,7 +63,36 @@ services:
     image: ${QC_DASHBOARD_IMAGE}
     container_name: qianchuan-upload-worker
     restart: unless-stopped
-    command: celery -A dashboard.celery_app.celery_app worker -l info -Q upload --concurrency=${MATERIAL_UPLOAD_JOB_WORKERS:-1}
+    command: celery -A dashboard.celery_app.celery_app worker -l info -Q upload-library,upload --concurrency=${MATERIAL_UPLOAD_LIBRARY_JOB_WORKERS:-1}
+    env_file:
+      - .env.dashboard
+    environment:
+      CONFIG_PATH: /app/config/config.json
+      DATA_DIR: /app/data
+      DATABASE_PATH: /app/data/dashboard.db
+      TOKEN_CACHE_PATH: /app/data/token_cache.json
+      LATEST_TOKEN_PATH: /app/data/qianchuan_latest_token.json
+      DATABASE_URL: postgresql://${POSTGRES_USER:-qianchuan}:${POSTGRES_PASSWORD:-qianchuan}@postgres:5432/${POSTGRES_DB:-qianchuan}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      NIGHTLY_HISTORY_WORKERS: ${NIGHTLY_HISTORY_WORKERS:-6}
+      NIGHTLY_HISTORY_PLAN_MATERIAL_REQUESTS_PER_MINUTE: ${NIGHTLY_HISTORY_PLAN_MATERIAL_REQUESTS_PER_MINUTE:-300}
+      NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SIZE: ${NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SIZE:-0}
+      NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SLEEP_SECONDS: ${NIGHTLY_HISTORY_PLAN_MATERIAL_BATCH_SLEEP_SECONDS:-0}
+      ENABLE_HOT_SYNC_SCHEDULES: ${ENABLE_HOT_SYNC_SCHEDULES:-1}
+      DASHBOARD_RUNTIME_LOCK_SCOPE: upload
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - postgres
+      - redis
+
+  upload-bind-worker:
+    image: ${QC_DASHBOARD_IMAGE}
+    container_name: qianchuan-upload-bind-worker
+    restart: unless-stopped
+    command: celery -A dashboard.celery_app.celery_app worker -l info -Q upload-bind --concurrency=${MATERIAL_UPLOAD_BIND_JOB_WORKERS:-1}
     env_file:
       - .env.dashboard
     environment:

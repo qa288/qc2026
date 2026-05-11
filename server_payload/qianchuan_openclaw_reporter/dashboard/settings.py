@@ -58,6 +58,7 @@ class DashboardSettings:
     retention_days: int
     extended_retention_days: int
     account_plan_retention_days: int
+    material_upload_retention_days: int
     material_history_start_date: str
     dashboard_username: str
     dashboard_password: str
@@ -130,7 +131,8 @@ def load_settings() -> DashboardSettings:
         alert_cooldown_default=_env_int("ALERT_COOLDOWN_DEFAULT", 60),
         retention_days=_env_int("RETENTION_DAYS", 30),
         extended_retention_days=_env_int("EXTENDED_RETENTION_DAYS", 30),
-        account_plan_retention_days=_env_int("ACCOUNT_PLAN_RETENTION_DAYS", 90),
+        account_plan_retention_days=_env_int("ACCOUNT_PLAN_RETENTION_DAYS", 365),
+        material_upload_retention_days=_env_int("MATERIAL_UPLOAD_RETENTION_DAYS", 3),
         material_history_start_date=_env_text("MATERIAL_HISTORY_START_DATE", "2026-01-01"),
         dashboard_username=_env_text("DASHBOARD_USERNAME", "admin"),
         dashboard_password=str(os.environ.get("DASHBOARD_PASSWORD", "")).strip(),
