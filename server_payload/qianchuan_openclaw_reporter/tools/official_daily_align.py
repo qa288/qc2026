@@ -776,11 +776,25 @@ def rebuild_material_daily_from_relations(conn: Any, customer_center_id: str, da
             (customer_center_id, day_key),
         ).fetchall()
     ]
+    non_title_metric_plan_keys = {
+        (
+            int(row.get("advertiser_id", 0) or 0),
+            int(row.get("ad_id", 0) or 0),
+        )
+        for row in relation_rows
+        if str(row.get("material_type") or "").strip().upper() != "TITLE"
+        and service._material_source_row_has_positive_metrics(row)
+    }
     source_rows: list[dict[str, Any]] = []
     for row in relation_rows:
         ad_id = int(row.get("ad_id", 0) or 0)
         advertiser_id = int(row.get("advertiser_id", 0) or 0)
         record = dict(row)
+        if (
+            str(record.get("material_type") or "").strip().upper() == "TITLE"
+            and (advertiser_id, ad_id) in non_title_metric_plan_keys
+        ):
+            service._zero_material_source_row_metrics(record)
         record["plan_ids_json"] = json.dumps([ad_id] if ad_id > 0 else [], ensure_ascii=False)
         record["advertiser_ids_json"] = json.dumps([advertiser_id] if advertiser_id > 0 else [], ensure_ascii=False)
         record["plan_count"] = 1 if ad_id > 0 else 0

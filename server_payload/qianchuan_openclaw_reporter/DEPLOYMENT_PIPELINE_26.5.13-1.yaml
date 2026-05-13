@@ -1,0 +1,7 @@
+version: 26.5.13-1
+date: 2026-05-13
+summary:
+  - align closed-day account and plan data to the EBP account-list interface
+  - add fast selected-plan material repair with Creative API title/video alignment
+  - centralize material rollup aggregation so TITLE spend is retained in relation rows without double-counting default material totals
+  - rebuild and verify the 2026-01-01 through 2026-05-12 material prefix index
