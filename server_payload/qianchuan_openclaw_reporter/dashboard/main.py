@@ -13903,6 +13903,31 @@ class DashboardService:
                 continue
         return False
 
+    @staticmethod
+    def _material_title_suppression_plan_keys(rows: list[dict[str, Any]] | None) -> set[tuple[int, int]]:
+        title_costs: dict[tuple[int, int], float] = {}
+        non_title_costs: dict[tuple[int, int], float] = {}
+        for row in rows or []:
+            material_type = str(row.get("material_type") or "").strip().upper()
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            ad_id = int(row.get("ad_id", 0) or 0)
+            if advertiser_id <= 0 or ad_id <= 0:
+                continue
+            key = (advertiser_id, ad_id)
+            try:
+                stat_cost = max(float(row.get("stat_cost", 0.0) or 0.0), 0.0)
+            except Exception:
+                stat_cost = 0.0
+            if material_type == "TITLE":
+                title_costs[key] = title_costs.get(key, 0.0) + stat_cost
+            elif not material_type.startswith("UNATTRIBUTED"):
+                non_title_costs[key] = non_title_costs.get(key, 0.0) + stat_cost
+        return {
+            key
+            for key, non_title_cost in non_title_costs.items()
+            if non_title_cost > 0 and non_title_cost + 0.0001 >= title_costs.get(key, 0.0)
+        }
+
     @classmethod
     def _plan_material_rows_need_creative_video_fallback(cls, material_rows: list[tuple[Any, ...]]) -> bool:
         title_rows = [row for row in material_rows if cls._material_tuple_type(row) == "TITLE"]
@@ -15208,25 +15233,15 @@ class DashboardService:
         source_rows = [dict(row or {}) for row in rows or []]
         if not source_rows:
             return []
-        non_title_metric_plan_keys: set[tuple[int, int]] = set()
-        for row in source_rows:
-            material_type = str(row.get("material_type") or "").strip().upper()
-            if material_type == "TITLE":
-                continue
-            advertiser_id = int(row.get("advertiser_id", 0) or 0)
-            ad_id = int(row.get("ad_id", 0) or 0)
-            if advertiser_id <= 0 or ad_id <= 0:
-                continue
-            if self._material_source_row_has_positive_metrics(row):
-                non_title_metric_plan_keys.add((advertiser_id, ad_id))
-        if not non_title_metric_plan_keys:
+        title_suppression_plan_keys = self._material_title_suppression_plan_keys(source_rows)
+        if not title_suppression_plan_keys:
             return source_rows
         prepared_rows: list[dict[str, Any]] = []
         for row in source_rows:
             advertiser_id = int(row.get("advertiser_id", 0) or 0)
             ad_id = int(row.get("ad_id", 0) or 0)
             material_type = str(row.get("material_type") or "").strip().upper()
-            if material_type == "TITLE" and (advertiser_id, ad_id) in non_title_metric_plan_keys:
+            if material_type == "TITLE" and (advertiser_id, ad_id) in title_suppression_plan_keys:
                 row = dict(row)
                 self._zero_material_source_row_metrics(row)
                 row["_rollup_metrics_suppressed"] = True
