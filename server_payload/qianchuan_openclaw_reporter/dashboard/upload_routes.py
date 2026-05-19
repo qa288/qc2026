@@ -95,12 +95,20 @@ def register_upload_routes(app: Any, service: Any, require_material_uploader: An
         query_text: str = Form(""),
         target_plan_ids: str = Form("[]"),
         file_count: int = Form(0),
+        file_manifest: str = Form("[]"),
         user: dict[str, Any] = Depends(require_material_uploader),
     ) -> JSONResponse:
         try:
             plan_ids = [int(item) for item in json.loads(str(target_plan_ids or "[]"))]
         except Exception as exc:
             raise HTTPException(status_code=400, detail="target_plan_ids format is invalid") from exc
+        try:
+            manifest_payload = json.loads(str(file_manifest or "[]"))
+            if not isinstance(manifest_payload, list):
+                manifest_payload = []
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="file_manifest format is invalid") from exc
+        _ = manifest_payload
         payload = service.prepare_material_upload_job(user, scope, query_text, plan_ids, int(file_count or 0))
         return api_response(payload, status_code=202)
 

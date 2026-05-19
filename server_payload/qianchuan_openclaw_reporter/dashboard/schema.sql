@@ -646,7 +646,7 @@ CREATE TABLE IF NOT EXISTS alert_events (
     status TEXT NOT NULL DEFAULT 'pending',
     sent_at TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY(rule_id) REFERENCES alert_rules(id)
+    FOREIGN KEY(rule_id) REFERENCES alert_rules(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS notification_settings (

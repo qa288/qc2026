@@ -108,7 +108,16 @@ class BalanceAccess:
         shared_wallet_rows: list[dict[str, Any]] = []
         wallet_relation_rows: list[dict[str, Any]] = []
         for wallet_id, group in shared_wallet_groups.items():
-            member_count = len(group["account_ids"])
+            account_ids_sorted = sorted(group["account_ids"])
+            account_details = [
+                {
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": str(account_map.get(advertiser_id, {}).get("advertiser_name") or advertiser_id),
+                }
+                for advertiser_id in account_ids_sorted
+            ]
+            account_names = [str(item["advertiser_name"]) for item in account_details]
+            member_count = len(account_ids_sorted)
             if member_count < 2:
                 continue
             wallet_name = self.wallet_display_name(wallet_id, member_count)
@@ -121,6 +130,9 @@ class BalanceAccess:
                     "total_balance": round(valid_balance, 2),
                     "valid_balance": round(valid_balance, 2),
                     "member_count": member_count,
+                    "account_ids": account_ids_sorted,
+                    "account_names": account_names,
+                    "account_details": account_details,
                     "stat_cost": 0.0,
                     "pay_amount": 0.0,
                     "order_count": 0,
@@ -128,14 +140,15 @@ class BalanceAccess:
                     "raw_json": self._json_text(
                         {
                             "source": "account_fund_get_v3.0",
-                            "account_ids": sorted(group["account_ids"]),
-                            "account_names": group["account_names"],
+                            "account_ids": account_ids_sorted,
+                            "account_names": account_names,
+                            "account_details": account_details,
                             "rows": group["rows"],
                         }
                     ),
                 }
             )
-            for advertiser_id in sorted(group["account_ids"]):
+            for advertiser_id in account_ids_sorted:
                 advertiser_name = str(account_map.get(advertiser_id, {}).get("advertiser_name") or advertiser_id)
                 wallet_relation_rows.append(
                     {
@@ -210,8 +223,39 @@ class BalanceAccess:
             (snapshot_time, customer_center_id),
         ).fetchall()
         items = [dict(row) for row in rows]
+        relation_rows = conn.execute(
+            """
+            SELECT main_wallet_id, advertiser_id, advertiser_name
+            FROM shared_wallet_account_relations
+            WHERE snapshot_time = ?
+              AND customer_center_id = ?
+            ORDER BY main_wallet_id ASC, advertiser_id ASC
+            """,
+            (snapshot_time, customer_center_id),
+        ).fetchall()
+        account_ids_by_wallet: dict[str, list[int]] = {}
+        account_details_by_wallet: dict[str, list[dict[str, Any]]] = {}
+        for relation in relation_rows:
+            wallet_id = str(relation["main_wallet_id"] or "")
+            advertiser_id = int(relation["advertiser_id"])
+            advertiser_name = str(relation["advertiser_name"] or advertiser_id)
+            account_ids_by_wallet.setdefault(wallet_id, []).append(advertiser_id)
+            account_details_by_wallet.setdefault(wallet_id, []).append(
+                {
+                    "advertiser_id": advertiser_id,
+                    "advertiser_name": advertiser_name,
+                }
+            )
         for item in items:
             item["wallet_balance"] = item.get("valid_balance", 0)
+            wallet_id = str(item.get("main_wallet_id") or "")
+            account_ids = account_ids_by_wallet.get(wallet_id, [])
+            account_details = account_details_by_wallet.get(wallet_id, [])
+            item["account_ids"] = account_ids
+            item["account_names"] = [str(detail["advertiser_name"]) for detail in account_details]
+            item["account_details"] = account_details
+            if not item.get("member_count"):
+                item["member_count"] = len(account_ids)
         return items
 
     def snapshot_wallet_relations(self, conn: Any, snapshot_time: str) -> list[dict[str, Any]]:

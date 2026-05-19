@@ -1,4 +1,4 @@
-# Qianchuan dashboard deployment and data-pipeline contract.
+﻿# Qianchuan dashboard deployment and data-pipeline contract.
 # This file intentionally contains no secrets. Keep tokens, database passwords,
 # app_secret, refresh_token, and customer_center_id values in .env.dashboard only.
 

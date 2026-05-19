@@ -133,6 +133,7 @@ class AlertAccess:
 
     def delete_alert_rule(self, rule_id: int) -> None:
         with self._db() as conn:
+            conn.execute("DELETE FROM alert_events WHERE rule_id = ?", (rule_id,))
             conn.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
 
     def alert_events(self, limit: int = 80) -> list[dict[str, Any]]:

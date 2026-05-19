@@ -5830,6 +5830,14 @@ class DashboardService:
                 "note": next_note,
             }
 
+    @staticmethod
+    def _material_upload_received_file_count_locked(conn: Any, job_id: int) -> int:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM material_upload_job_files WHERE job_id = ?",
+            (int(job_id),),
+        ).fetchone()
+        return int((row or {}).get("count", 0) or 0)
+
     def _create_material_upload_job_locked(
         self,
         conn: Any,
@@ -11330,8 +11338,6 @@ class DashboardService:
 
         grouped_report_keys: dict[str, set[str]] = {}
         for row in source_rows:
-            if bool(row.get("_rollup_metrics_suppressed")):
-                continue
             material_key = str(row.get("material_key") or "").strip()
             advertiser_id = int(row.get("advertiser_id", 0) or 0)
             material_type = str(row.get("material_type") or "").strip().upper()
@@ -13903,31 +13909,6 @@ class DashboardService:
                 continue
         return False
 
-    @staticmethod
-    def _material_title_suppression_plan_keys(rows: list[dict[str, Any]] | None) -> set[tuple[int, int]]:
-        title_costs: dict[tuple[int, int], float] = {}
-        non_title_costs: dict[tuple[int, int], float] = {}
-        for row in rows or []:
-            material_type = str(row.get("material_type") or "").strip().upper()
-            advertiser_id = int(row.get("advertiser_id", 0) or 0)
-            ad_id = int(row.get("ad_id", 0) or 0)
-            if advertiser_id <= 0 or ad_id <= 0:
-                continue
-            key = (advertiser_id, ad_id)
-            try:
-                stat_cost = max(float(row.get("stat_cost", 0.0) or 0.0), 0.0)
-            except Exception:
-                stat_cost = 0.0
-            if material_type == "TITLE":
-                title_costs[key] = title_costs.get(key, 0.0) + stat_cost
-            elif not material_type.startswith("UNATTRIBUTED"):
-                non_title_costs[key] = non_title_costs.get(key, 0.0) + stat_cost
-        return {
-            key
-            for key, non_title_cost in non_title_costs.items()
-            if non_title_cost > 0 and non_title_cost + 0.0001 >= title_costs.get(key, 0.0)
-        }
-
     @classmethod
     def _plan_material_rows_need_creative_video_fallback(cls, material_rows: list[tuple[Any, ...]]) -> bool:
         title_rows = [row for row in material_rows if cls._material_tuple_type(row) == "TITLE"]
@@ -15229,28 +15210,6 @@ class DashboardService:
 
         return groups
 
-    def _material_rollup_source_rows(self, rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-        source_rows = [dict(row or {}) for row in rows or []]
-        if not source_rows:
-            return []
-        title_suppression_plan_keys = self._material_title_suppression_plan_keys(source_rows)
-        if not title_suppression_plan_keys:
-            return source_rows
-        prepared_rows: list[dict[str, Any]] = []
-        for row in source_rows:
-            advertiser_id = int(row.get("advertiser_id", 0) or 0)
-            ad_id = int(row.get("ad_id", 0) or 0)
-            material_type = str(row.get("material_type") or "").strip().upper()
-            if material_type == "TITLE" and (advertiser_id, ad_id) in title_suppression_plan_keys:
-                row = dict(row)
-                self._zero_material_source_row_metrics(row)
-                row["_rollup_metrics_suppressed"] = True
-            prepared_rows.append(row)
-        return prepared_rows
-
-    def _group_material_rollup_source_rows(self, rows: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
-        return self._group_material_rows(self._material_rollup_source_rows(rows))
-
     def _material_rankings_from_groups(self, groups: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         material_rows: list[dict[str, Any]] = []
         for group in groups.values():
@@ -15339,7 +15298,7 @@ class DashboardService:
         return material_rows
 
     def _build_material_rankings(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return self._material_rankings_from_groups(self._group_material_rollup_source_rows(rows))
+        return self._material_rankings_from_groups(self._group_material_rows(rows))
 
     def _build_material_rollup_rows(
         self,
@@ -15349,7 +15308,7 @@ class DashboardService:
         rows: list[dict[str, Any]] | None = None,
         groups: dict[str, dict[str, Any]] | None = None,
     ) -> list[tuple[Any, ...]]:
-        material_groups = groups if groups is not None else self._group_material_rollup_source_rows(rows or [])
+        material_groups = groups if groups is not None else self._group_material_rows(rows or [])
         rollups: list[tuple[Any, ...]] = []
         for group in material_groups.values():
             stat_cost = round(float(group["stat_cost"] or 0.0), 2)
@@ -15624,14 +15583,28 @@ class DashboardService:
             return False
         return DashboardService._sum_integer_metric(rows, field) == target
 
-    @staticmethod
-    def _material_metric_carrier_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _prefer_non_title_material_metrics(
+        self,
+        rows: list[dict[str, Any]],
+        target: dict[str, Any],
+    ) -> None:
+        title_rows = [
+            row
+            for row in rows
+            if str(row.get("material_type") or "").strip().upper() == "TITLE"
+        ]
+        if not title_rows:
+            return
         non_title_rows = [
             row
             for row in rows
             if str(row.get("material_type") or "").strip().upper() != "TITLE"
         ]
-        return non_title_rows or rows
+        if not non_title_rows:
+            return
+        for row in title_rows:
+            if self._material_source_row_has_positive_metrics(row):
+                self._zero_material_source_row_metrics(row)
 
     def _normalize_material_source_rows_to_plan_metrics(
         self,
@@ -15804,7 +15777,12 @@ class DashboardService:
             target = targets.get(key) or targets_by_ad_id.get(key[1])
             if not target:
                 continue
-            carrier_rows = self._material_metric_carrier_rows(plan_rows)
+            self._prefer_non_title_material_metrics(plan_rows, target)
+            carrier_rows = [
+                row
+                for row in plan_rows
+                if str(row.get("material_type") or "").strip().upper() != "TITLE"
+            ] or plan_rows
             for field in ("stat_cost", "pay_amount", "settled_pay_amount"):
                 if not self._money_metric_matches_target(carrier_rows, field, target.get(field)):
                     self._distribute_money_metric_to_target_with_weights(
@@ -16491,47 +16469,38 @@ class DashboardService:
         client: OceanEngineClient | None = None,
         fetch_creative: bool = True,
         dry_run: bool = False,
-        ad_ids: set[int] | list[int] | tuple[int, ...] | None = None,
     ) -> dict[str, Any]:
         normalized_customer_center_id = str(customer_center_id or "").strip()
         normalized_day = str(day_key or "").strip()[:10]
         if not normalized_customer_center_id or not normalized_day:
             return {"ok": False, "reason": "invalid_target", "updated": False}
-        normalized_ad_ids = sorted({int(item or 0) for item in (ad_ids or []) if int(item or 0) > 0})
-        ad_filter_sql = ""
-        ad_filter_params: list[Any] = []
-        if normalized_ad_ids:
-            ad_filter_sql = f" AND ad_id IN ({','.join('?' for _ in normalized_ad_ids)})"
-            ad_filter_params = list(normalized_ad_ids)
 
         errors: list[dict[str, Any]] = []
         with self.db() as conn:
             relation_rows = [
                 dict(row)
                 for row in conn.execute(
-                    f"""
+                    """
                     SELECT *
                     FROM material_relation_daily
                     WHERE customer_center_id = ?
                       AND biz_date = ?
-                      {ad_filter_sql}
                     ORDER BY stat_cost DESC, material_key ASC
                     """,
-                    [normalized_customer_center_id, normalized_day, *ad_filter_params],
+                    (normalized_customer_center_id, normalized_day),
                 ).fetchall()
             ]
             snapshot_rows = [
                 dict(row)
                 for row in conn.execute(
-                    f"""
+                    """
                     SELECT *
                     FROM material_snapshots
                     WHERE customer_center_id = ?
                       AND substr(snapshot_time, 1, 10) = ?
-                      {ad_filter_sql}
                     ORDER BY stat_cost DESC, material_key ASC
                     """,
-                    [normalized_customer_center_id, normalized_day, *ad_filter_params],
+                    (normalized_customer_center_id, normalized_day),
                 ).fetchall()
             ]
             daily_rows_by_key = {
@@ -16565,7 +16534,6 @@ class DashboardService:
                 "reason": "no_material_rows",
                 "customer_center_id": normalized_customer_center_id,
                 "day": normalized_day,
-                "ad_id_filter_count": len(normalized_ad_ids),
                 "relation_row_count": 0,
                 "snapshot_row_count": 0,
             }
@@ -16917,7 +16885,6 @@ class DashboardService:
                 "dry_run": True,
                 "customer_center_id": normalized_customer_center_id,
                 "day": normalized_day,
-                "ad_id_filter_count": len(normalized_ad_ids),
                 "relation_row_count": len(relation_rows),
                 "snapshot_row_count": len(snapshot_rows),
                 "creative_plan_count": len(creative_by_plan),
@@ -17145,7 +17112,6 @@ class DashboardService:
             "dry_run": False,
             "customer_center_id": normalized_customer_center_id,
             "day": normalized_day,
-            "ad_id_filter_count": len(normalized_ad_ids),
             "relation_row_count": len(relation_rows),
             "snapshot_row_count": len(snapshot_rows),
             "updated_relation_rows": len(relation_updates),
@@ -17606,6 +17572,7 @@ class DashboardService:
             """,
             [self._material_relation_insert_values(customer_center_id, row, biz_date=biz_date) for row in material_relation_rows],
         )
+        self._repair_material_daily_relation_counts_from_relations(conn, customer_center_id, biz_date)
 
     def _upsert_material_relation_daily_rows(
         self,
@@ -17657,6 +17624,79 @@ class DashboardService:
             """,
             [self._material_relation_insert_values(customer_center_id, row, biz_date=biz_date) for row in material_relation_rows],
         )
+        self._repair_material_daily_relation_counts_from_relations(conn, customer_center_id, biz_date)
+
+    def _repair_material_daily_relation_counts_from_relations(
+        self,
+        conn: Any,
+        customer_center_id: str,
+        biz_date: str,
+    ) -> int:
+        normalized_customer_center_id = str(customer_center_id or "").strip()
+        day_key = str(biz_date or "").strip()
+        if not normalized_customer_center_id or not day_key:
+            return 0
+        relation_rows = conn.execute(
+            """
+            SELECT material_key, ad_id, advertiser_id
+            FROM material_relation_daily
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+              AND COALESCE(material_type, '') <> 'TITLE'
+              AND COALESCE(material_key, '') <> ''
+            """,
+            (normalized_customer_center_id, day_key),
+        ).fetchall()
+        if not relation_rows:
+            return 0
+        plan_ids_by_key: dict[str, set[int]] = {}
+        advertiser_ids_by_key: dict[str, set[int]] = {}
+        for raw_row in relation_rows:
+            row = dict(raw_row)
+            material_key = str(row.get("material_key") or "").strip()
+            if not material_key:
+                continue
+            ad_id = int(row.get("ad_id", 0) or 0)
+            advertiser_id = int(row.get("advertiser_id", 0) or 0)
+            if ad_id > 0:
+                plan_ids_by_key.setdefault(material_key, set()).add(ad_id)
+            if advertiser_id > 0:
+                advertiser_ids_by_key.setdefault(material_key, set()).add(advertiser_id)
+        params: list[tuple[Any, ...]] = []
+        for material_key in sorted(set(plan_ids_by_key) | set(advertiser_ids_by_key)):
+            plan_ids = sorted(int(item) for item in plan_ids_by_key.get(material_key, set()) if int(item or 0) > 0)
+            advertiser_ids = sorted(
+                int(item) for item in advertiser_ids_by_key.get(material_key, set()) if int(item or 0) > 0
+            )
+            if not plan_ids and not advertiser_ids:
+                continue
+            params.append(
+                (
+                    len(plan_ids),
+                    len(advertiser_ids),
+                    self._json_text(plan_ids),
+                    self._json_text(advertiser_ids),
+                    normalized_customer_center_id,
+                    day_key,
+                    material_key,
+                )
+            )
+        if not params:
+            return 0
+        cursor = conn.executemany(
+            """
+            UPDATE material_daily
+            SET plan_count = ?,
+                advertiser_count = ?,
+                plan_ids_json = ?,
+                advertiser_ids_json = ?
+            WHERE customer_center_id = ?
+              AND biz_date = ?
+              AND material_key = ?
+            """,
+            params,
+        )
+        return int(getattr(cursor, "rowcount", 0) or 0)
 
     def _material_relation_current_exists(self, conn: Any, customer_center_id: str) -> bool:
         row = conn.execute(
@@ -18171,7 +18211,7 @@ class DashboardService:
             latest_snapshot_time,
             str(snapshot_rows[0].get("window_start") or ""),
             str(snapshot_rows[0].get("window_end") or ""),
-            groups=self._group_material_rollup_source_rows(material_source_rows),
+            groups=self._group_material_rows(material_source_rows),
         )
         material_relation_rows = self._build_material_relation_read_rows(
             latest_snapshot_time,
@@ -18528,7 +18568,7 @@ class DashboardService:
             latest_snapshot_time,
             window_start,
             window_end,
-            groups=self._group_material_rollup_source_rows(material_source_rows),
+            groups=self._group_material_rows(material_source_rows),
         )
         material_relation_rows = self._build_material_relation_read_rows(
             latest_snapshot_time,
@@ -18641,7 +18681,7 @@ class DashboardService:
             latest_snapshot_time,
             window_start,
             window_end,
-            groups=self._group_material_rollup_source_rows(material_source_rows),
+            groups=self._group_material_rows(material_source_rows),
         )
         material_relation_rows = self._build_material_relation_read_rows(
             latest_snapshot_time,
@@ -18914,7 +18954,7 @@ class DashboardService:
                     snapshot_time,
                     window_start,
                     window_end,
-                    groups=self._group_material_rollup_source_rows(material_source_rows),
+                    groups=self._group_material_rows(material_source_rows),
                 )
                 self._upsert_material_relation_edges(
                     conn,
@@ -20328,7 +20368,6 @@ class DashboardService:
         return str(fallback or "")
 
     def _aggregate_material_rollups(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        rows = self._material_rollup_source_rows(rows)
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
             material_key = str(row.get("material_key") or "").strip()
@@ -20459,9 +20498,6 @@ class DashboardService:
             rankings.append(
                 {
                     "customer_center_id": str(group.get("customer_center_id") or ""),
-                    "snapshot_time": str(group.get("snapshot_time") or ""),
-                    "window_start": str(group.get("window_start") or ""),
-                    "window_end": str(group.get("window_end") or ""),
                     "material_key": str(group.get("material_key") or ""),
                     "material_id": str(group.get("material_id") or ""),
                     "create_time": str(group.get("create_time") or ""),
@@ -24784,7 +24820,12 @@ class DashboardService:
                             bind_title_material=bind_title_material,
                         )
                         if ok:
-                            mark_target_asset_status(target_id, file_id, "success", bind_success_message)
+                            mark_target_asset_status(
+                                target_id,
+                                file_id,
+                                "success",
+                                bind_success_message,
+                            )
                             continue
                         mark_target_asset_status(target_id, file_id, "failed", failure_message)
                         if failure_category == "material_limit_exceeded":
@@ -33150,7 +33191,7 @@ class DashboardService:
                 snapshot_time,
                 str(payload.get("window_start") or ""),
                 str(payload.get("window_end") or ""),
-                groups=self._group_material_rollup_source_rows(material_source_rows),
+                groups=self._group_material_rows(material_source_rows),
             )
             material_relation_rows = self._build_material_relation_read_rows(
                 snapshot_time,
@@ -33395,7 +33436,7 @@ class DashboardService:
                 use_current=False,
             )
             normalized_material_rows = [self._material_snapshot_tuple_from_source_row(row) for row in material_source_rows]
-            material_groups = self._group_material_rollup_source_rows(material_source_rows)
+            material_groups = self._group_material_rows(material_source_rows)
             material_rollup_rows = self._build_material_rollup_rows(
                 payload["snapshot_time"],
                 payload["window_start"],
@@ -33531,7 +33572,7 @@ class DashboardService:
                 use_current=False,
             )
             payload["material_rows"] = [self._material_snapshot_tuple_from_source_row(row) for row in material_source_rows]
-            material_groups = self._group_material_rollup_source_rows(material_source_rows)
+            material_groups = self._group_material_rows(material_source_rows)
             material_rollup_rows = self._build_material_rollup_rows(
                 payload["snapshot_time"],
                 payload["window_start"],
@@ -33813,11 +33854,10 @@ class DashboardService:
             material_source_rows = self._material_source_rows_from_extended_payload(payload)
         if not material_source_rows:
             return []
-        rollup_source_rows = self._material_rollup_source_rows(material_source_rows)
-        material_groups = self._group_material_rows(rollup_source_rows)
+        material_groups = self._group_material_rows(material_source_rows)
         self._apply_material_report_metrics(
             material_groups,
-            rollup_source_rows,
+            material_source_rows,
             list(payload.get("material_report_rows") or []),
         )
         return self._build_material_rollup_rows(
@@ -42170,6 +42210,39 @@ class DashboardService:
         return False
 
     @staticmethod
+    def _format_alert_account_ids(row: dict[str, Any]) -> str:
+        raw = row.get("account_ids") or row.get("advertiser_ids") or row.get("covered_account_ids")
+        if not raw:
+            try:
+                raw_json = json.loads(str(row.get("raw_json") or "{}"))
+            except Exception:
+                raw_json = {}
+            raw = raw_json.get("account_ids") or raw_json.get("advertiser_ids")
+        if isinstance(raw, str):
+            text = raw.strip()
+            if text.startswith("["):
+                try:
+                    raw = json.loads(text)
+                except Exception:
+                    return text
+            else:
+                return text
+        if isinstance(raw, (list, tuple, set)):
+            seen: set[str] = set()
+            values: list[str] = []
+            for item in raw:
+                if isinstance(item, dict):
+                    value = item.get("advertiser_id") or item.get("account_id") or item.get("id")
+                else:
+                    value = item
+                token = str(value or "").strip()
+                if token and token not in seen:
+                    seen.add(token)
+                    values.append(token)
+            return ", ".join(values)
+        return str(raw or "").strip()
+
+    @staticmethod
     def _build_alert_message(rule: Any, row: dict[str, Any], now_text: str) -> str:
         entity_label = {
             "account": "账户",
@@ -42189,6 +42262,8 @@ class DashboardService:
                 f"备注：{rule['note'] or '请及时补充账户余额。'}"
             )
         if str(rule["entity_type"] or "") == "shared_wallet":
+            account_ids_text = DashboardService._format_alert_account_ids(row)
+            account_ids_line = f"覆盖账户ID：{account_ids_text}\n" if account_ids_text else ""
             return (
                 f"[千川告警] 共享钱包触发阈值\n"
                 f"时间：{now_text}\n"
@@ -42196,6 +42271,7 @@ class DashboardService:
                 f"规则：共享钱包余额 {rule['operator']} {rule['threshold']}\n"
                 f"当前余额：{row.get('wallet_balance', 0)}\n"
                 f"覆盖账户数：{row.get('member_count', 0)}\n"
+                f"{account_ids_line}"
                 f"备注：{rule['note'] or '请及时检查共享钱包余额。'}"
             )
         extra = ""
