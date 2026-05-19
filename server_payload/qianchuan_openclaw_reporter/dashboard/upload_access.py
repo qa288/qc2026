@@ -190,7 +190,7 @@ class UploadAccess:
         if cls._is_material_upload_shop_scope_permission_lost_error_text(raw_message):
             return "当前账户已失去该抖音号下对应店铺的商品全域投放权限，请重新获取权限后重试。"
         if cls._is_material_upload_payload_too_large_error_text(raw_message):
-            return "官方上传网关拒绝该文件大小（HTTP 413），请压缩视频后重新上传。"
+            return "官方上传网关返回 HTTP 413，本次上传被网关拒绝；可手动重试，若多次失败再压缩视频。"
         if target_has_limit_failure and (
             cls._is_material_upload_limit_error_text(raw_message)
             or cls._is_material_upload_video_param_error_text(raw_message)

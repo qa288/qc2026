@@ -4939,10 +4939,7 @@ class DashboardService:
 
     def _material_upload_failure_row_retry_block_message(self, row: dict[str, Any]) -> str:
         def is_terminal_message(message: Any) -> bool:
-            return (
-                self.upload_access._is_material_upload_format_error_text(message)
-                or self._is_material_upload_official_payload_too_large_error(message)
-            )
+            return self.upload_access._is_material_upload_format_error_text(message)
 
         messages = [
             row.get("target_message"),
@@ -4952,11 +4949,6 @@ class DashboardService:
         ]
         if any(self._is_material_upload_plan_deleted_error(message) for message in messages):
             return "计划已删除，不能直接重试。"
-        if any(
-            self._is_material_upload_official_payload_too_large_error(message)
-            for message in [row.get("file_asset_message"), row.get("file_message")]
-        ):
-            return "官方上传网关拒绝该文件大小，请压缩视频后重新上传。"
         if any(
             self.upload_access._is_material_upload_format_error_text(message)
             for message in [row.get("file_asset_message"), row.get("file_message")]
@@ -23581,7 +23573,7 @@ class DashboardService:
                 message = self._append_upload_probe_summary(str(exc), probe_summary)
                 if self._is_material_upload_official_payload_too_large_error(message):
                     message = self._append_upload_probe_summary(
-                        f"官方上传网关拒绝该文件大小（HTTP 413）；请压缩视频后重新上传：{exc}",
+                        f"官方上传网关返回 HTTP 413，本次上传被网关拒绝；可手动重试，若多次失败再压缩视频：{exc}",
                         probe_summary,
                     )
                     fail_file_for_upload_format(file_id, message)
@@ -24067,7 +24059,7 @@ class DashboardService:
                 message = self._append_upload_probe_summary(str(exc), probe_summary)
                 if self._is_material_upload_official_payload_too_large_error(message):
                     message = self._append_upload_probe_summary(
-                        f"官方上传网关拒绝该文件大小（HTTP 413）；请压缩视频后重新上传：{exc}",
+                        f"官方上传网关返回 HTTP 413，本次上传被网关拒绝；可手动重试，若多次失败再压缩视频：{exc}",
                         probe_summary,
                     )
                     fail_file_for_upload_format(file_id, message)
@@ -25296,7 +25288,7 @@ class DashboardService:
                 message = self._append_upload_probe_summary(str(exc), probe_summary)
                 if self._is_material_upload_official_payload_too_large_error(message):
                     message = self._append_upload_probe_summary(
-                        f"官方上传网关拒绝该文件大小（HTTP 413）；请压缩视频后重新上传：{exc}",
+                        f"官方上传网关返回 HTTP 413，本次上传被网关拒绝；可手动重试，若多次失败再压缩视频：{exc}",
                         probe_summary,
                     )
                     fail_file_for_upload_format(file_id, message)
